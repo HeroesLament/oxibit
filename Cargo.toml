@@ -1,0 +1,27 @@
+[workspace]
+resolver = "3"
+members = ["crates/oxibit-bitstream", "crates/oxibit-fasm", "crates/oxibit-guard", "crates/oxibit-zynq7", "crates/oxibit"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+
+[workspace.dependencies]
+oxibit-bitstream = { path = "crates/oxibit-bitstream" }
+oxibit-fasm = { path = "crates/oxibit-fasm" }
+oxibit-guard = { path = "crates/oxibit-guard" }
+oxibit-zynq7 = { path = "crates/oxibit-zynq7" }
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+clap = { version = "4", features = ["derive"] }
+flate2 = "1"
+
+[profile.release]
+# A panic ends the process. For `oxibit port` the BEAM's contract is the exit
+# status; unwinding with a live /dev/mem mapping has nothing to offer.
+panic = "abort"
+strip = true
