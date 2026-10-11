@@ -2,6 +2,8 @@
 //! a Zynq-7000 target, loading and guarded PL access.
 
 mod build;
+mod pnr_cmd;
+mod report;
 mod route_cmd;
 mod input;
 #[cfg(target_os = "linux")]
@@ -24,6 +26,62 @@ use oxibit_bitstream::{Bitstream, Report, analyze, part};
 struct Cli {
     #[command(subcommand)]
     command: Command,
+    #[command(flatten)]
+    report: report::ReportArgs,
+}
+
+#[derive(Subcommand)]
+enum PnrCmd {
+    /// Route a placed and routed design again on its own placement: signal
+    /// and constant nets are re-routed, clock nets and tie-offs kept. Exit
+    /// 0 clean, 1 not clean, 3 environment, 130 cancelled.
+    Route {
+        /// The design's FASM (e.g. nextpnr's top.fasm).
+        input: PathBuf,
+        /// Where to write the re-routed FASM.
+        output: PathBuf,
+        #[arg(long)]
+        db_root: PathBuf,
+        #[arg(long)]
+        part: String,
+        /// Router iteration limit.
+        #[arg(long, default_value_t = 200)]
+        max_iters: u32,
+        /// Print the final report (the `done` event) as JSON on stdout.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Re-target a routed design to new DSP48E1 settings without placing or
+    /// routing: rewrite the template's DSP tiles from a packed netlist.
+    /// Exit 0 written, 1 refused (template self-check or structure check
+    /// failed), 3 environment.
+    DspPatch {
+        /// The template's routed FASM.
+        #[arg(long)]
+        template: PathBuf,
+        /// The template's routed netlist (nextpnr `--write`): placement, and
+        /// the parameters the self-check regenerates the template from.
+        #[arg(long)]
+        template_netlist: PathBuf,
+        /// The new design's packed netlist (`nextpnr --pack-only --write`).
+        #[arg(long)]
+        packed: PathBuf,
+        /// Synthesized netlists (yosys JSON) of the template and the new
+        /// design, checked to differ only in DSP parameters and constants on
+        /// DSP pins. Strongly recommended.
+        #[arg(long, num_args = 2, value_names = ["TEMPLATE_SYNTH", "NEW_SYNTH"])]
+        structure: Option<Vec<PathBuf>>,
+        /// Where to write the new FASM.
+        #[arg(short, long)]
+        output: PathBuf,
+        #[arg(long)]
+        db_root: PathBuf,
+        #[arg(long)]
+        part: String,
+        /// Print the final report (the `done` event) as JSON on stdout.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -119,6 +177,11 @@ enum Command {
         /// TILE/WIRE root of the base clock net (BUFG output); enables FF relays.
         #[arg(long)]
         clock: Option<String>,
+    },
+    /// Place and route on oxibit's routing graph.
+    Pnr {
+        #[command(subcommand)]
+        cmd: PnrCmd,
     },
     /// Erlang port ({:packet, 4}): FASM in, .bit out; the database is read once.
     BuildPort {
@@ -249,14 +312,38 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
         Command::Inspect { files, packets, json } => inspect(&files, packets, json),
-        Command::Verify { files, part, json } => verify(&files, part.as_deref(), json),
+        Command::Verify { files, part, json } => verify(&files, part.as_deref(), json, &cli.report),
         Command::Convert { input, output, to, part, design } => {
             convert(&input, &output, to, part, design)
         }
         Command::Fasm2bit { input, output, db_root, part, frames } => {
-            build::fasm2bit(&input, &output, &db_root, &part, frames.as_deref())
+            build::fasm2bit(&input, &output, &db_root, &part, frames.as_deref(), &cli.report)
         }
         Command::BuildPort { db_root, part } => return build::serve(&db_root, &part),
+        Command::Pnr { cmd: PnrCmd::DspPatch { template, template_netlist, packed, structure, output, db_root, part, json } } => {
+            return pnr_cmd::dsp_patch(pnr_cmd::DspPatchArgs {
+                template: &template,
+                template_netlist: &template_netlist,
+                packed: &packed,
+                structure: structure.as_deref(),
+                output: &output,
+                db_root: &db_root,
+                part: &part,
+                report: &cli.report,
+                json,
+            });
+        }
+        Command::Pnr { cmd: PnrCmd::Route { input, output, db_root, part, max_iters, json } } => {
+            return pnr_cmd::route(pnr_cmd::RouteArgs {
+                input: &input,
+                output: &output,
+                db_root: &db_root,
+                part: &part,
+                max_iters,
+                report: &cli.report,
+                json,
+            });
+        }
         Command::RoutePort { db_root, part, window, base, strip, clock } => {
             return route_cmd::serve(route_cmd::PortArgs {
                 db_root: &db_root,
@@ -267,7 +354,7 @@ fn main() -> ExitCode {
                 clock: clock.as_deref(),
             });
         }
-        Command::Route { db_root, part, window, from, to, via, avoid, check } => route_cmd::run(route_cmd::Args {
+        Command::Route { db_root, part, window, from, to, via, avoid, check } => with_events("route", &cli.report, || route_cmd::run(route_cmd::Args {
             db_root: &db_root,
             part: &part,
             window: window.as_deref(),
@@ -276,7 +363,7 @@ fn main() -> ExitCode {
             via: &via,
             avoid: &avoid,
             check: &check,
-        }),
+        })),
         #[cfg(target_os = "linux")]
         Command::Status { aperture: a, json } => device::status(a.base, a.len, json),
         #[cfg(target_os = "linux")]
@@ -328,7 +415,31 @@ fn inspect(files: &[PathBuf], packets: bool, json: bool) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn verify(files: &[PathBuf], want: Option<&str>, json: bool) -> Result<ExitCode> {
+/// Run `f` between a `start` and a `done` event (for commands with no
+/// phases of their own). Their stderr text is unchanged.
+fn with_events(cmd: &str, rep: &report::ReportArgs, f: impl FnOnce() -> Result<ExitCode>) -> Result<ExitCode> {
+    use oxibit_report::{Event, Progress};
+    let r = rep.reporter(false)?;
+    r.emit(Event::Start { cmd: cmd.into(), version: env!("CARGO_PKG_VERSION").into(), args: std::env::args().skip(1).collect() });
+    r.begin(cmd);
+    let res = f();
+    r.end(cmd);
+    let (ok, exit, stats) = match &res {
+        Ok(c) if *c == ExitCode::SUCCESS => (true, 0, serde_json::json!({})),
+        Ok(_) => (false, 1, serde_json::json!({})),
+        Err(e) => (false, 2, serde_json::json!({"error": e})),
+    };
+    r.emit(Event::Done { ok, exit, cancelled: false, phases: r.phases(), peak_rss_mb: None, stats, check: serde_json::json!({}), outputs: vec![] });
+    r.finish();
+    res
+}
+
+/// Exit status: 0 every bitstream passes, 1 any fails, 2 usage. Each
+/// result is also a `progress` event (`--events`).
+fn verify(files: &[PathBuf], want: Option<&str>, json: bool, rep: &report::ReportArgs) -> Result<ExitCode> {
+    use oxibit_report::{Event, Progress};
+    let r = rep.reporter(false)?;
+    r.emit(Event::Start { cmd: "verify".into(), version: env!("CARGO_PKG_VERSION").into(), args: std::env::args().skip(1).collect() });
     let want_die = match want {
         Some(p) => Some(part::by_part(p).ok_or_else(|| format!("unknown part {p:?}"))?),
         None => None,
@@ -370,6 +481,7 @@ fn verify(files: &[PathBuf], want: Option<&str>, json: bool) -> Result<ExitCode>
 
     let failed = results.iter().filter(|(_, _, p)| !p.is_empty()).count();
     for (label, die, problems) in &results {
+        r.emit(Event::progress("verify", serde_json::json!({"file": label, "ok": problems.is_empty(), "die": die, "problems": problems})));
         if json {
             let v = serde_json::json!({
                 "file": label,
@@ -388,10 +500,22 @@ fn verify(files: &[PathBuf], want: Option<&str>, json: bool) -> Result<ExitCode>
         }
     }
 
-    if !json {
+    if !json && rep.text() {
         eprintln!("{} checked, {} failed", results.len(), failed);
     }
-    Ok(if failed == 0 { ExitCode::SUCCESS } else { ExitCode::from(1) })
+    let exit = if failed == 0 { 0 } else { 1 };
+    r.emit(Event::Done {
+        ok: failed == 0,
+        exit,
+        cancelled: false,
+        phases: r.phases(),
+        peak_rss_mb: None,
+        stats: serde_json::json!({"checked": results.len(), "failed": failed}),
+        check: serde_json::json!({}),
+        outputs: vec![],
+    });
+    r.finish();
+    Ok(ExitCode::from(exit as u8))
 }
 
 fn convert(

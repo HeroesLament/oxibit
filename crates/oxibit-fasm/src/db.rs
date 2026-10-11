@@ -57,6 +57,9 @@ pub struct TileSegbits {
     pub ppips: HashSet<String>,
     /// The `always` subset of `ppips`: connections that need no bits.
     pub ppips_always: HashSet<String>,
+    /// The `default` subset of `ppips`: what a mux's output carries when
+    /// none of its pips is set (an interconnect input mux reads VCC).
+    pub ppips_default: HashSet<String>,
 }
 
 pub struct Database {
@@ -186,8 +189,14 @@ fn read_all_segbits(root: &Path) -> R<HashMap<String, TileSegbits>> {
             for l in read(&pp)?.lines() {
                 if let Some((feature, kind)) = l.trim().split_once(' ') {
                     ts.ppips.insert(feature.to_string());
-                    if kind == "always" {
-                        ts.ppips_always.insert(feature.to_string());
+                    match kind {
+                        "always" => {
+                            ts.ppips_always.insert(feature.to_string());
+                        }
+                        "default" => {
+                            ts.ppips_default.insert(feature.to_string());
+                        }
+                        _ => {}
                     }
                 }
             }

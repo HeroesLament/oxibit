@@ -26,7 +26,14 @@ oxibit inspect FILE...            # container, header, die, frames, commands, CR
 oxibit inspect --packets FILE     # plus every packet (NOP runs collapsed)
 oxibit verify --part xc7z020 FILE...   # exit 1 if anything is wrong or it targets another die
 oxibit convert IN OUT [--to swapped-bin|raw-bin|bit] [--part P] [--design D]
+oxibit fasm2bit --db-root DB --part P IN.fasm OUT.bit   # FASM -> .bit, prjxray's fasm2frames + xc7frames2bit
+oxibit pnr route --db-root DB --part P IN.fasm OUT.fasm # route a placed design again with oxibit's router
 ```
+
+Global: `--progress auto|human|plain|json|none`, `-q`, `--events FILE`
+(JSON Lines). Long commands answer SIGUSR1/SIGINFO with a status line and
+stop cleanly on SIGINT; under systemd they report through `NOTIFY_SOCKET`.
+Schema and exit codes: [docs/events.md](docs/events.md).
 
 On a Zynq-7000 target (build with `scripts/build-armv7.sh`, run as root):
 

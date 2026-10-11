@@ -61,6 +61,10 @@ pub enum Enable {
     Feature(String),
     /// Always connected: an `always` pseudo-pip or a hard wire.
     Fixed,
+    /// A `default` pseudo-pip: the mux's output when none of its pips is
+    /// set. It conducts only while no other pip into `dst` is configured.
+    /// Only in graphs built with `GraphOpts::defaults`.
+    Default,
     /// A LUT route-through or output mux in a CLB site, made by these
     /// tile-relative FASM lines (`SITE.ALUT.INIT[63:0] = ...`,
     /// `SITE.AOUTMUX.O6`).
@@ -76,6 +80,8 @@ struct TypePip {
     /// For a relay (LUT route-through, output mux): its site and the
     /// site-relative lines that make it.
     relay: Option<(String, Vec<String>)>,
+    /// A `default` pseudo-pip (see `Enable::Default`).
+    default: bool,
 }
 
 struct TypeData {
@@ -104,7 +110,7 @@ impl Pip {
     pub fn fasm(&self) -> Option<String> {
         match &self.enable {
             Enable::Feature(_) => Some(format!("{}.{}.{}", self.tile, self.dst, self.src)),
-            Enable::Fixed | Enable::Relay(_) => None,
+            Enable::Fixed | Enable::Default | Enable::Relay(_) => None,
         }
     }
 
@@ -112,7 +118,7 @@ impl Pip {
     pub fn fasm_lines(&self) -> Vec<String> {
         match &self.enable {
             Enable::Feature(_) => vec![format!("{}.{}.{}", self.tile, self.dst, self.src)],
-            Enable::Fixed => vec![],
+            Enable::Fixed | Enable::Default => vec![],
             Enable::Relay(lines) => lines.iter().map(|l| format!("{}.{l}", self.tile)).collect(),
         }
     }
@@ -135,6 +141,7 @@ pub struct Graph {
     rev_fixed: OnceLock<HashMap<u32, Vec<u32>>>,
     /// sink node -> bitset of nodes that can reach it.
     reach: Mutex<HashMap<u32, Arc<Vec<u64>>>>,
+    opts: GraphOpts,
 }
 
 /// A dense node set (one bit per node): what the packer tests on every
@@ -183,8 +190,21 @@ struct Scratch {
     queue: VecDeque<u32>,
 }
 
+/// What `Graph::build_with` puts in the graph beyond the defaults.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GraphOpts {
+    /// Add `default` pseudo-pips as edges (`Enable::Default`): the constant
+    /// an unset interconnect input mux reads. A design router needs them for
+    /// tie-offs; test-chain routing must not use them.
+    pub defaults: bool,
+}
+
 impl Graph {
     pub fn build(db: &Database, window: Option<Window>) -> R<Self> {
+        Self::build_with(db, window, GraphOpts::default())
+    }
+
+    pub fn build_with(db: &Database, window: Option<Window>, opts: GraphOpts) -> R<Self> {
         let grid: Value = read_json(&db.root.join(&db.fabric).join("tilegrid.json"))?;
         let tileconn: Value = read_json(&db.root.join(&db.fabric).join("tileconn.json"))?;
         let grid = grid.as_object().ok_or("tilegrid is not an object")?;
@@ -252,6 +272,9 @@ impl Graph {
         let mut edges: Vec<Vec<(u32, u32, u32)>> = vec![Vec::new(); nodes];
         for (ti, (_, ty, _, _)) in tiles.iter().enumerate() {
             for (pi, p) in types[ty].pips.iter().enumerate() {
+                if p.default && !opts.defaults {
+                    continue;
+                }
                 let s = node_of[(wire_base[ti] + p.src) as usize];
                 let d = node_of[(wire_base[ti] + p.dst) as usize];
                 if s != d {
@@ -276,6 +299,7 @@ impl Graph {
             rev: OnceLock::new(),
             rev_fixed: OnceLock::new(),
             reach: Mutex::new(HashMap::new()),
+            opts,
             tiles: tiles.into_iter().map(|(n, t, _, _)| (n, t)).collect(),
             tile_index,
             wire_base,
@@ -318,6 +342,7 @@ impl Graph {
             enable: match (&p.feature, &p.relay) {
                 (Some(f), _) => Enable::Feature(f.clone()),
                 (None, Some((_, lines))) => Enable::Relay(lines.clone()),
+                (None, None) if p.default => Enable::Default,
                 (None, None) => Enable::Fixed,
             },
         }
@@ -409,6 +434,87 @@ impl Graph {
         out.extend(leg);
         Ok(out)
     }
+
+    /// The graph's view of one pip line `TILE.DST.SRC`.
+    pub fn lookup_pip(&self, line: &str) -> PipLookup {
+        let parts: Vec<&str> = line.split('.').collect();
+        let [tile, dst, src] = parts[..] else { return PipLookup::Malformed };
+        let Some(&ti) = self.tile_index.get(tile) else { return PipLookup::NoTile };
+        let td = &self.types[&self.tiles[ti as usize].1];
+        let (Some(&ws), Some(&wd)) = (td.index.get(src), td.index.get(dst)) else { return PipLookup::NoWire };
+        let usable = |p: &TypePip| !p.default || self.opts.defaults;
+        let Some(pi) = td.pips.iter().position(|p| p.src == ws && p.dst == wd && usable(p)) else { return PipLookup::NoPip };
+        let a = self.node_of[(self.wire_base[ti as usize] + ws) as usize];
+        let b = self.node_of[(self.wire_base[ti as usize] + wd) as usize];
+        if a == b {
+            return PipLookup::SameNode(a);
+        }
+        let pip = self.pip(ti, pi as u32);
+        PipLookup::Edge { src: a, dst: b, tile: ti, pi: pi as u32, pip }
+    }
+
+    /// Out-edges of a node: `(dst node, tile, type pip index)`.
+    pub fn out_edges(&self, n: u32) -> &[(u32, u32, u32)] {
+        &self.edges[n as usize]
+    }
+
+    /// How an edge conducts, without building its names.
+    pub fn edge_kind(&self, tile: u32, pi: u32) -> EdgeKind {
+        let p = &self.types[&self.tiles[tile as usize].1].pips[pi as usize];
+        match (&p.feature, &p.relay) {
+            (Some(_), _) => EdgeKind::Feature,
+            (None, Some(_)) => EdgeKind::Relay,
+            (None, None) if p.default => EdgeKind::Default,
+            (None, None) => EdgeKind::Fixed,
+        }
+    }
+
+    /// The pip behind an edge.
+    pub fn edge_pip(&self, tile: u32, pi: u32) -> Pip {
+        self.pip(tile, pi)
+    }
+
+    /// Grid coordinates of one of the node's tiles.
+    pub fn node_xy(&self, n: u32) -> (i16, i16) {
+        self.node_xy[n as usize]
+    }
+
+    /// `TILE/WIRE` names of a node's first wire (for reports).
+    pub fn node_name(&self, n: u32) -> String {
+        // Linear scan; reports only.
+        for (ti, base) in self.wire_base.iter().enumerate() {
+            let td = &self.types[&self.tiles[ti].1];
+            for wi in 0..td.wires.len() as u32 {
+                if self.node_of[(base + wi) as usize] == n {
+                    return format!("{}/{}", self.tiles[ti].0, td.wires[wi as usize]);
+                }
+            }
+        }
+        format!("node{n}")
+    }
+}
+
+/// How an edge conducts (`Enable` without the names).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EdgeKind {
+    Feature,
+    Fixed,
+    Relay,
+    Default,
+}
+
+/// What `Graph::lookup_pip` found for a pip line.
+#[derive(Debug, Clone)]
+pub enum PipLookup {
+    /// A usable edge between two distinct nodes.
+    Edge { src: u32, dst: u32, tile: u32, pi: u32, pip: Pip },
+    /// Both wires are the same node, so the pip is not an edge.
+    SameNode(u32),
+    /// The tile type has both wires but no such pip (or it is not usable).
+    NoPip,
+    NoWire,
+    NoTile,
+    Malformed,
 }
 
 
@@ -576,7 +682,7 @@ impl Graph {
 
     fn is_fixed(&self, tile: u32, pi: u32) -> bool {
         let p = &self.types[&self.tiles[tile as usize].1].pips[pi as usize];
-        p.feature.is_none() && p.relay.is_none()
+        p.feature.is_none() && p.relay.is_none() && !p.default
     }
 
     /// A relay edge the design has configured: every line that makes it
@@ -1532,20 +1638,23 @@ fn load_type(db: &Database, ty: &str) -> R<TypeData> {
     let has_bits = |f: &str| seg.is_some_and(|s| s.by_block.iter().any(|(_, m)| m.contains_key(f)));
     let always = |f: &str| seg.is_some_and(|s| s.ppips_always.contains(f));
     let pseudo_other = |f: &str| seg.is_some_and(|s| s.ppips.contains(f) && !s.ppips_always.contains(f));
+    let default = |f: &str| seg.is_some_and(|s| s.ppips_default.contains(f));
 
     let mut add = |src: &str, dst: &str, hard: bool, index: &HashMap<String, u32>| {
         let (Some(&s), Some(&d)) = (index.get(src), index.get(dst)) else { return };
         let key = format!("{ty}.{dst}.{src}");
-        let (feature, relay) = if has_bits(&key) {
-            (Some(key), None)
+        let (feature, relay, is_default) = if has_bits(&key) {
+            (Some(key), None, false)
         } else if always(&key) || (hard && !pseudo_other(&key)) {
-            (None, None)
+            (None, None, false)
         } else if let Some(r) = relay(src, dst) {
-            (None, Some(r))
+            (None, Some(r), false)
+        } else if default(&key) {
+            (None, None, true) // kept, but an edge only with GraphOpts::defaults
         } else {
-            return; // hint/default pseudo-pip, or a buffered pip with no known bits
+            return; // hint pseudo-pip, or a buffered pip with no known bits
         };
-        pips.push(TypePip { src: s, dst: d, feature, relay });
+        pips.push(TypePip { src: s, dst: d, feature, relay, default: is_default });
     };
 
     if let Some(o) = v["pips"].as_object() {
@@ -1571,7 +1680,7 @@ fn load_type(db: &Database, ty: &str) -> R<TypeData> {
             let q = pin_of.iter().find(|(_, (s2, p2))| s2 == site && p2 == &format!("{l}Q")).map(|(w, _)| w.clone());
             if let (Some(&src), Some(dst)) = (index.get(w), q.and_then(|q| index.get(&q).copied())) {
                 let lines = vec![format!("{site}.{l}FFMUX.{l}X"), format!("{site}.{l}FF.ZINI"), format!("{site}.{l}FF.ZRST"), format!("{site}.FFSYNC")];
-                pips.push(TypePip { src, dst, feature: None, relay: Some((site.clone(), lines)) });
+                pips.push(TypePip { src, dst, feature: None, relay: Some((site.clone(), lines)), default: false });
             }
         }
     }
@@ -1615,7 +1724,7 @@ fn load_type(db: &Database, ty: &str) -> R<TypeData> {
                 }
             }
             if let (Some(i), Some(o)) = (input.and_then(|w| index.get(&w).copied()), output.and_then(|w| index.get(&w).copied())) {
-                pips.push(TypePip { src: i, dst: o, feature: None, relay: Some((name.clone(), lines)) });
+                pips.push(TypePip { src: i, dst: o, feature: None, relay: Some((name.clone(), lines)), default: false });
             }
         }
     }
