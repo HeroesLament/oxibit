@@ -1,10 +1,16 @@
 # oxibit
 
-Tooling for Xilinx configuration bitstreams, from the file on the host to the
-programmable logic on the device.
+An open-source FPGA EDA toolkit in Rust: synthesis output to placed and
+routed design, design to bitstream, bitstream to the programmable logic on
+the device.
 
-- **Host:** read, check, identify and convert bitstreams, including the PL
-  partition of a Zynq-7000 `BOOT.BIN`.
+Xilinx 7-series is the first target, checked on xc7z020 silicon:
+
+- **Bitstreams:** read, check, identify and convert them, including the PL
+  partition of a Zynq-7000 `BOOT.BIN`; assemble FASM into a bitstream
+  against a prjxray database.
+- **Place and route:** route a placed design on oxibit's routing graph, and
+  retarget DSP48E1 tiles of a routed design from a new netlist.
 - **Zynq-7000 target:** load the PL from Linux userspace, and access it,
   without ever letting the CPU touch an unconfigured fabric (a read there
   hangs the core). See [docs/zynq7.md](docs/zynq7.md).
@@ -14,6 +20,9 @@ programmable logic on the device.
 | Crate | What |
 |---|---|
 | `oxibit-bitstream` | Containers (`.bit`, raw `.bin`, byte-swapped `.bin`), configuration packets, CRC, IDCODE to die, Zynq-7000 boot images. No I/O, no hardware. |
+| `oxibit-fasm` | FASM to 7-series configuration frames against a prjxray database, and the routing graph built from it. |
+| `oxibit-pnr` | Place and route on the `oxibit-fasm` routing graph: router, re-route of a placed design, DSP48E1 retargeting (`dsp-patch`). |
+| `oxibit-report` | Progress and result events: one schema for terminals, JSON Lines, ports and systemd. |
 | `oxibit-guard` | The safety model, chip-independent: one owner (lock), bitstream and IDCODE checked before hardware, access only while hardware says ready, loaded-bitstream marker. `Backend` and `Aperture` traits. |
 | `oxibit-zynq7` | Zynq-7000 backend: DevC/PCAP load from a reserved uncached buffer, PS-PL boundary, M_AXI_GP aperture, FCLK decode. Linux only. |
 | `oxibit` | The CLI and the Erlang port. |
@@ -28,6 +37,8 @@ oxibit verify --part xc7z020 FILE...   # exit 1 if anything is wrong or it targe
 oxibit convert IN OUT [--to swapped-bin|raw-bin|bit] [--part P] [--design D]
 oxibit fasm2bit --db-root DB --part P IN.fasm OUT.bit   # FASM -> .bit, prjxray's fasm2frames + xc7frames2bit
 oxibit pnr route --db-root DB --part P IN.fasm OUT.fasm # route a placed design again with oxibit's router
+oxibit pnr dsp-patch --template T.fasm --template-netlist T.json --packed NEW.json \
+    --db-root DB --part P -o OUT.fasm   # new DSP48E1 settings on the template's placement and routing
 ```
 
 Global: `--progress auto|human|plain|json|none`, `-q`, `--events FILE`
@@ -116,6 +127,10 @@ not exercise the CRC path. The Vivado bitstream does.
   everything else measured, see `docs/zynq7.md`.
 
 ## Roadmap
+
+The long-term goal is the whole flow in oxibit: synthesis, placement,
+routing, timing and bitstream, for every family there is silicon to test on.
+Nearer steps:
 
 1. **nervezynq on oxibit:** `Nervezynq.Fabric` opens `oxibit port` instead of
    `fabric_port`, `Nervezynq.PL` becomes LOAD/STATUS/CLEAR, and
