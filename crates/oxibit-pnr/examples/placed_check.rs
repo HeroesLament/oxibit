@@ -5,7 +5,19 @@
 //! the design back with oxibit's routing in place of nextpnr's.
 //!
 //! cargo run --release -p oxibit-pnr --example placed_check -- \
-//!     DB_ROOT PART META_DIR DESIGN.JSON DESIGN.FASM OUT.FASM
+//!     DB_ROOT PART META_DIR DESIGN.JSON DESIGN.FASM OUT.FASM [OUT.JSON]
+//!
+//! OXIBIT_PERM=a5 (or a6) lets LUT inputs move between pins (the comparison
+//! then shows LUT pins as differences). A placed-only JSON needs a5: the
+//! placer leaves signals on A6 of fractured LUTs, which routing moves off.
+//!
+//! With OUT.JSON, constant nets keep nextpnr's routing too, and the design
+//! JSON is written back with each imported net's `ROUTING` attribute set to
+//! oxibit's routing (pips at strength 3, placer: router2 treats those wires
+//! as reserved for the net and extends them, where any stronger binding
+//! makes them unavailable even to their own net): nextpnr can load it with
+//! `--no-place`, finish the routing inside the sites, analyse timing and
+//! write the FASM.
 //!
 //! Pins stay where nextpnr put them (`Perm::None`), so the LUT INITs in the
 //! FASM stay valid. Clock and default nets keep nextpnr's routing; constant
@@ -43,8 +55,10 @@ fn main() -> ExitCode {
 
 fn run() -> Result<bool, String> {
     let args: Vec<String> = std::env::args().collect();
-    let [_, db_root, part, meta_dir, design, fasm_path, out_path] = &args[..] else {
-        return Err("usage: placed_check DB_ROOT PART META_DIR DESIGN.JSON DESIGN.FASM OUT.FASM".into());
+    let (db_root, part, meta_dir, design, fasm_path, out_path, out_json) = match &args[..] {
+        [_, a, b, c, d, e, f] => (a, b, c, d, e, f, None),
+        [_, a, b, c, d, e, f, j] => (a, b, c, d, e, f, Some(j)),
+        _ => return Err("usage: placed_check DB_ROOT PART META_DIR DESIGN.JSON DESIGN.FASM OUT.FASM [OUT.JSON]".into()),
     };
     let line = |v: serde_json::Value| {
         let mut o = std::io::stdout().lock();
@@ -59,7 +73,12 @@ fn run() -> Result<bool, String> {
     let text = std::fs::read_to_string(design).map_err(|e| format!("{design}: {e}"))?;
     let placed_v: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("{design}: {e}"))?;
     let mut meta = Meta::open(Path::new(meta_dir));
-    let imp = placed::import(&g, &placed::site_index(&db), &mut meta, &placed_v, Perm::None)?;
+    let perm = match std::env::var("OXIBIT_PERM").as_deref() {
+        Ok("a5") => Perm::A5,
+        Ok("a6") => Perm::A6,
+        _ => Perm::None,
+    };
+    let imp = placed::import(&g, &placed::site_index(&db), &mut meta, &placed_v, perm)?;
     let (fnets, fun) = nets::from_fasm(&g, &fasm);
     line(json!({
         "import": {"nets": imp.nets.len(), "fixed_sinks": imp.fixed_sinks, "internal_sinks": imp.internal_sinks,
@@ -190,13 +209,20 @@ fn run() -> Result<bool, String> {
     // kept as routed (the router reserves their nodes) and its constant nets
     // routed again by oxibit, as `pnr route` does.
     let mut all = imp.nets.clone();
-    all.extend(fnets.iter().filter(|n| n.class != NetClass::Signal).cloned());
+    for n in fnets.iter().filter(|n| n.class != NetClass::Signal) {
+        let mut k = n.clone();
+        // Exporting to nextpnr: its constant routing stays (kept nets).
+        if out_json.is_some() && k.class == NetClass::Constant {
+            k.class = NetClass::Clock;
+        }
+        all.push(k);
+    }
     let mut router = Router::new(&g, Opts::default());
     let (routes, stats) = router.run_with(&all, &r);
     line(json!({"route": stats.to_json(), "nets": all.len()}));
 
     // Write: drop nextpnr's signal and constant pips, add oxibit's.
-    let rerouted = |c: NetClass| matches!(c, NetClass::Signal | NetClass::Constant);
+    let rerouted = |c: NetClass| c == NetClass::Signal || (c == NetClass::Constant && out_json.is_none());
     let drop: HashSet<String> =
         fnets.iter().filter(|n| rerouted(n.class)).flat_map(|n| n.edges.iter().map(|e| g.edge_pip(e.tile, e.pi).name())).collect();
     let mut out = String::with_capacity(fasm.len());
@@ -230,6 +256,12 @@ fn run() -> Result<bool, String> {
     // nets).
     let after = reroute::check(&g, &all, &out);
     line(json!({"write": {"pips_removed": removed, "lines_added": added, "out": out_path}, "check": after.to_json()}));
+    if let Some(out_json) = out_json {
+        let mut v = placed_v.clone();
+        let (set, routing, unnamed) = placed::write_routing(&g, &imp, &routes, &mut v)?;
+        std::fs::write(out_json, serde_json::to_string(&v).map_err(|e| e.to_string())?).map_err(|e| format!("{out_json}: {e}"))?;
+        line(json!({"export": {"json": out_json, "nets_with_routing": set, "bits": routing.len(), "hops_without_tile": unnamed}}));
+    }
     let ok = compare_ok && stats.overused == 0 && stats.unroutable_sinks == 0 && after.sinks_missing == 0 && after.shorts.is_empty();
     line(json!({"ok": ok, "compare_ok": compare_ok}));
     Ok(ok)

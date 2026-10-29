@@ -3,7 +3,12 @@
 //! input permutation (`PERM`) changes on the same placement.
 //!
 //! cargo run --release -p oxibit-pnr --example placed_route -- \
-//!     DB_ROOT PART META_DIR PLACED.JSON PERM ITERS
+//!     DB_ROOT PART META_DIR PLACED.JSON PERM ITERS [OUT.JSON]
+//!
+//! With OUT.JSON, the placed design is written back with oxibit's routing as
+//! nextpnr ROUTING attributes (`placed::write_routing`), for nextpnr to load
+//! with --no-place, route what is left (constants, clocks, anything oxibit
+//! did not finish), analyse timing and write the FASM.
 //!
 //! PERM is none, a5 (A1..A5 permute: nextpnr today) or a6. stdout carries
 //! one JSON object per line: the import, one per iteration (overused nodes
@@ -43,8 +48,10 @@ const CLASSES: &[(&str, &[&str])] = &[
 
 fn main() -> Result<(), String> {
     let args: Vec<String> = std::env::args().collect();
-    let [_, db_root, part, meta_dir, placed_path, perm, iters] = &args[..] else {
-        return Err("usage: placed_route DB_ROOT PART META_DIR PLACED.JSON none|a5|a6 ITERS".into());
+    let (db_root, part, meta_dir, placed_path, perm, iters, out_json) = match &args[..] {
+        [_, a, b, c, d, e, f] => (a, b, c, d, e, f, None),
+        [_, a, b, c, d, e, f, j] => (a, b, c, d, e, f, Some(j)),
+        _ => return Err("usage: placed_route DB_ROOT PART META_DIR PLACED.JSON none|a5|a6 ITERS [OUT.JSON]".into()),
     };
     let perm = match perm.as_str() {
         "none" => Perm::None,
@@ -69,9 +76,14 @@ fn main() -> Result<(), String> {
     drop(text);
     let mut meta = Meta::open(Path::new(meta_dir));
     let imp = placed::import(&g, &placed::site_index(&db), &mut meta, &placed_v, perm)?;
-    drop(placed_v);
 
     let sinks: usize = imp.nets.iter().map(|n| n.sinks.len() + n.pin_groups.len()).sum();
+    let conflicts = placed::pin_conflicts(&imp.nets);
+    let conflict_examples: Vec<serde_json::Value> = conflicts
+        .iter()
+        .take(12)
+        .map(|(node, ns)| json!({"pin": g.node_name(*node), "nets": ns.iter().map(|&i| imp.names[i].as_str()).collect::<Vec<_>>()}))
+        .collect();
     line(json!({
         "import": {
             "perm": format!("{perm:?}"),
@@ -84,6 +96,8 @@ fn main() -> Result<(), String> {
             "skipped": imp.skipped,
             "unresolved": imp.unresolved.counts,
             "unresolved_examples": imp.unresolved.examples,
+            "pin_conflicts": conflicts.len(),
+            "pin_conflict_examples": conflict_examples,
         }
     }));
 
@@ -163,6 +177,30 @@ fn main() -> Result<(), String> {
             }
         }
     }
-    line(json!({"done": stats.to_json(), "six_pin_groups_by_pin": pos6, "groups_unreached": unreached, "group_pins_used": used.len(), "sinks_unreached": missed}));
+    // Unreached pin groups and the nodes still shared, by name (a few).
+    for (i, (n, hops)) in imp.nets.iter().zip(&routes).enumerate() {
+        for (grp, pin) in n.pin_groups.iter().zip(router::chosen_pins(n, hops)) {
+            if pin.is_none() && missed.len() < 40 {
+                missed.push(json!([imp.names[i], g.node_name(n.source), format!("group {}", g.node_name(grp[0]))]));
+            }
+        }
+    }
+    let shared: Vec<serde_json::Value> = if stats.overused <= 50 {
+        router
+            .audit(&imp.nets, &routes)
+            .iter()
+            .take(30)
+            .map(|(node, ns)| json!({"node": g.node_name(*node), "nets": ns.iter().map(|&i| imp.names[i].as_str()).collect::<Vec<_>>()}))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    line(json!({"done": stats.to_json(), "six_pin_groups_by_pin": pos6, "groups_unreached": unreached, "group_pins_used": used.len(), "sinks_unreached": missed, "overused_nodes": shared}));
+    if let Some(out_json) = out_json {
+        let mut v = placed_v;
+        let (set, routing, unnamed) = placed::write_routing(&g, &imp, &routes, &mut v)?;
+        std::fs::write(out_json, serde_json::to_string(&v).map_err(|e| e.to_string())?).map_err(|e| format!("{out_json}: {e}"))?;
+        line(json!({"export": {"json": out_json, "nets_with_routing": set, "bits": routing.len(), "hops_without_tile": unnamed}}));
+    }
     Ok(())
 }

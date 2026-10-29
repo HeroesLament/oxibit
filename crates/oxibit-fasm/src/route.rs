@@ -14,7 +14,8 @@
 //! * Edges are pips. A pip is usable when it can actually be made to
 //!   conduct: its `TILE.DST.SRC` feature has segbits (and is emitted), or it
 //!   is an `always` pseudo-pip, or it is a hard connection (`->`, not
-//!   pseudo, no segbits: fixed wiring such as CLB BYP -> AX). `hint` and
+//!   pseudo, no segbits: fixed wiring such as CLB BYP -> AX), or it is
+//!   one of the I/O site route-throughs in `io_pseudo`. Other `hint` and
 //!   `default` pseudo-pips are never used. `<<->>` pass pips are two edges,
 //!   one per direction, each usable only if its own feature has segbits.
 //!
@@ -82,6 +83,9 @@ struct TypePip {
     relay: Option<(String, Vec<String>)>,
     /// A `default` pseudo-pip (see `Enable::Default`).
     default: bool,
+    /// An I/O site route-through (`io_pseudo`): a relay a design router may
+    /// take, since only the I/O pin it serves can reach it.
+    through: bool,
 }
 
 struct TypeData {
@@ -469,6 +473,11 @@ impl Graph {
         }
     }
 
+    /// Whether an edge is an I/O site route-through (see `io_pseudo`).
+    pub fn edge_site_through(&self, tile: u32, pi: u32) -> bool {
+        self.types[&self.tiles[tile as usize].1].pips[pi as usize].through
+    }
+
     /// The pip behind an edge.
     pub fn edge_pip(&self, tile: u32, pi: u32) -> Pip {
         self.pip(tile, pi)
@@ -722,7 +731,8 @@ impl Graph {
                 if listed {
                     pips.push(name);
                 }
-                let take = listed || self.is_fixed(tile, pi) || (relays && self.relay_on(tile, pi, on));
+                let through = self.types[&self.tiles[tile as usize].1].pips[pi as usize].through;
+                let take = listed || self.is_fixed(tile, pi) || ((relays || through) && self.relay_on(tile, pi, on));
                 if take && nodes.insert(d) {
                     stack.push(d);
                 }
@@ -737,6 +747,14 @@ impl Graph {
         let td = &self.types[&self.tiles[ti as usize].1];
         let &(_, _, w) = td.site_pins.iter().find(|(s, p, _)| s == site && p == pin)?;
         Some(self.node_of[(self.wire_base[ti as usize] + w) as usize])
+    }
+
+    /// Tile-local wire name of a site pin (`CLBLM_M_C`).
+    pub fn site_pin_wire(&self, tile: &str, site: &str, pin: &str) -> Option<String> {
+        let &ti = self.tile_index.get(tile)?;
+        let td = &self.types[&self.tiles[ti as usize].1];
+        let &(_, _, w) = td.site_pins.iter().find(|(s, p, _)| s == site && p == pin)?;
+        Some(td.wires[w as usize].clone())
     }
 
     /// CLB sites of a tile.
@@ -1577,6 +1595,55 @@ fn read_json(p: &std::path::Path) -> R<Value> {
         .map_err(|e| format!("{}: {e}", p.display()))
 }
 
+/// The I/O tiles' site route-through pseudo-pips a design router may take,
+/// with the tile-relative lines that make each conduct (as nextpnr's
+/// xilinx pseudo-pip table configures them): the ILOGIC bypass from D or
+/// DDLY to O, the OLOGIC bypass from D1 to OQ, and the IOB pair's output and
+/// tristate pass-through. prjxray lists these as pseudo-pips with no segbits
+/// (or as hints), so without this table an input pin or IDELAY output has no
+/// way into the fabric and a differential output's slave no way to its
+/// master. Lines the tile type has no segbits for are dropped by the caller.
+fn io_pseudo(ty: &str, src: &str, dst: &str) -> Option<Vec<String>> {
+    let side = ty.chars().next().filter(|c| *c == 'L' || *c == 'R')?;
+    let fam = &ty[1..];
+    let fam = fam.split('_').next().unwrap_or(fam);
+    if fam == "IOI3" {
+        let idx = |w: &str, pre: &str, suf: &str| -> Option<String> {
+            let i = w.strip_prefix(pre)?.strip_suffix(suf)?;
+            (i.len() <= 1 && i.chars().all(|c| c.is_ascii_digit())).then(|| i.to_string())
+        };
+        let s = side.to_string();
+        if let Some(i) = idx(dst, "IOI_ILOGIC", "_O") {
+            let y = if i.is_empty() { "0".to_string() } else { i.clone() };
+            if src == format!("{s}IOI_ILOGIC{i}_D") {
+                return Some(vec![format!("IDELAY_Y{y}.IDELAY_TYPE_FIXED"), format!("ILOGIC_Y{y}.ZINV_D")]);
+            }
+            if src == format!("{s}IOI_ILOGIC{i}_DDLY") {
+                return Some(vec![format!("ILOGIC_Y{y}.IDELMUXE3.P0"), format!("ILOGIC_Y{y}.ZINV_D")]);
+            }
+        }
+        if let Some(i) = idx(dst, &format!("{s}IOI_OLOGIC"), "_OQ") {
+            let y = if i.is_empty() { "0".to_string() } else { i.clone() };
+            if src == format!("IOI_OLOGIC{i}_D1") {
+                return Some(vec![format!("OLOGIC_Y{y}.OMUX.D1"), format!("OLOGIC_Y{y}.OQUSED"), format!("OLOGIC_Y{y}.OSERDES.DATA_RATE_TQ.BUF")]);
+            }
+        }
+        // T1 -> TQ conducts inverted unless ZINV_T1 is set.
+        if let Some(i) = idx(dst, &format!("{s}IOI_OLOGIC"), "_TQ") {
+            let y = if i.is_empty() { "0".to_string() } else { i.clone() };
+            if src == format!("IOI_OLOGIC{i}_T1") {
+                return Some(vec![format!("OLOGIC_Y{y}.ZINV_T1")]);
+            }
+        }
+        return None;
+    }
+    if fam == "IOB33" || fam == "IOB18" {
+        let pass = [("IOB_O_OUT0", "IOB_O_IN1"), ("IOB_O0", "IOB_O_OUT0"), ("IOB_T_OUT0", "IOB_T_IN1"), ("IOB_T0", "IOB_T_OUT0"), ("IOB_PADOUT1", "IOB_DIFFI_IN0")];
+        return pass.iter().any(|&(a, b)| a == src && b == dst).then(Vec::new);
+    }
+    None
+}
+
 fn load_type(db: &Database, ty: &str) -> R<TypeData> {
     let path = db.root.join(format!("tile_type_{ty}.json"));
     let mut wires = Vec::new();
@@ -1642,9 +1709,26 @@ fn load_type(db: &Database, ty: &str) -> R<TypeData> {
 
     let mut add = |src: &str, dst: &str, hard: bool, index: &HashMap<String, u32>| {
         let (Some(&s), Some(&d)) = (index.get(src), index.get(dst)) else { return };
+        // A BUFR or PHASER_IN passes I to O only when the site is
+        // configured; prjxray still lists the pair as an `always` pseudo-pip.
+        // No design route may run through one it did not place.
+        if let (Some((ss, _)), Some((ds, _))) = (pin_of.get(src), pin_of.get(dst)) {
+            if ss == ds && (ss.starts_with("BUFR_") || ss.starts_with("PHASER_IN_PHY_")) {
+                return;
+            }
+        }
         let key = format!("{ty}.{dst}.{src}");
+        let io = io_pseudo(ty, src, dst).filter(|_| !has_bits(&key));
         let (feature, relay, is_default) = if has_bits(&key) {
             (Some(key), None, false)
+        } else if let Some(lines) = io.clone() {
+            // An I/O site route-through: configured by the site's own bits
+            // (those this tile type defines), or by none at all.
+            let lines: Vec<String> = lines.into_iter().filter(|l| has_bits(&format!("{}.{l}", ty.to_uppercase()))).collect();
+            match (lines.is_empty(), pin_of.get(dst).or(pin_of.get(src))) {
+                (false, Some((site, _))) => (None, Some((site.clone(), lines)), false),
+                _ => (None, None, false),
+            }
         } else if always(&key) || (hard && !pseudo_other(&key)) {
             (None, None, false)
         } else if let Some(r) = relay(src, dst) {
@@ -1654,7 +1738,8 @@ fn load_type(db: &Database, ty: &str) -> R<TypeData> {
         } else {
             return; // hint pseudo-pip, or a buffered pip with no known bits
         };
-        pips.push(TypePip { src: s, dst: d, feature, relay, default: is_default });
+        let through = io.is_some() && relay.is_some();
+        pips.push(TypePip { src: s, dst: d, feature, relay, default: is_default, through });
     };
 
     if let Some(o) = v["pips"].as_object() {
@@ -1680,7 +1765,7 @@ fn load_type(db: &Database, ty: &str) -> R<TypeData> {
             let q = pin_of.iter().find(|(_, (s2, p2))| s2 == site && p2 == &format!("{l}Q")).map(|(w, _)| w.clone());
             if let (Some(&src), Some(dst)) = (index.get(w), q.and_then(|q| index.get(&q).copied())) {
                 let lines = vec![format!("{site}.{l}FFMUX.{l}X"), format!("{site}.{l}FF.ZINI"), format!("{site}.{l}FF.ZRST"), format!("{site}.FFSYNC")];
-                pips.push(TypePip { src, dst, feature: None, relay: Some((site.clone(), lines)), default: false });
+                pips.push(TypePip { src, dst, feature: None, relay: Some((site.clone(), lines)), default: false, through: false });
             }
         }
     }
@@ -1724,7 +1809,7 @@ fn load_type(db: &Database, ty: &str) -> R<TypeData> {
                 }
             }
             if let (Some(i), Some(o)) = (input.and_then(|w| index.get(&w).copied()), output.and_then(|w| index.get(&w).copied())) {
-                pips.push(TypePip { src: i, dst: o, feature: None, relay: Some((name.clone(), lines)), default: false });
+                pips.push(TypePip { src: i, dst: o, feature: None, relay: Some((name.clone(), lines)), default: false, through: false });
             }
         }
     }

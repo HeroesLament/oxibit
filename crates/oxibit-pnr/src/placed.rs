@@ -39,6 +39,7 @@ use oxibit_fasm::route::Graph;
 use serde_json::Value;
 
 use crate::nets::{Net, NetClass};
+use crate::router::Hop;
 
 type R<T> = Result<T, String>;
 
@@ -166,12 +167,67 @@ fn walk<'a>(from: &'a str, step: &'a HashMap<String, Vec<String>>) -> Vec<String
 struct Pin {
     tile: String,
     site: String,
+    /// The site as nextpnr names it, tile-relative (`SLICE_X0Y0`).
+    np_site: String,
     /// Index into `Import`'s site variants: (primary type, variant).
     var: (String, String),
     bel: String,
     port: String,
     wire: String,
     cell: usize,
+}
+
+/// How a routed net leaves its driver's site: the site wires from the
+/// driver's bel pin to the output site pin (routing-bel pips between them),
+/// and the tile wire of that site pin. What another tool needs to join the
+/// tile routing to the driver.
+#[derive(Debug, Clone)]
+pub struct SourcePath {
+    pub tile: String,
+    /// The site as nextpnr names it, tile-relative (`SLICE_X0Y0`).
+    pub np_site: String,
+    /// The site's absolute name (`SLICE_X26Y97`), when the tilegrid has it.
+    pub abs_site: Option<String>,
+    pub site_wires: Vec<String>,
+    pub tile_wire: String,
+}
+
+/// How a sink pin reaches the bel pin it serves: the tile wire of the input
+/// site pin, then the site wires from that pin to the bel pin. For a LUT
+/// input the first site wire is the cell's own input (the logical pin): the
+/// pip into it from the physical pin is the LUT permutation.
+#[derive(Debug, Clone)]
+pub struct SinkPath {
+    pub tile: String,
+    pub np_site: String,
+    pub tile_wire: String,
+    pub site_wires: Vec<String>,
+}
+
+/// Site wires from `from` to `to` over routing-bel pips, both included.
+fn site_path(from: &str, to: &str, fwd: &HashMap<String, Vec<String>>) -> Option<Vec<String>> {
+    let mut prev: HashMap<String, String> = HashMap::new();
+    let mut q = VecDeque::from([from.to_string()]);
+    let mut seen = HashSet::from([from.to_string()]);
+    while let Some(w) = q.pop_front() {
+        if w == to {
+            let mut path = vec![w.clone()];
+            let mut c = w;
+            while let Some(p) = prev.get(&c) {
+                path.push(p.clone());
+                c = p.clone();
+            }
+            path.reverse();
+            return Some(path);
+        }
+        for n in fwd.get(&w).into_iter().flatten() {
+            if seen.insert(n.clone()) {
+                prev.insert(n.clone(), w.clone());
+                q.push_back(n.clone());
+            }
+        }
+    }
+    None
 }
 
 /// What `import` could not resolve, by reason, with a few examples.
@@ -197,6 +253,13 @@ pub struct Import {
     pub nets: Vec<Net>,
     /// Logical net name of each routed net.
     pub names: Vec<String>,
+    /// The JSON net bit of each routed net.
+    pub bits: Vec<i64>,
+    /// How each routed net leaves its driver's site.
+    pub sources: Vec<SourcePath>,
+    /// Per routed net: for each sink node it may reach (fixed sinks and
+    /// every member of its pin groups), how that pin reaches its bel pins.
+    pub sink_paths: Vec<Vec<(u32, SinkPath)>>,
     /// Logical nets not routed, by reason.
     pub skipped: BTreeMap<String, usize>,
     /// Sinks reached inside their driver's site.
@@ -306,11 +369,30 @@ fn is_mem_cell(c: &Cell) -> bool {
         || a.get("X_ORIG_TYPE").and_then(Value::as_str).is_some_and(|t| t.starts_with("RAM") || t.starts_with("SRL"))
 }
 
+/// Terminals two or more nets claim: a source or fixed sink node, with the
+/// nets on it. Any entry is a fault in the import (or an illegal placement):
+/// no routing can give one pin to two nets.
+pub fn pin_conflicts(nets: &[Net]) -> Vec<(u32, Vec<usize>)> {
+    let mut on: HashMap<u32, Vec<usize>> = HashMap::new();
+    for (i, n) in nets.iter().enumerate() {
+        for &t in std::iter::once(&n.source).chain(&n.sinks) {
+            let v = on.entry(t).or_default();
+            if v.last() != Some(&i) {
+                v.push(i);
+            }
+        }
+    }
+    let mut out: Vec<(u32, Vec<usize>)> = on.into_iter().filter(|(_, v)| v.len() > 1).collect();
+    out.sort_unstable();
+    out
+}
+
 /// Resolve a placed design's nets to site pins on `g`.
 pub fn import(g: &Graph, sites: &HashMap<String, (String, String)>, meta: &mut Meta, placed: &Value, perm: Perm) -> R<Import> {
     let top = top_module(placed)?;
     let cells_v = top["cells"].as_object().ok_or("no cells")?;
 
+    let abs_of: HashMap<(String, String), String> = sites.iter().map(|(abs, (t, rel))| ((t.clone(), rel.clone()), abs.clone())).collect();
     let mut tile_at: HashMap<(i32, i32), String> = HashMap::new();
     for t in g.tile_names() {
         if let Some(xy) = g.tile_xy(t) {
@@ -401,7 +483,7 @@ pub fn import(g: &Graph, sites: &HashMap<String, (String, String)>, meta: &mut M
                 continue;
             };
             for b in bs {
-                let pin = Pin { tile: tile.clone(), site: site.clone(), var: key.clone(), bel: bel.clone(), port: p.clone(), wire: wire.clone(), cell: ci };
+                let pin = Pin { tile: tile.clone(), site: site.clone(), np_site: np_site.clone(), var: key.clone(), bel: bel.clone(), port: p.clone(), wire: wire.clone(), cell: ci };
                 match d.as_str() {
                     Some("output") => {
                         drivers.insert(b, pin);
@@ -482,6 +564,36 @@ pub fn import(g: &Graph, sites: &HashMap<String, (String, String)>, meta: &mut M
 
     let mut bits: Vec<i64> = sinks.keys().copied().collect();
     bits.sort_unstable();
+
+    // Input site pins each external sink can enter by, nearest first. Some
+    // have a choice (a SLICEM LUT's write enable comes through WE or CE);
+    // a pin that is some other sink's only way in is not offered to the
+    // rest, and pins are handed out first come, so two nets never share one.
+    // The pin named for the bel pin comes first (WE before CE, as nextpnr
+    // takes it): the site configuration a FASM keeps from nextpnr assumes it.
+    let entries = |s: &Pin| -> Vec<String> {
+        let sv = &variants[&s.var];
+        let mut v: Vec<String> = walk(&s.wire, &sv.back).iter().filter_map(|w| sv.in_pin.get(w).cloned()).collect();
+        v.sort_by_key(|c| c != &s.port);
+        v
+    };
+    let internal = |s: &Pin, drv: &Pin| -> bool {
+        s.tile == drv.tile && s.site == drv.site && s.var == drv.var && walk(&s.wire, &variants[&s.var].back).contains(&drv.wire)
+    };
+    let mut forced: HashMap<(String, String, String), i64> = HashMap::new();
+    for &b in &bits {
+        let (None, Some(drv)) = (skip_net.get(&b), drivers.get(&b)) else { continue };
+        for s in &sinks[&b] {
+            if internal(s, drv) {
+                continue;
+            }
+            if let [only] = &entries(s)[..] {
+                forced.entry((s.tile.clone(), s.site.clone(), only.clone())).or_insert(b);
+            }
+        }
+    }
+    let mut claimed: HashMap<(String, String, String), i64> = HashMap::new();
+
     for b in bits {
         if let Some(why) = skip_net.get(&b) {
             *imp.skipped.entry((*why).into()).or_default() += 1;
@@ -500,9 +612,10 @@ pub fn import(g: &Graph, sites: &HashMap<String, (String, String)>, meta: &mut M
 
         let mut fixed: Vec<(String, u32)> = Vec::new(); // (exit kind, node)
         let mut groups: HashMap<(String, String, char), Vec<u32>> = HashMap::new();
+        let mut paths: Vec<(u32, SinkPath)> = Vec::new();
         for s in &sinks[&b] {
             let sv = &variants[&s.var];
-            if s.tile == drv.tile && s.site == drv.site && s.var == drv.var && walk(&s.wire, &sv.back).contains(&drv.wire) {
+            if internal(s, drv) {
                 imp.internal_sinks += 1;
                 continue;
             }
@@ -517,6 +630,12 @@ pub fn import(g: &Graph, sites: &HashMap<String, (String, String)>, meta: &mut M
                     _ => 5,
                 };
                 if k <= top {
+                    for j in 1..=top {
+                        let pin = format!("{letter}{j}");
+                        if let (Some(n), Some(tw)) = (g.site_pin(&s.tile, &s.site, &pin), g.site_pin_wire(&s.tile, &s.site, &pin)) {
+                            paths.push((n, SinkPath { tile: s.tile.clone(), np_site: s.np_site.clone(), tile_wire: tw, site_wires: vec![s.wire.clone()] }));
+                        }
+                    }
                     if let Entry::Vacant(e) = groups.entry((s.tile.clone(), s.site.clone(), letter)) {
                         let mut pins = Vec::new();
                         for j in 1..=top {
@@ -532,13 +651,26 @@ pub fn import(g: &Graph, sites: &HashMap<String, (String, String)>, meta: &mut M
                     continue;
                 }
             }
-            // Fixed: the input site pin a routing-bel path leads back to.
-            let pin = walk(&s.wire, &sv.back).iter().find_map(|w| sv.in_pin.get(w).cloned());
+            // Fixed: an input site pin a routing-bel path leads back to, the
+            // nearest no other net holds.
+            let cands = entries(s);
+            let free = |c: &String| {
+                let k = (s.tile.clone(), s.site.clone(), c.clone());
+                forced.get(&k).is_none_or(|&o| o == b) && claimed.get(&k).is_none_or(|&o| o == b)
+            };
+            let pin = cands.iter().find(|c| free(c)).or(cands.first()).cloned();
             let Some(pin) = pin else {
                 imp.unresolved.add("no_input_pin", format!("{}/{} {}.{}", s.tile, s.site, s.bel, s.port));
                 continue;
             };
+            claimed.entry((s.tile.clone(), s.site.clone(), pin.clone())).or_insert(b);
             let Some(n) = site_pin(g, s, &pin, &mut imp.unresolved) else { continue };
+            let sv = &variants[&s.var];
+            let (entry_wire, primary) = sv.pins.get(&pin).map(|x| (x.0.clone(), x.1.clone())).unwrap_or_else(|| (pin.clone(), pin.clone()));
+            if let Some(tw) = g.site_pin_wire(&s.tile, &s.site, &primary) {
+                let site_wires = site_path(&entry_wire, &s.wire, &sv.fwd).unwrap_or_else(|| vec![entry_wire.clone()]);
+                paths.push((n, SinkPath { tile: s.tile.clone(), np_site: s.np_site.clone(), tile_wire: tw, site_wires }));
+            }
             let kind = if pin == "CIN" { "COUT" } else { "general" };
             fixed.push((kind.into(), n));
             imp.fixed_sinks += 1;
@@ -575,11 +707,126 @@ pub fn import(g: &Graph, sites: &HashMap<String, (String, String)>, meta: &mut M
         }
         for (exit, (mut fixed, groups)) in by_exit {
             let Some(src) = site_pin(g, drv, &exit, &mut imp.unresolved) else { continue };
+            let primary = dv.pins.get(&exit).map(|x| x.1.clone()).unwrap_or_else(|| exit.clone());
+            let exit_wire = dv.pins.get(&exit).map(|x| x.0.clone()).unwrap_or_else(|| exit.clone());
+            let source = SourcePath {
+                tile: drv.tile.clone(),
+                np_site: drv.np_site.clone(),
+                abs_site: abs_of.get(&(drv.tile.clone(), drv.np_site.clone())).cloned(),
+                site_wires: site_path(&drv.wire, &exit_wire, &dv.fwd).unwrap_or_else(|| vec![drv.wire.clone()]),
+                tile_wire: g.site_pin_wire(&drv.tile, &drv.site, &primary).unwrap_or_default(),
+            };
             fixed.sort_unstable();
             fixed.dedup();
             imp.nets.push(Net { source: src, sinks: fixed, pin_groups: groups, edges: Vec::new(), class: NetClass::Signal });
             imp.names.push(format!("{name}@{exit}"));
+            imp.bits.push(b);
+            imp.sources.push(source);
+            imp.sink_paths.push(paths.clone());
         }
     }
     Ok(imp)
+}
+
+/// Write `routes` (one hop list per `imp.nets` entry, more entries ignored)
+/// into the design JSON `v` as nextpnr `ROUTING` attributes: from each
+/// driver's bel pin through its site to the output pin, the tile pips, and
+/// into each reached sink's site to its bel pins, every pip at strength 3
+/// (placer). router2 takes wires bound that way as reserved for their net
+/// and extends them; any stronger binding makes them unavailable even to
+/// their own net. nextpnr names a pip TILE/DST/SRC and a wire TILE/WIRE,
+/// the tile by its grid position (X55Y33); site wires by their tile-local
+/// name (SLICE_X0Y0.AQ): it writes them as SITEWIRE/SITE/WIRE but cannot
+/// read that back.
+///
+/// Returns (nets given a ROUTING, the routing per net bit, hops whose tile
+/// has no grid position).
+pub fn write_routing(g: &Graph, imp: &Import, routes: &[Vec<Hop>], v: &mut Value) -> R<(usize, HashMap<i64, Vec<String>>, usize)> {
+    // nextpnr names a pip TILE/DST/SRC and a wire TILE/WIRE, the tile
+    // by its grid position (X55Y33).
+    let xy = |tile: &str| g.tile_xy(tile).map(|(x, y)| format!("X{x}Y{y}"));
+    let mut routing: HashMap<i64, Vec<String>> = HashMap::new();
+    let mut unnamed = 0usize;
+    for (i, hops) in routes.iter().take(imp.nets.len()).enumerate() {
+        let entry = routing.entry(imp.bits[i]).or_default();
+        // From the driver's bel pin: its site wire, the site's routing-bel
+        // pips to the output pin, and the pip out to the tile wire, so
+        // nextpnr sees one tree from the net's source.
+        let sp = &imp.sources[i];
+        let Some(t) = xy(&sp.tile) else {
+            unnamed += 1;
+            continue;
+        };
+        // nextpnr writes site wires as SITEWIRE/SITE/WIRE but reads only
+        // TILE/WIRE, the site wire's tile-local name (SLICE_X0Y0.AQ).
+        let site_wire = |w: &str| format!("{t}/{}.{w}", sp.np_site);
+        let np = &sp.np_site;
+        entry.push(format!("{};;3", site_wire(&sp.site_wires[0])));
+        for pair in sp.site_wires.windows(2) {
+            entry.push(format!("{};{t}/{np}.{}/{np}.{};3", site_wire(&pair[1]), pair[1], pair[0]));
+        }
+        let last = sp.site_wires.last().cloned().unwrap_or_default();
+        entry.push(format!("{t}/{};{t}/{}/{np}.{last};3", sp.tile_wire, sp.tile_wire));
+        // Into each sink's site: the pip from the site pin's tile wire to
+        // the first site wire (for a LUT, the permutation onto the cell's
+        // input), then the site's routing-bel pips to the bel pin.
+        let reached: HashSet<u32> = hops.iter().map(|h| h.dst).collect();
+        for (node, sk) in &imp.sink_paths[i] {
+            if !reached.contains(node) {
+                continue;
+            }
+            let Some(st) = xy(&sk.tile) else { continue };
+            let np = &sk.np_site;
+            let first = &sk.site_wires[0];
+            let mut chain = vec![format!("{st}/{np}.{first};{st}/{np}.{first}/{};3", sk.tile_wire)];
+            for pair in sk.site_wires.windows(2) {
+                chain.push(format!("{st}/{np}.{};{st}/{np}.{}/{np}.{};3", pair[1], pair[1], pair[0]));
+            }
+            for c in chain {
+                if !entry.contains(&c) {
+                    entry.push(c);
+                }
+            }
+        }
+        for h in hops {
+            let p = g.edge_pip(h.tile, h.pi);
+            let Some(t) = xy(&p.tile) else {
+                unnamed += 1;
+                continue;
+            };
+            entry.push(format!("{t}/{};{t}/{}/{};3", p.dst, p.dst, p.src));
+        }
+    }
+    // nextpnr binds each wire to one net once: a net routed through two
+    // exits repeats its source chain, and an overused node would bind a
+    // wire to two nets. Keep the first binding of every wire.
+    let mut bound_by: HashMap<String, i64> = HashMap::new();
+    let mut bits: Vec<i64> = routing.keys().copied().collect();
+    bits.sort_unstable();
+    for b in bits {
+        let r = routing.get_mut(&b).unwrap_or_else(|| unreachable!());
+        r.retain(|e| {
+            let wire = e.split(';').next().unwrap_or("").to_string();
+            match bound_by.entry(wire) {
+                Entry::Vacant(v) => {
+                    v.insert(b);
+                    true
+                }
+                Entry::Occupied(_) => false,
+            }
+        });
+    }
+    let mut set = 0usize;
+    let mods = v["modules"].as_object_mut().ok_or("no modules")?;
+    for m in mods.values_mut() {
+        let Some(names) = m["netnames"].as_object_mut() else { continue };
+        for (_, n) in names.iter_mut() {
+            let Some(b) = n["bits"].get(0).and_then(Value::as_i64) else { continue };
+            if let Some(r) = routing.get(&b) {
+                n["attributes"]["ROUTING"] = Value::String(r.join(";"));
+                set += 1;
+            }
+        }
+    }
+    Ok((set, routing, unnamed))
 }

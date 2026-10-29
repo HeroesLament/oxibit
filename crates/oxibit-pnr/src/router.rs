@@ -265,6 +265,7 @@ impl<'g> Router<'g> {
                 for &(d, tile, pi) in self.g.out_edges(node) {
                     match self.g.edge_kind(tile, pi) {
                         EdgeKind::Feature | EdgeKind::Fixed => {}
+                        EdgeKind::Relay if self.g.edge_site_through(tile, pi) => {}
                         EdgeKind::Relay | EdgeKind::Default => continue,
                     }
                     if self.reserved[d as usize] && !set.contains(&d) {
