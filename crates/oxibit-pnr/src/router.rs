@@ -8,6 +8,12 @@
 //!
 //! A node's fixed fan-out (hard wires, `always` pseudo-pips) is driven
 //! whenever the node is, so it counts as used by the net too.
+//!
+//! A net's `pin_groups` are sinks that any one node of the group satisfies:
+//! the inputs of a LUT, which the LUT's INIT can be permuted to read in any
+//! order. The search ends on whichever member it reaches first, and the
+//! members compete for nets like any other node, so congestion decides
+//! which net gets which pin.
 
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashSet};
@@ -95,6 +101,13 @@ impl Ord for Item {
     }
 }
 
+/// The pin of each of `net`'s pin groups that `hops` reach, in group order;
+/// `None` for a group the routing does not reach.
+pub fn chosen_pins(net: &Net, hops: &[Hop]) -> Vec<Option<u32>> {
+    let reached: HashSet<u32> = hops.iter().map(|h| h.dst).collect();
+    net.pin_groups.iter().map(|g| g.iter().copied().find(|p| reached.contains(p))).collect()
+}
+
 pub struct Router<'g> {
     g: &'g Graph,
     opts: Opts,
@@ -164,7 +177,8 @@ impl<'g> Router<'g> {
     /// through, and the fixed fan-out of the source and of every node it
     /// routes through. A sink's own fixed fan-out is not counted: a site pin
     /// behind it can be a mux whose other input is a constant (a DSP
-    /// control pin tied in the tile), which nextpnr uses as such.
+    /// control pin tied in the tile), which nextpnr uses as such. A pin
+    /// group's members are occupied only once a hop reaches one.
     fn footprint(&self, net: &Net, hops: &[Hop]) -> Vec<u32> {
         let mut out = Vec::new();
         let mut seen = HashSet::new();
@@ -181,8 +195,11 @@ impl<'g> Router<'g> {
                 out.push(s);
             }
         }
+        let mut group_pins: Vec<u32> = net.pin_groups.iter().flatten().copied().collect();
+        group_pins.sort_unstable();
         for h in hops {
-            if net.sinks.binary_search(&h.dst).is_err() {
+            let terminal = net.sinks.binary_search(&h.dst).is_ok() || group_pins.binary_search(&h.dst).is_ok();
+            if !terminal {
                 self.closure(h.dst, &mut out, &mut seen);
             } else if seen.insert(h.dst) {
                 out.push(h.dst);
@@ -219,26 +236,29 @@ impl<'g> Router<'g> {
         let mut hops = Vec::new();
         let mut failed = 0;
 
-        // Nearest sinks first.
-        let mut sinks = net.sinks.clone();
-        sinks.sort_by(|&a, &b| self.manhattan(net.source, a).total_cmp(&self.manhattan(net.source, b)));
+        // Every sink is a set of nodes any one of which completes it: a
+        // fixed sink is a set of one. Nearest first.
+        let mut targets: Vec<Vec<u32>> = net.sinks.iter().map(|&s| vec![s]).collect();
+        targets.extend(net.pin_groups.iter().filter(|g| !g.is_empty()).cloned());
+        targets.sort_by(|a, b| self.manhattan(net.source, a[0]).total_cmp(&self.manhattan(net.source, b[0])));
 
-        for &target in &sinks {
-            if self.tag[target as usize] == tag {
+        for set in &targets {
+            if set.iter().any(|&t| self.tag[t as usize] == tag) {
                 continue; // already on the tree
             }
+            let aim = set[0];
             let mut heap = BinaryHeap::new();
             for &t in &tree {
                 self.cost[t as usize] = 0.0;
                 self.prev[t as usize] = (NONE, 0, 0);
                 self.touched.push(t);
-                heap.push(Item { f: self.opts.astar * self.manhattan(t, target), node: t });
+                heap.push(Item { f: self.opts.astar * self.manhattan(t, aim), node: t });
             }
-            let mut found = false;
+            let mut reached = None;
             while let Some(Item { f: _, node }) = heap.pop() {
                 *pops += 1;
-                if node == target {
-                    found = true;
+                if set.contains(&node) {
+                    reached = Some(node);
                     break;
                 }
                 let base = self.cost[node as usize];
@@ -247,7 +267,7 @@ impl<'g> Router<'g> {
                         EdgeKind::Feature | EdgeKind::Fixed => {}
                         EdgeKind::Relay | EdgeKind::Default => continue,
                     }
-                    if self.reserved[d as usize] && d != target {
+                    if self.reserved[d as usize] && !set.contains(&d) {
                         continue;
                     }
                     let c = base + if self.tag[d as usize] == tag { 0.0 } else { self.node_cost(d, pres) };
@@ -257,22 +277,23 @@ impl<'g> Router<'g> {
                         }
                         self.cost[d as usize] = c;
                         self.prev[d as usize] = (node, tile, pi);
-                        heap.push(Item { f: c + self.opts.astar * self.manhattan(d, target), node: d });
+                        heap.push(Item { f: c + self.opts.astar * self.manhattan(d, aim), node: d });
                     }
                 }
             }
-            if found {
-                let mut n = target;
-                while self.prev[n as usize].0 != NONE && self.tag[n as usize] != tag {
-                    let (from, tile, pi) = self.prev[n as usize];
-                    hops.push(Hop { src: from, dst: n, tile, pi });
-                    self.tag[n as usize] = tag;
-                    tree.push(n);
-                    n = from;
+            match reached {
+                Some(target) => {
+                    let mut n = target;
+                    while self.prev[n as usize].0 != NONE && self.tag[n as usize] != tag {
+                        let (from, tile, pi) = self.prev[n as usize];
+                        hops.push(Hop { src: from, dst: n, tile, pi });
+                        self.tag[n as usize] = tag;
+                        tree.push(n);
+                        n = from;
+                    }
+                    self.tag[target as usize] = tag;
                 }
-                self.tag[target as usize] = tag;
-            } else {
-                failed += 1;
+                None => failed += 1,
             }
             self.reset_scratch();
         }
@@ -303,6 +324,12 @@ impl<'g> Router<'g> {
     /// stopping between nets once `progress.cancelled()`; a cancelled run
     /// returns the routes it has.
     pub fn run_with(&mut self, nets: &[Net], progress: &dyn Progress) -> (Vec<Vec<Hop>>, Stats) {
+        self.run_observed(nets, progress, &mut |_, _| {})
+    }
+
+    /// `run_with`, handing `observe` each iteration's number and the nets
+    /// on every node once the iteration's nets are routed.
+    pub fn run_observed(&mut self, nets: &[Net], progress: &dyn Progress, observe: &mut dyn FnMut(u32, &[u16])) -> (Vec<Vec<Hop>>, Stats) {
         let t0 = Instant::now();
         let mut stats = Stats::default();
         let routed: Vec<bool> = nets.iter().map(|n| matches!(n.class, NetClass::Signal | NetClass::Constant)).collect();
@@ -363,6 +390,7 @@ impl<'g> Router<'g> {
             }
             stats.iterations = iter;
             stats.overused = over;
+            observe(iter, &self.occ);
             progress.emit(Event::progress(
                 "route",
                 json!({

@@ -26,6 +26,10 @@ pub struct Net {
     pub source: u32,
     /// Leaf nodes the tree reaches.
     pub sinks: Vec<u32>,
+    /// Sinks any one node of which completes the net: the inputs of a LUT,
+    /// whose INIT can be permuted to read them in any order. Empty for nets
+    /// recovered from FASM, whose pins are already chosen.
+    pub pin_groups: Vec<Vec<u32>>,
     /// The design's own routing of this net.
     pub edges: Vec<Edge>,
     pub class: NetClass,
@@ -124,7 +128,7 @@ pub fn from_fasm(g: &Graph, fasm: &str) -> (Vec<Net>, Unresolved) {
                 NetClass::Signal
             }
         };
-        nets.push(Net { source: root, sinks, edges, class });
+        nets.push(Net { source: root, sinks, pin_groups: Vec::new(), edges, class });
     }
     (nets, un)
 }

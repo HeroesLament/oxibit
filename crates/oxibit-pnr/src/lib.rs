@@ -9,5 +9,6 @@
 
 pub mod dsp_patch;
 pub mod nets;
+pub mod placed;
 pub mod reroute;
 pub mod router;
