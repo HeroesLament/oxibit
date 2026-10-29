@@ -108,7 +108,7 @@ pub fn moves(imp: &Import, routes: &[Vec<Hop>]) -> R<Moves> {
 }
 
 /// `TILE.SITE.XLUT.INIT` split into (tile, site, letter).
-fn lut_key(feature: &str) -> Option<LutKey> {
+pub fn lut_key(feature: &str) -> Option<LutKey> {
     let mut parts = feature.split('.');
     let (tile, site, bel, init) = (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
     if parts.next().is_some() || init != "INIT" || bel.len() != 4 || !bel.ends_with("LUT") {
@@ -251,18 +251,8 @@ pub struct Applied {
 /// routing that used it is gone).
 pub fn apply(fasm: &str, cells: &Inits, moves: &Moves) -> R<(String, Applied)> {
     let mut stats = Applied::default();
-    let mut fin: Inits = BTreeMap::new();
-    for (k, &init) in cells {
-        let v = match moves.get(k) {
-            Some(m) if m.iter().any(|m| m.from != [m.to]) => {
-                stats.moved += 1;
-                permute(init, m)?
-            }
-            Some(m) => permute(init, m)?,
-            None => init,
-        };
-        fin.insert(k.clone(), v);
-    }
+    let (fin, moved) = final_inits(cells, moves)?;
+    stats.moved = moved;
     let theirs = fasm_inits(fasm)?;
     let mut out = String::with_capacity(fasm.len());
     let mut done: HashSet<LutKey> = HashSet::new();
@@ -305,6 +295,29 @@ pub fn apply(fasm: &str, cells: &Inits, moves: &Moves) -> R<(String, Applied)> {
         }
     }
     Ok((out, stats))
+}
+
+/// The cells' INITs with `moves` made, and how many LUTs had a pin move.
+pub fn final_inits(cells: &Inits, moves: &Moves) -> R<(Inits, usize)> {
+    let mut moved = 0;
+    let mut fin: Inits = BTreeMap::new();
+    for (k, &init) in cells {
+        let v = match moves.get(k) {
+            Some(m) if m.iter().any(|m| m.from != [m.to]) => {
+                moved += 1;
+                permute(init, m)?
+            }
+            Some(m) => permute(init, m)?,
+            None => init,
+        };
+        fin.insert(k.clone(), v);
+    }
+    Ok((fin, moved))
+}
+
+/// The FASM line of a LUT's INIT; none for 0 (nothing to set).
+pub fn init_line(key: &LutKey, init: u64) -> Option<String> {
+    (init != 0).then(|| format!("{}.{}.{}LUT.INIT[63:0] = 64'h{init:016X}", key.0, key.1, key.2))
 }
 
 /// The FASM name of a slice: in a CLBLM the first slice is the SLICEM.

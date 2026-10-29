@@ -19,12 +19,10 @@
 //! `--no-place`, finish the routing inside the sites, analyse timing and
 //! write the FASM.
 //!
-//! OXIBIT_STANDALONE=1: oxibit routes the whole design from the netlist:
-//! every pip of DESIGN.FASM is dropped (its other lines, the cells'
-//! settings, are kept), and the signal nets, the clock nets (from their
-//! clock buffers, across the clock buffers of the clock tiles) and the
-//! constant nets (from the ties) are all routed by oxibit. LUT INITs and
-//! slice routing-bel settings are oxibit's too.
+//! OXIBIT_STANDALONE=1: `flow::standalone` routes the whole design from
+//! the netlist and writes the FASM, each line owned by one of its writers;
+//! DESIGN.FASM is used only for the cell configuration no writer covers
+//! yet (its `base` lines, counted in the report).
 //!
 //! With `Perm::None` pins stay where nextpnr put them, so the LUT INITs in
 //! the FASM stay valid. Otherwise every LUT INIT is computed from the
@@ -40,8 +38,8 @@ use std::process::ExitCode;
 use std::sync::atomic::AtomicBool;
 
 use oxibit_fasm::db::Database;
-use oxibit_fasm::route::{EdgeKind, Graph, GraphOpts};
-use oxibit_pnr::{cellcfg, lutinit};
+use oxibit_fasm::route::{Graph, GraphOpts};
+use oxibit_pnr::{flow, lutinit};
 use oxibit_pnr::nets::{self, NetClass};
 use oxibit_pnr::placed::{self, Meta, Perm};
 use oxibit_pnr::reroute;
@@ -217,31 +215,23 @@ fn run() -> Result<bool, String> {
     line(json!({"compare": {"exact": exact, "other_exit": other_exit, "split_exit": split_exit, "no_match": no_match, "sinks_only_ours": short_sinks, "sinks_only_nextpnr": extra_sinks,
                             "nextpnr_signal_nets_not_imported": unclaimed, "lut_route_throughs_joined": through, "examples": examples}}));
 
+    // Standalone: the library flow routes and writes everything.
+    if std::env::var("OXIBIT_STANDALONE").is_ok_and(|v| v == "1") {
+        let sa = flow::standalone(&db, &g, &placed_v, &imp, &fasm, &r)?;
+        for v in &sa.report {
+            line(v.clone());
+        }
+        std::fs::write(out_path, sa.fasm.text()).map_err(|e| format!("{out_path}: {e}"))?;
+        let ok = sa.ok();
+        line(json!({"ok": ok, "compare_ok": compare_ok, "out": out_path}));
+        return Ok(ok);
+    }
+
     // Route: the imported signal nets, plus nextpnr's clock and default nets
     // kept as routed (the router reserves their nodes) and its constant nets
     // routed again by oxibit, as `pnr route` does.
-    let standalone = std::env::var("OXIBIT_STANDALONE").is_ok_and(|v| v == "1");
     let mut all = imp.nets.clone();
-    if standalone {
-        let (cnets, missed) = placed::constant_nets(&g, &imp);
-        let by_class = |c: NetClass| imp.nets.iter().filter(|n| n.class == c).count();
-        line(json!({"standalone": {"signal_nets": by_class(NetClass::Signal), "clock_nets": by_class(NetClass::GlobalClock),
-                                   "constant_nets": cnets.iter().filter(|n| n.class == NetClass::Constant).count(),
-                                   "default_nets": cnets.iter().filter(|n| n.class == NetClass::Default).count(),
-                                   "default_sinks": cnets.iter().filter(|n| n.class == NetClass::Default).map(|n| n.sinks.len()).sum::<usize>(),
-                                   "constant_sinks": imp.const_sinks.len(),
-                                   "constant_sinks_vcc": imp.const_sinks.iter().filter(|s| s.0).count(),
-                                   "constant_sinks_unique": imp.const_sinks.iter().map(|s| s.1).collect::<HashSet<_>>().len(), "constant_internal": imp.const_internal,
-                                   "constant_sinks_no_tie": missed.len(),
-                                   "no_tie_by_tile": missed.iter().fold(std::collections::BTreeMap::<String, usize>::new(), |mut m, &n| {
-                                       let name = g.node_name(n);
-                                       let tile = name.split('/').next().unwrap_or("").split("_X").next().unwrap_or("").to_string();
-                                       *m.entry(tile).or_default() += 1;
-                                       m
-                                   }), "no_tie_examples": missed.iter().take(6).map(|&n| g.node_name(n)).collect::<Vec<_>>()}}));
-        all.extend(cnets);
-    }
-    for n in fnets.iter().filter(|n| n.class != NetClass::Signal && !standalone) {
+    for n in fnets.iter().filter(|n| n.class != NetClass::Signal) {
         let mut k = n.clone();
         // Exporting to nextpnr: its constant routing stays (kept nets).
         if out_json.is_some() && k.class == NetClass::Constant {
@@ -254,20 +244,9 @@ fn run() -> Result<bool, String> {
     line(json!({"route": stats.to_json(), "nets": all.len()}));
 
     // Write: drop nextpnr's signal and constant pips, add oxibit's.
-    let rerouted = |c: NetClass| standalone || c == NetClass::Signal || c == NetClass::GlobalClock || (c == NetClass::Constant && out_json.is_none());
-    let mut drop: HashSet<String> =
+    let rerouted = |c: NetClass| c == NetClass::Signal || c == NetClass::GlobalClock || (c == NetClass::Constant && out_json.is_none());
+    let drop: HashSet<String> =
         fnets.iter().filter(|n| rerouted(n.class)).flat_map(|n| n.edges.iter().map(|e| g.edge_pip(e.tile, e.pi).name())).collect();
-    if standalone {
-        // Every pip, whatever net it was on, and the clock-tile buffers'
-        // settings the routing made (BUFHCE).
-        for l in fasm.lines() {
-            let f = l.split('#').next().unwrap_or("").trim();
-            let pip = matches!(g.lookup_pip(f), oxibit_fasm::route::PipLookup::Edge { .. } | oxibit_fasm::route::PipLookup::SameNode(_));
-            if pip || f.contains(".BUFHCE.") {
-                drop.insert(f.to_string());
-            }
-        }
-    }
     let mut out = String::with_capacity(fasm.len());
     let mut removed = 0usize;
     for l in fasm.lines() {
@@ -284,15 +263,7 @@ fn run() -> Result<bool, String> {
         if !rerouted(n.class) {
             continue;
         }
-        // A default constant path's `always` pseudo-pips (a BUFGCTRL
-        // control pin from its IMUX) are written as nextpnr writes them: no
-        // bits, but a clock buffer's relay names them.
-        let always: Vec<String> = if n.class == NetClass::Default {
-            n.edges.iter().filter(|e| e.kind == EdgeKind::Fixed).map(|e| g.edge_pip(e.tile, e.pi).name()).collect()
-        } else {
-            Vec::new()
-        };
-        for l in hops.iter().flat_map(|h: &Hop| g.edge_pip(h.tile, h.pi).fasm_lines()).chain(always) {
+        for l in hops.iter().flat_map(|h: &Hop| g.edge_pip(h.tile, h.pi).fasm_lines()) {
             if seen.insert(l.clone()) {
                 out.push_str(&l);
                 out.push('\n');
@@ -302,7 +273,7 @@ fn run() -> Result<bool, String> {
     }
     // LUT INITs: with pins allowed to move, every LUT's INIT is computed
     // from its cells' logical INITs for the pins the router chose.
-    if perm != Perm::None || standalone {
+    if perm != Perm::None {
         let loc = lutinit::Locator::new(&db)?;
         let (cells, skipped) = lutinit::cell_inits(&placed_v, &|b| loc.locate(b))?;
         let moves = lutinit::moves(&imp, &routes[..imp.nets.len()])?;
@@ -310,55 +281,6 @@ fn run() -> Result<bool, String> {
         out = text;
         line(json!({"lut_init": {"cells": cells.len(), "skipped": skipped, "written": st.written, "moved": st.moved,
                                  "routing_dropped": st.routing_dropped, "cellless_kept": st.cellless_kept}}));
-    }
-    // Standalone: the slice cell configuration (FF init and reset, control
-    // set, LUT mode, carry-in) comes from the cells, in place of nextpnr's
-    // lines. A carry-in the routed site paths set (`apply_site_muxes`,
-    // below) takes precedence; a different choice is counted.
-    if standalone {
-        let loc = lutinit::Locator::new(&db)?;
-        let halves = cellcfg::slice_config(&placed_v, &|b| loc.locate(b))?;
-        let mut kept = String::with_capacity(out.len());
-        let mut dropped = 0usize;
-        for l in out.lines() {
-            if cellcfg::is_slice_config(l.split('#').next().unwrap_or("").trim()) {
-                dropped += 1;
-                continue;
-            }
-            kept.push_str(l);
-            kept.push('\n');
-        }
-        let (mut written, mut from_paths) = (0usize, 0usize);
-        let mut disagree: Vec<String> = Vec::new();
-        for ((tile, site), lines) in &halves {
-            let path_pin = imp.site_muxes.get(&(tile.clone(), site.clone())).and_then(|m| m.get("PRECYINIT"));
-            let stem = format!("{tile}.{site}.PRECYINIT.");
-            for l in lines {
-                if let (Some(pin), Some(v)) = (path_pin, l.strip_prefix(&stem)) {
-                    from_paths += 1;
-                    let p = match pin.as_str() {
-                        "0" => "C0",
-                        "1" => "C1",
-                        p => p,
-                    };
-                    if p != v {
-                        disagree.push(format!("{tile}.{site}: cells {v}, paths {p}"));
-                    }
-                    continue;
-                }
-                kept.push_str(l);
-                kept.push('\n');
-                written += 1;
-            }
-        }
-        let ties = cellcfg::dsp_ties(&placed_v, &|b| loc.locate(b))?;
-        for l in &ties {
-            kept.push_str(l);
-            kept.push('\n');
-        }
-        out = kept;
-        line(json!({"cell_config": {"dropped": dropped, "written": written, "dsp_ties": ties.len(), "precyinit_from_paths": from_paths,
-                                    "precyinit_disagree": disagree.len(), "disagree_examples": disagree.iter().take(4).collect::<Vec<_>>()}}));
     }
     // Slice routing-bel settings for the site paths the import chose (FF
     // data and output muxes, carry inputs, WEMUX), in place of nextpnr's.
@@ -383,7 +305,7 @@ fn run() -> Result<bool, String> {
     // nextpnr chose; with LUT pins free (OXIBIT_PERM) or the whole design
     // routed here, the comparison is information and `fasm_equiv` is the
     // proof of equivalence.
-    let compare_gates = perm == Perm::None && !standalone;
+    let compare_gates = perm == Perm::None;
     let ok = (compare_ok || !compare_gates) && stats.overused == 0 && stats.unroutable_sinks == 0 && after.sinks_missing == 0 && after.shorts.is_empty();
     line(json!({"ok": ok, "compare_ok": compare_ok}));
     Ok(ok)

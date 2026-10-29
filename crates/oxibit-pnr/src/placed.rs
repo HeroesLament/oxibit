@@ -1027,44 +1027,64 @@ pub struct SiteMuxes {
 /// replaced; lines for routing bels it does not touch (constant inputs, for
 /// one) are kept.
 pub fn apply_site_muxes(fasm: &str, imp: &Import) -> (String, SiteMuxes) {
-    let mut st = SiteMuxes::default();
-    let mut ours: HashSet<(String, String, String)> = HashSet::new();
-    let mut lines: Vec<String> = Vec::new();
-    for ((tile, site), muxes) in &imp.site_muxes {
-        for (bel, pin) in muxes {
-            let Some(line) = mux_line(bel, pin) else { continue };
-            st.set += 1;
-            ours.insert((tile.clone(), site.clone(), bel.clone()));
-            if let Some(l) = line {
-                lines.push(format!("{tile}.{site}.{l}"));
-            }
-        }
-    }
+    let sm = site_mux_lines(imp);
+    let mut st = SiteMuxes { set: sm.set, ..Default::default() };
     let mut out = String::with_capacity(fasm.len());
     for l in fasm.lines() {
-        let f = l.split('#').next().unwrap_or("").trim();
-        let parts: Vec<&str> = f.split('.').collect();
-        let bel = match parts[..] {
-            [_, _, "CARRY4", b] => Some(b),
-            [_, _, b, ..] => Some(b),
-            _ => None,
-        };
-        if let (Some(bel), true) = (bel, parts.len() >= 3) {
-            let key = (parts[0].to_string(), parts[1].to_string(), bel.to_string());
-            if ours.contains(&key) && mux_line(bel, "").is_some() {
-                st.dropped += 1;
-                continue;
-            }
+        if sm.owns(l) {
+            st.dropped += 1;
+            continue;
         }
         out.push_str(l);
         out.push('\n');
     }
-    for l in lines {
-        out.push_str(&l);
+    for l in &sm.lines {
+        out.push_str(l);
         out.push('\n');
         st.written += 1;
     }
     (out, st)
+}
+
+/// The slice routing-bel settings of the import's site paths
+/// (`Import::site_muxes`) as FASM lines, and the routing bels they set.
+#[derive(Debug, Default, Clone)]
+pub struct SiteMuxLines {
+    pub lines: Vec<String>,
+    /// (tile, site, routing bel) the import sets: another line for one of
+    /// them is replaced.
+    pub owned: HashSet<(String, String, String)>,
+    /// Routing bels set (a default setting writes no line).
+    pub set: usize,
+}
+
+impl SiteMuxLines {
+    /// Whether a FASM line sets a routing bel the import sets.
+    pub fn owns(&self, line: &str) -> bool {
+        let f = line.split('#').next().unwrap_or("").trim();
+        let parts: Vec<&str> = f.split('.').collect();
+        let bel = match parts[..] {
+            [_, _, "CARRY4", b] => b,
+            [_, _, b, ..] => b,
+            _ => return false,
+        };
+        mux_line(bel, "").is_some() && self.owned.contains(&(parts[0].to_string(), parts[1].to_string(), bel.to_string()))
+    }
+}
+
+pub fn site_mux_lines(imp: &Import) -> SiteMuxLines {
+    let mut out = SiteMuxLines::default();
+    for ((tile, site), muxes) in &imp.site_muxes {
+        for (bel, pin) in muxes {
+            let Some(line) = mux_line(bel, pin) else { continue };
+            out.set += 1;
+            out.owned.insert((tile.clone(), site.clone(), bel.clone()));
+            if let Some(l) = line {
+                out.lines.push(format!("{tile}.{site}.{l}"));
+            }
+        }
+    }
+    out
 }
 
 /// The sinks a net reaches through one exit: fixed sink nodes, pin groups,
