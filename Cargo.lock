@@ -230,9 +230,12 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "flate2",
+ "libc",
  "oxibit-bitstream",
  "oxibit-fasm",
  "oxibit-guard",
+ "oxibit-pnr",
+ "oxibit-report",
  "oxibit-zynq7",
  "serde",
  "serde_json",
@@ -260,6 +263,23 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "oxibit-bitstream",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "oxibit-pnr"
+version = "0.1.0"
+dependencies = [
+ "oxibit-fasm",
+ "oxibit-report",
+ "serde_json",
+]
+
+[[package]]
+name = "oxibit-report"
+version = "0.1.0"
+dependencies = [
  "serde",
  "serde_json",
 ]
