@@ -35,10 +35,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use oxibit_fasm::db::Database;
-use oxibit_fasm::route::Graph;
+use oxibit_fasm::route::{EdgeKind, Graph};
 use serde_json::Value;
 
-use crate::nets::{Net, NetClass};
+use crate::nets::{Edge, Net, NetClass};
 use crate::router::Hop;
 
 type R<T> = Result<T, String>;
@@ -71,6 +71,12 @@ struct Variant {
     in_pin: HashMap<String, String>,
     /// Wire -> output site pin on it.
     out_pin: HashMap<String, String>,
+    /// (from wire, to wire) -> (routing bel, its input pin): the mux setting
+    /// a site path through that pip needs.
+    pip_bel: HashMap<(String, String), (String, String)>,
+    /// Output wire of a constant bel in the site (CEUSEDVCC, SRUSEDGND,
+    /// CYINITVCC, ...) -> its value.
+    const_wire: HashMap<String, bool>,
 }
 
 /// The site types of nextpnr-xilinx-meta for one family directory.
@@ -115,7 +121,23 @@ fn parse_site_type(v: &Value) -> HashMap<String, Variant> {
         let mut bels = HashMap::new();
         let mut bel_type = HashMap::new();
         let mut rbel = HashSet::new();
+        let mut const_wire = HashMap::new();
         for (bel, b) in var["bels"].as_object().into_iter().flatten() {
+            let ty = b["type"].as_str().unwrap_or("");
+            let value = if bel.ends_with("VCC") || ty.ends_with("VCC") {
+                Some(true)
+            } else if bel.ends_with("GND") || ty.ends_with("GND") {
+                Some(false)
+            } else {
+                None
+            };
+            if let Some(value) = value {
+                for d in b["pins"].as_object().into_iter().flatten().map(|(_, d)| d) {
+                    if d["dir"].as_str() == Some("OUTPUT") {
+                        const_wire.insert(d["wire"].as_str().unwrap_or("").to_string(), value);
+                    }
+                }
+            }
             let bp: HashMap<String, String> =
                 b["pins"].as_object().into_iter().flatten().map(|(p, d)| (p.clone(), d["wire"].as_str().unwrap_or("").to_string())).collect();
             bels.insert(bel.clone(), bp);
@@ -126,6 +148,7 @@ fn parse_site_type(v: &Value) -> HashMap<String, Variant> {
         }
         let mut back: HashMap<String, Vec<String>> = HashMap::new();
         let mut fwd: HashMap<String, Vec<String>> = HashMap::new();
+        let mut pip_bel: HashMap<(String, String), (String, String)> = HashMap::new();
         for pip in var["pips"].as_array().into_iter().flatten() {
             let bel = pip["bel"].as_str().unwrap_or("");
             if !rbel.contains(bel) {
@@ -135,12 +158,13 @@ fn parse_site_type(v: &Value) -> HashMap<String, Variant> {
             let (Some(fw), Some(tw)) = (bels[bel].get(f), bels[bel].get(t)) else { continue };
             back.entry(tw.clone()).or_default().push(fw.clone());
             fwd.entry(fw.clone()).or_default().push(tw.clone());
+            pip_bel.insert((fw.clone(), tw.clone()), (bel.to_string(), f.to_string()));
         }
         for v in back.values_mut().chain(fwd.values_mut()) {
             v.sort();
             v.dedup();
         }
-        out.insert(name.clone(), Variant { pins, bels, bel_type, back, fwd, in_pin, out_pin });
+        out.insert(name.clone(), Variant { pins, bels, bel_type, back, fwd, in_pin, out_pin, pip_bel, const_wire });
     }
     out
 }
@@ -247,6 +271,20 @@ impl Unresolved {
     }
 }
 
+/// The LUT behind one pin group: where it is, the pin number of each group
+/// member, and the bel pins the placer put the net on (`lutinit`).
+#[derive(Debug, Clone)]
+pub struct LutSlot {
+    pub tile: String,
+    /// The site as FASM names it (`SLICEL_X0`).
+    pub site: String,
+    pub letter: char,
+    /// Pin number (1..=6) of each member of the group, in group order.
+    pub pins: Vec<u8>,
+    /// The net's bel pins on this LUT as placed.
+    pub from: Vec<u8>,
+}
+
 /// Result of `import`.
 #[derive(Debug, Default)]
 pub struct Import {
@@ -260,6 +298,15 @@ pub struct Import {
     /// Per routed net: for each sink node it may reach (fixed sinks and
     /// every member of its pin groups), how that pin reaches its bel pins.
     pub sink_paths: Vec<Vec<(u32, SinkPath)>>,
+    /// Per routed net, the LUT behind each of its pin groups, in order.
+    pub group_slots: Vec<Vec<LutSlot>>,
+    /// Constant inputs to route from a tie: (value, input site pin node).
+    pub const_sinks: Vec<(bool, u32)>,
+    /// Constant inputs a site drives itself (CE from CEUSEDVCC, ...).
+    pub const_internal: usize,
+    /// The routing-bel setting every site path the import chose needs:
+    /// (tile, FASM site) -> routing bel -> its input pin (`apply_site_muxes`).
+    pub site_muxes: BTreeMap<(String, String), BTreeMap<String, String>>,
     /// Logical nets not routed, by reason.
     pub skipped: BTreeMap<String, usize>,
     /// Sinks reached inside their driver's site.
@@ -407,6 +454,7 @@ pub fn import(g: &Graph, sites: &HashMap<String, (String, String)>, meta: &mut M
     let mut drivers: HashMap<i64, Pin> = HashMap::new();
     let mut sinks: HashMap<i64, Vec<Pin>> = HashMap::new();
     let mut skip_net: HashMap<i64, &'static str> = HashMap::new();
+    let mut const_value: HashMap<i64, bool> = HashMap::new();
     // Bel pins the site model lacks, with their nets: a fractured LUT's 5LUT
     // has no A6, which nextpnr ties high; only a signal net there is a fault.
     let mut missing_pins: Vec<(i64, String)> = Vec::new();
@@ -434,10 +482,16 @@ pub fn import(g: &Graph, sites: &HashMap<String, (String, String)>, meta: &mut M
                 if why == "pad" || d.as_str() == Some("output") {
                     for b in bits(p) {
                         skip_net.entry(b).or_insert(why);
+                        if why == "constant" {
+                            const_value.insert(b, ty == "PSEUDO_VCC");
+                        }
                     }
                 }
             }
-            continue;
+            // A clock buffer is a placed cell: its pins are resolved.
+            if why != "clock" {
+                continue;
+            }
         }
 
         let Some(bel_s) = attrs.get("NEXTPNR_BEL").and_then(Value::as_str) else {
@@ -582,7 +636,7 @@ pub fn import(g: &Graph, sites: &HashMap<String, (String, String)>, meta: &mut M
     };
     let mut forced: HashMap<(String, String, String), i64> = HashMap::new();
     for &b in &bits {
-        let (None, Some(drv)) = (skip_net.get(&b), drivers.get(&b)) else { continue };
+        let (true, Some(drv)) = (skip_net.get(&b).is_none_or(|w| *w == "clock"), drivers.get(&b)) else { continue };
         for s in &sinks[&b] {
             if internal(s, drv) {
                 continue;
@@ -595,10 +649,48 @@ pub fn import(g: &Graph, sites: &HashMap<String, (String, String)>, meta: &mut M
     let mut claimed: HashMap<(String, String, String), i64> = HashMap::new();
 
     for b in bits {
-        if let Some(why) = skip_net.get(&b) {
-            *imp.skipped.entry((*why).into()).or_default() += 1;
-            continue;
-        }
+        let class = match skip_net.get(&b) {
+            None => NetClass::Signal,
+            Some(&"clock") => NetClass::GlobalClock,
+            Some(&"constant") => {
+                // Each input is driven inside its site when the site has
+                // that constant (a routing-bel path from a constant bel),
+                // else from a tie (`constant_nets`).
+                let val = const_value.get(&b).copied().unwrap_or(false);
+                for s in sinks.get(&b).into_iter().flatten() {
+                    let sv = &variants[&s.var];
+                    if let Some(cw) = walk(&s.wire, &sv.back).into_iter().find(|w| sv.const_wire.get(w) == Some(&val)) {
+                        if let Some(w) = site_path(&cw, &s.wire, &sv.fwd) {
+                            note_muxes(&mut imp.site_muxes, &mut imp.unresolved, &s.tile, &s.site, sv, &w);
+                            imp.const_internal += 1;
+                            continue;
+                        }
+                    }
+                    let cands = entries(s);
+                    let free = |c: &String| {
+                        let k = (s.tile.clone(), s.site.clone(), c.clone());
+                        forced.get(&k).is_none_or(|&o| o == b) && claimed.get(&k).is_none_or(|&o| o == b)
+                    };
+                    let Some(pin) = cands.iter().find(|c| free(c)).or(cands.first()).cloned() else {
+                        imp.unresolved.add("no_input_pin", format!("{}/{} {}.{} (constant)", s.tile, s.site, s.bel, s.port));
+                        continue;
+                    };
+                    claimed.entry((s.tile.clone(), s.site.clone(), pin.clone())).or_insert(b);
+                    let Some(n) = site_pin(g, s, &pin, &mut imp.unresolved) else { continue };
+                    let entry_wire = sv.pins.get(&pin).map(|x| x.0.clone()).unwrap_or_else(|| pin.clone());
+                    if let Some(w) = site_path(&entry_wire, &s.wire, &sv.fwd) {
+                        note_muxes(&mut imp.site_muxes, &mut imp.unresolved, &s.tile, &s.site, sv, &w);
+                    }
+                    imp.const_sinks.push((val, n));
+                }
+                *imp.skipped.entry("constant".into()).or_default() += 1;
+                continue;
+            }
+            Some(why) => {
+                *imp.skipped.entry((*why).into()).or_default() += 1;
+                continue;
+            }
+        };
         let Some(drv) = drivers.get(&b) else {
             *imp.skipped.entry("undriven".into()).or_default() += 1;
             continue;
@@ -611,12 +703,15 @@ pub fn import(g: &Graph, sites: &HashMap<String, (String, String)>, meta: &mut M
         let exits: Vec<String> = reach_out.iter().filter_map(|w| dv.out_pin.get(w).cloned()).collect();
 
         let mut fixed: Vec<(String, u32)> = Vec::new(); // (exit kind, node)
-        let mut groups: HashMap<(String, String, char), Vec<u32>> = HashMap::new();
+        let mut groups: HashMap<(String, String, char), LutGroup> = HashMap::new();
         let mut paths: Vec<(u32, SinkPath)> = Vec::new();
         for s in &sinks[&b] {
             let sv = &variants[&s.var];
             if internal(s, drv) {
                 imp.internal_sinks += 1;
+                if let Some(w) = site_path(&drv.wire, &s.wire, &sv.fwd) {
+                    note_muxes(&mut imp.site_muxes, &mut imp.unresolved, &s.tile, &s.site, sv, &w);
+                }
                 continue;
             }
             let letter = s.bel.chars().next().unwrap_or('?');
@@ -636,17 +731,24 @@ pub fn import(g: &Graph, sites: &HashMap<String, (String, String)>, meta: &mut M
                             paths.push((n, SinkPath { tile: s.tile.clone(), np_site: s.np_site.clone(), tile_wire: tw, site_wires: vec![s.wire.clone()] }));
                         }
                     }
-                    if let Entry::Vacant(e) = groups.entry((s.tile.clone(), s.site.clone(), letter)) {
-                        let mut pins = Vec::new();
-                        for j in 1..=top {
-                            if const_pins.contains(&(s.tile.clone(), s.site.clone(), letter, j)) {
-                                continue;
+                    let grp = match groups.entry((s.tile.clone(), s.site.clone(), letter)) {
+                        Entry::Occupied(e) => e.into_mut(),
+                        Entry::Vacant(e) => {
+                            let mut grp = LutGroup::default();
+                            for j in 1..=top {
+                                if const_pins.contains(&(s.tile.clone(), s.site.clone(), letter, j)) {
+                                    continue;
+                                }
+                                if let Some(n) = site_pin(g, s, &format!("{letter}{j}"), &mut imp.unresolved) {
+                                    grp.nodes.push(n);
+                                    grp.pins.push(j);
+                                }
                             }
-                            if let Some(n) = site_pin(g, s, &format!("{letter}{j}"), &mut imp.unresolved) {
-                                pins.push(n);
-                            }
+                            e.insert(grp)
                         }
-                        e.insert(pins);
+                    };
+                    if !grp.from.contains(&k) {
+                        grp.from.push(k);
                     }
                     continue;
                 }
@@ -669,6 +771,7 @@ pub fn import(g: &Graph, sites: &HashMap<String, (String, String)>, meta: &mut M
             let (entry_wire, primary) = sv.pins.get(&pin).map(|x| (x.0.clone(), x.1.clone())).unwrap_or_else(|| (pin.clone(), pin.clone()));
             if let Some(tw) = g.site_pin_wire(&s.tile, &s.site, &primary) {
                 let site_wires = site_path(&entry_wire, &s.wire, &sv.fwd).unwrap_or_else(|| vec![entry_wire.clone()]);
+                note_muxes(&mut imp.site_muxes, &mut imp.unresolved, &s.tile, &s.site, sv, &site_wires);
                 paths.push((n, SinkPath { tile: s.tile.clone(), np_site: s.np_site.clone(), tile_wire: tw, site_wires }));
             }
             let kind = if pin == "CIN" { "COUT" } else { "general" };
@@ -683,7 +786,7 @@ pub fn import(g: &Graph, sites: &HashMap<String, (String, String)>, meta: &mut M
         // rest through the nearest other output pin.
         let general_exit = exits.iter().find(|e| e.as_str() != "COUT").cloned();
         let cout_exit = exits.iter().find(|e| e.as_str() == "COUT").cloned();
-        let mut by_exit: BTreeMap<String, (Vec<u32>, Vec<Vec<u32>>)> = BTreeMap::new();
+        let mut by_exit: BTreeMap<String, ExitSinks> = BTreeMap::new();
         for (kind, n) in fixed {
             let exit = if kind == "COUT" { cout_exit.clone().or(general_exit.clone()) } else { general_exit.clone() };
             let Some(exit) = exit else {
@@ -697,15 +800,17 @@ pub fn import(g: &Graph, sites: &HashMap<String, (String, String)>, meta: &mut M
                 Some(exit) => {
                     let mut gs: Vec<_> = groups.into_iter().collect();
                     gs.sort_by(|a, b| a.0.cmp(&b.0));
-                    for (_, pins) in gs {
-                        *imp.group_sizes.entry(pins.len()).or_default() += 1;
-                        by_exit.entry(exit.clone()).or_default().1.push(pins);
+                    for ((tile, site, letter), grp) in gs {
+                        *imp.group_sizes.entry(grp.nodes.len()).or_default() += 1;
+                        let e = by_exit.entry(exit.clone()).or_default();
+                        e.1.push(grp.nodes);
+                        e.2.push(LutSlot { tile, site, letter, pins: grp.pins, from: grp.from });
                     }
                 }
                 None => imp.unresolved.add("no_output_pin", format!("{}/{} {}.{}", drv.tile, drv.site, drv.bel, drv.port)),
             }
         }
-        for (exit, (mut fixed, groups)) in by_exit {
+        for (exit, (mut fixed, groups, slots)) in by_exit {
             let Some(src) = site_pin(g, drv, &exit, &mut imp.unresolved) else { continue };
             let primary = dv.pins.get(&exit).map(|x| x.1.clone()).unwrap_or_else(|| exit.clone());
             let exit_wire = dv.pins.get(&exit).map(|x| x.0.clone()).unwrap_or_else(|| exit.clone());
@@ -716,16 +821,263 @@ pub fn import(g: &Graph, sites: &HashMap<String, (String, String)>, meta: &mut M
                 site_wires: site_path(&drv.wire, &exit_wire, &dv.fwd).unwrap_or_else(|| vec![drv.wire.clone()]),
                 tile_wire: g.site_pin_wire(&drv.tile, &drv.site, &primary).unwrap_or_default(),
             };
+            note_muxes(&mut imp.site_muxes, &mut imp.unresolved, &drv.tile, &drv.site, dv, &source.site_wires);
             fixed.sort_unstable();
             fixed.dedup();
-            imp.nets.push(Net { source: src, sinks: fixed, pin_groups: groups, edges: Vec::new(), class: NetClass::Signal });
+            imp.nets.push(Net { source: src, sinks: fixed, pin_groups: groups, edges: Vec::new(), class });
             imp.names.push(format!("{name}@{exit}"));
             imp.bits.push(b);
             imp.sources.push(source);
             imp.sink_paths.push(paths.clone());
+            imp.group_slots.push(slots);
         }
     }
     Ok(imp)
+}
+
+/// Nets for the import's constant inputs (`Import::const_sinks`).
+///
+/// An input whose interconnect mux reads VCC when unset (a `default`
+/// pseudo-pip from the tile's VCC_WIRE, then hard wires) needs no pip: it
+/// goes on a `NetClass::Default` net per tie, which the router keeps clear
+/// and writes nothing for. Every other input is given to a VCC_WIRE or
+/// GND_WIRE tie of its value that reaches it within three pips, hard wires
+/// not counted (GND_WIRE, GFAN, IMUX; or a VCC default into an interconnect
+/// input, then the pip of a clock tile's control mux), and each tie drives
+/// one `NetClass::Constant` net the router routes. Returns the nets and the
+/// inputs no tie reaches.
+pub fn constant_nets(g: &Graph, imp: &Import) -> (Vec<Net>, Vec<u32>) {
+    let mut want: HashMap<u32, bool> = imp.const_sinks.iter().map(|&(v, n)| (n, v)).collect();
+    let near: HashSet<(i16, i16)> = want.keys().map(|&n| g.node_xy(n)).collect();
+    let close = |n: u32| {
+        let (x, y) = g.node_xy(n);
+        near.iter().any(|&(a, b)| (a - x).abs() <= 2 && (b - y).abs() <= 2)
+    };
+    let mut nets = Vec::new();
+    // Default reads: VCC_WIRE -default-> mux, then hard wires to the input.
+    for tie in g.nodes_with_wire(&["VCC_WIRE".to_string()]) {
+        if !close(tie) {
+            continue;
+        }
+        let mut sinks = Vec::new();
+        let mut edges = Vec::new();
+        for &(d, t, pi) in g.out_edges(tie) {
+            if g.edge_kind(t, pi) != EdgeKind::Default {
+                continue;
+            }
+            let mut path = vec![Edge { src: tie, dst: d, tile: t, pi, kind: EdgeKind::Default }];
+            let mut at = d;
+            let mut hit = want.get(&at) == Some(&true);
+            while !hit {
+                let next: Vec<_> = g.out_edges(at).iter().filter(|&&(_, t2, p2)| g.edge_kind(t2, p2) == EdgeKind::Fixed).copied().collect();
+                let [(d2, t2, p2)] = next[..] else { break };
+                path.push(Edge { src: at, dst: d2, tile: t2, pi: p2, kind: EdgeKind::Fixed });
+                at = d2;
+                hit = want.get(&at) == Some(&true);
+                if path.len() > 3 {
+                    break;
+                }
+            }
+            if hit {
+                want.remove(&at);
+                sinks.push(at);
+                edges.extend(path);
+            }
+        }
+        if !sinks.is_empty() {
+            sinks.sort_unstable();
+            nets.push(Net { source: tie, sinks, pin_groups: Vec::new(), edges, class: NetClass::Default });
+        }
+    }
+    let mut by_tie: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+    // Three pips reach nearly every input; the rest (an MMCM's CLKIN2 from
+    // GND through GFAN, FAN_ALT, FAN_BOUNCE and a CLK input) search deeper
+    // from the ties near them.
+    for (depth, radius) in [(3, None), (6, Some(6i16))] {
+        let near: HashSet<(i16, i16)> = want.keys().map(|&n| g.node_xy(n)).collect();
+        for (val, wire) in [(true, "VCC_WIRE"), (false, "GND_WIRE")] {
+            if !want.values().any(|&v| v == val) {
+                continue;
+            }
+            for tie in g.nodes_with_wire(&[wire.to_string()]) {
+                if let Some(r) = radius {
+                    let (x, y) = g.node_xy(tie);
+                    if !near.iter().any(|&(a, b)| (a - x).abs() <= r && (b - y).abs() <= r) {
+                        continue;
+                    }
+                }
+                let mut seen = HashSet::from([tie]);
+                let mut frontier = vec![tie];
+                for level in 0..depth {
+                    let mut next = Vec::new();
+                    for n in frontier {
+                        for &(d, t, pi) in g.out_edges(n) {
+                            let ok = match g.edge_kind(t, pi) {
+                                EdgeKind::Feature => true,
+                                // A VCC tie's default into an interconnect input.
+                                EdgeKind::Default => val && level == 0,
+                                _ => false,
+                            };
+                            if !ok || !seen.insert(d) {
+                                continue;
+                            }
+                            // The pip's node and the hard wires on from it.
+                            let mut hard = vec![d];
+                            let mut i = 0;
+                            while i < hard.len() && hard.len() < 16 {
+                                for &(d2, t2, p2) in g.out_edges(hard[i]) {
+                                    if g.edge_kind(t2, p2) == EdgeKind::Fixed && seen.insert(d2) {
+                                        hard.push(d2);
+                                    }
+                                }
+                                i += 1;
+                            }
+                            for h in hard {
+                                if want.get(&h) == Some(&val) {
+                                    want.remove(&h);
+                                    by_tie.entry(tie).or_default().push(h);
+                                }
+                                next.push(h);
+                            }
+                        }
+                    }
+                    frontier = next;
+                }
+            }
+        }
+    }
+    nets.extend(by_tie.into_iter().map(|(tie, mut sinks)| {
+        sinks.sort_unstable();
+        sinks.dedup();
+        Net { source: tie, sinks, pin_groups: Vec::new(), edges: Vec::new(), class: NetClass::Constant }
+    }));
+    let mut missed: Vec<u32> = want.into_keys().collect();
+    missed.sort_unstable();
+    (nets, missed)
+}
+
+/// Record the routing-bel settings a site path needs. Two paths that want
+/// one routing bel on different inputs cannot both be built: counted in
+/// `unresolved` as `site_mux`.
+fn note_muxes(
+    muxes: &mut BTreeMap<(String, String), BTreeMap<String, String>>,
+    un: &mut Unresolved,
+    tile: &str,
+    site: &str,
+    v: &Variant,
+    wires: &[String],
+) {
+    for pair in wires.windows(2) {
+        let Some((bel, pin)) = v.pip_bel.get(&(pair[0].clone(), pair[1].clone())) else { continue };
+        let m = muxes.entry((tile.to_string(), site.to_string())).or_default();
+        match m.get(bel) {
+            Some(p) if p != pin => un.add("site_mux", format!("{tile}/{site} {bel}: {p} and {pin}")),
+            Some(_) => {}
+            None => {
+                m.insert(bel.clone(), pin.clone());
+            }
+        }
+    }
+}
+
+/// The FASM line a slice routing-bel setting takes, as nextpnr-xilinx
+/// writes it (`write_routing_bel`): `None` for a routing bel this does not
+/// manage, `Some(None)` for a managed one whose setting is the default (no
+/// line). Managed: the FF data muxes (`AFFMUX`, `A5FFMUX`), the output muxes
+/// (`AOUTMUX`), the carry chain's `ACY0` and `PRECYINIT`, and `WEMUX`.
+fn mux_line(bel: &str, pin: &str) -> Option<Option<String>> {
+    let letter = bel.len() > 1 && "ABCD".contains(&bel[..1]);
+    let rest = if letter { &bel[1..] } else { bel };
+    match rest {
+        "FFMUX" | "5FFMUX" | "OUTMUX" if letter => {
+            let pin = match pin {
+                "CARRY4_MUX" => "CY",
+                "CARRY4_XOR" => "XOR",
+                p => p,
+            };
+            Some(Some(format!("{bel}.{pin}")))
+        }
+        "CY0" if letter => Some((pin == "O5").then(|| format!("CARRY4.{bel}"))),
+        "PRECYINIT" => Some(Some(format!(
+            "PRECYINIT.{}",
+            match pin {
+                "0" => "C0",
+                "1" => "C1",
+                p => p,
+            }
+        ))),
+        "WEMUX" => Some((pin == "CE").then(|| "WEMUX.CE".to_string())),
+        _ => None,
+    }
+}
+
+/// What `apply_site_muxes` did.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SiteMuxes {
+    /// Routing bels set from the import's paths.
+    pub set: usize,
+    /// Lines written (a default setting writes none).
+    pub written: usize,
+    /// The FASM's own lines for those routing bels, dropped.
+    pub dropped: usize,
+}
+
+/// Put the import's slice routing-bel settings (`Import::site_muxes`) into
+/// `fasm`: the FASM's lines for every routing bel the import sets are
+/// replaced; lines for routing bels it does not touch (constant inputs, for
+/// one) are kept.
+pub fn apply_site_muxes(fasm: &str, imp: &Import) -> (String, SiteMuxes) {
+    let mut st = SiteMuxes::default();
+    let mut ours: HashSet<(String, String, String)> = HashSet::new();
+    let mut lines: Vec<String> = Vec::new();
+    for ((tile, site), muxes) in &imp.site_muxes {
+        for (bel, pin) in muxes {
+            let Some(line) = mux_line(bel, pin) else { continue };
+            st.set += 1;
+            ours.insert((tile.clone(), site.clone(), bel.clone()));
+            if let Some(l) = line {
+                lines.push(format!("{tile}.{site}.{l}"));
+            }
+        }
+    }
+    let mut out = String::with_capacity(fasm.len());
+    for l in fasm.lines() {
+        let f = l.split('#').next().unwrap_or("").trim();
+        let parts: Vec<&str> = f.split('.').collect();
+        let bel = match parts[..] {
+            [_, _, "CARRY4", b] => Some(b),
+            [_, _, b, ..] => Some(b),
+            _ => None,
+        };
+        if let (Some(bel), true) = (bel, parts.len() >= 3) {
+            let key = (parts[0].to_string(), parts[1].to_string(), bel.to_string());
+            if ours.contains(&key) && mux_line(bel, "").is_some() {
+                st.dropped += 1;
+                continue;
+            }
+        }
+        out.push_str(l);
+        out.push('\n');
+    }
+    for l in lines {
+        out.push_str(&l);
+        out.push('\n');
+        st.written += 1;
+    }
+    (out, st)
+}
+
+/// The sinks a net reaches through one exit: fixed sink nodes, pin groups,
+/// and the LUT behind each group.
+type ExitSinks = (Vec<u32>, Vec<Vec<u32>>, Vec<LutSlot>);
+
+/// One LUT's pin group under construction: the allowed pins' nodes and
+/// numbers, and the bel pins the net was placed on.
+#[derive(Default)]
+struct LutGroup {
+    nodes: Vec<u32>,
+    pins: Vec<u8>,
+    from: Vec<u8>,
 }
 
 /// Write `routes` (one hop list per `imp.nets` entry, more entries ignored)
@@ -829,4 +1181,38 @@ pub fn write_routing(g: &Graph, imp: &Import, routes: &[Vec<Hop>], v: &mut Value
         }
     }
     Ok((set, routing, unnamed))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn site_mux_lines() {
+        assert_eq!(mux_line("BFFMUX", "BX"), Some(Some("BFFMUX.BX".into())));
+        assert_eq!(mux_line("CFFMUX", "CARRY4_XOR"), Some(Some("CFFMUX.XOR".into())));
+        assert_eq!(mux_line("AOUTMUX", "CARRY4_MUX"), Some(Some("AOUTMUX.CY".into())));
+        assert_eq!(mux_line("A5FFMUX", "IN_B"), Some(Some("A5FFMUX.IN_B".into())));
+        assert_eq!(mux_line("ACY0", "O5"), Some(Some("CARRY4.ACY0".into())));
+        assert_eq!(mux_line("ACY0", "AX"), Some(None));
+        assert_eq!(mux_line("PRECYINIT", "1"), Some(Some("PRECYINIT.C1".into())));
+        assert_eq!(mux_line("WEMUX", "WE"), Some(None));
+        assert_eq!(mux_line("WEMUX", "CE"), Some(Some("WEMUX.CE".into())));
+        assert_eq!(mux_line("CEUSEDMUX", "IN"), None);
+        assert_eq!(mux_line("ADI1MUX", "AI"), None);
+    }
+
+    #[test]
+    fn site_muxes_replace_their_lines() {
+        let mut imp = Import::default();
+        let site = ("T".to_string(), "SLICEL_X0".to_string());
+        let m = imp.site_muxes.entry(site).or_default();
+        m.insert("BFFMUX".into(), "BX".into());
+        m.insert("ACY0".into(), "AX".into());
+        m.insert("SRUSEDMUX".into(), "IN".into());
+        let fasm = "T.SLICEL_X0.BFFMUX.O6\nT.SLICEL_X0.CARRY4.ACY0\nT.SLICEL_X0.CARRY4.BCY0\nT.SLICEL_X0.SRUSEDMUX\nT.SLICEL_X0.AFFMUX.XOR\nT.SLICEL_X1.BFFMUX.O6\n";
+        let (out, st) = apply_site_muxes(fasm, &imp);
+        assert_eq!((st.set, st.written, st.dropped), (2, 1, 2));
+        assert_eq!(out, "T.SLICEL_X0.CARRY4.BCY0\nT.SLICEL_X0.SRUSEDMUX\nT.SLICEL_X0.AFFMUX.XOR\nT.SLICEL_X1.BFFMUX.O6\nT.SLICEL_X0.BFFMUX.BX\n");
+    }
 }

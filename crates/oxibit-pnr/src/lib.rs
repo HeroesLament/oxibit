@@ -7,7 +7,9 @@
 //! placing or routing it again.
 //! Progress goes through `oxibit_report::Progress`; nothing here prints.
 
+pub mod cellcfg;
 pub mod dsp_patch;
+pub mod lutinit;
 pub mod nets;
 pub mod placed;
 pub mod reroute;

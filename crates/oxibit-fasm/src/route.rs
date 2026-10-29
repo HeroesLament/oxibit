@@ -1249,6 +1249,13 @@ impl Graph {
         Err(format!("no configured path {from} -> {to}"))
     }
 
+    /// Every site pin of a tile: (site, pin, node).
+    pub fn tile_site_pins(&self, tile: &str) -> Vec<(String, String, u32)> {
+        let Some(&ti) = self.tile_index.get(tile) else { return vec![] };
+        let td = &self.types[&self.tiles[ti as usize].1];
+        td.site_pins.iter().map(|(s, p, w)| (s.clone(), p.clone(), self.node_of[(self.wire_base[ti as usize] + w) as usize])).collect()
+    }
+
     /// Every pin node of one CLB site.
     pub fn site_pin_nodes(&self, tile: &str, site: &str) -> Vec<u32> {
         let Some(&ti) = self.tile_index.get(tile) else { return vec![] };

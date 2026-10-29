@@ -49,6 +49,10 @@ pub enum NetClass {
     /// On the global clock network (BUFG, HROW, HCLK): kept as the design
     /// routed it.
     Clock,
+    /// A clock net of a placed design (driven by a clock buffer cell):
+    /// routed, and may cross the clock buffers in the clock tiles (BUFHCE
+    /// relays), which no other net takes.
+    GlobalClock,
 }
 
 /// What `from_fasm` could not place in a tree.

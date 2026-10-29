@@ -33,6 +33,8 @@ pub struct Reroute {
 pub struct Check {
     pub sinks: usize,
     pub sinks_missing: usize,
+    /// (net source, sink) of every sink not reached.
+    pub missing: Vec<(u32, u32)>,
     pub shorts: HashSet<u32>,
 }
 
@@ -83,6 +85,7 @@ fn class_name(c: NetClass) -> &'static str {
         NetClass::Constant => "constant",
         NetClass::Default => "default",
         NetClass::Clock => "clock",
+        NetClass::GlobalClock => "global_clock",
     }
 }
 
@@ -144,6 +147,13 @@ pub fn run(g: &Graph, fasm: &str, opts: Opts, p: &dyn Progress) -> Reroute {
 /// clock buffers the FASM configures (`Graph::trace` with relays).
 pub fn check(g: &Graph, nets: &[Net], fasm: &str) -> Check {
     let on: HashSet<String> = pip_lines(fasm);
+    // Every bare line: a clock buffer relay's lines are site settings.
+    let all: HashSet<String> = fasm
+        .lines()
+        .map(|l| l.split('#').next().unwrap_or("").trim())
+        .filter(|f| !f.is_empty() && !f.contains('=') && !f.contains('['))
+        .map(String::from)
+        .collect();
     let set_into: HashSet<u32> = on
         .iter()
         .filter_map(|l| match g.lookup_pip(l) {
@@ -157,9 +167,12 @@ pub fn check(g: &Graph, nets: &[Net], fasm: &str) -> Check {
         if n.class == NetClass::Default {
             continue;
         }
-        let nodes = if n.class == NetClass::Clock { g.trace(n.source, &on, true).0 } else { reach(g, n.source, &on, &set_into) };
+        let nodes = if matches!(n.class, NetClass::Clock | NetClass::GlobalClock) { g.trace(n.source, &all, true).0 } else { reach(g, n.source, &on, &set_into) };
         c.sinks += n.sinks.len();
-        c.sinks_missing += n.sinks.iter().filter(|s| !nodes.contains(s)).count();
+        for &s in n.sinks.iter().filter(|s| !nodes.contains(s)) {
+            c.sinks_missing += 1;
+            c.missing.push((n.source, s));
+        }
         for m in nodes {
             match owner.get(&m) {
                 Some(&j) if j != i => {
@@ -183,7 +196,9 @@ fn reach(g: &Graph, src: u32, on: &HashSet<String>, set_into: &HashSet<u32>) -> 
             let conducts = match g.edge_kind(tile, pi) {
                 EdgeKind::Feature => on.contains(&g.edge_pip(tile, pi).name()),
                 EdgeKind::Fixed => !set_into.contains(&d),
-                EdgeKind::Relay | EdgeKind::Default => false,
+                // A tie's default into an interconnect input no pip sets.
+                EdgeKind::Default => n == src && !set_into.contains(&d),
+                EdgeKind::Relay => false,
             };
             if conducts && seen.insert(d) {
                 stack.push(d);

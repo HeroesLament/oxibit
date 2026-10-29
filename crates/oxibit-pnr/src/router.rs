@@ -266,6 +266,10 @@ impl<'g> Router<'g> {
                     match self.g.edge_kind(tile, pi) {
                         EdgeKind::Feature | EdgeKind::Fixed => {}
                         EdgeKind::Relay if self.g.edge_site_through(tile, pi) => {}
+                        EdgeKind::Relay if net.class == NetClass::GlobalClock && self.g.edge_pip(tile, pi).tile.starts_with("CLK_") => {}
+                        // A constant net's VCC tie reads into an interconnect
+                        // input through its default (no line).
+                        EdgeKind::Default if net.class == NetClass::Constant && node == net.source => {}
                         EdgeKind::Relay | EdgeKind::Default => continue,
                     }
                     if self.reserved[d as usize] && !set.contains(&d) {
@@ -333,7 +337,7 @@ impl<'g> Router<'g> {
     pub fn run_observed(&mut self, nets: &[Net], progress: &dyn Progress, observe: &mut dyn FnMut(u32, &[u16])) -> (Vec<Vec<Hop>>, Stats) {
         let t0 = Instant::now();
         let mut stats = Stats::default();
-        let routed: Vec<bool> = nets.iter().map(|n| matches!(n.class, NetClass::Signal | NetClass::Constant)).collect();
+        let routed: Vec<bool> = nets.iter().map(|n| matches!(n.class, NetClass::Signal | NetClass::Constant | NetClass::GlobalClock)).collect();
 
         // Kept nets reserve their nodes; routed nets own their terminals.
         for (net, &r) in nets.iter().zip(&routed) {
