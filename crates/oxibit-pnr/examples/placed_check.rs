@@ -22,7 +22,8 @@
 //! OXIBIT_STANDALONE=1: `flow::standalone` routes the whole design from
 //! the netlist and writes the FASM, each line owned by one of its writers;
 //! DESIGN.FASM is used only for the cell configuration no writer covers
-//! yet (its `base` lines, counted in the report).
+//! yet (its `base` lines, counted in the report and written to
+//! OUT.FASM.base).
 //!
 //! With `Perm::None` pins stay where nextpnr put them, so the LUT INITs in
 //! the FASM stay valid. Otherwise every LUT INIT is computed from the
@@ -39,6 +40,7 @@ use std::sync::atomic::AtomicBool;
 
 use oxibit_fasm::db::Database;
 use oxibit_fasm::route::{Graph, GraphOpts};
+use oxibit_pnr::fasm_out::Owner;
 use oxibit_pnr::{flow, lutinit};
 use oxibit_pnr::nets::{self, NetClass};
 use oxibit_pnr::placed::{self, Meta, Perm};
@@ -222,6 +224,10 @@ fn run() -> Result<bool, String> {
             line(v.clone());
         }
         std::fs::write(out_path, sa.fasm.text()).map_err(|e| format!("{out_path}: {e}"))?;
+        // The lines still taken from DESIGN.FASM, for the writers to come.
+        let base: String = sa.fasm.of(Owner::Base).map(|l| format!("{l}\n")).collect();
+        let base_path = format!("{out_path}.base");
+        std::fs::write(&base_path, base).map_err(|e| format!("{base_path}: {e}"))?;
         let ok = sa.ok();
         line(json!({"ok": ok, "compare_ok": compare_ok, "out": out_path}));
         return Ok(ok);

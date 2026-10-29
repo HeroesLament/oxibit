@@ -192,6 +192,7 @@ pub type Located = (String, String, String, String);
 pub struct Locator {
     at: HashMap<(i64, i64), (String, String)>,
     tile_type: HashMap<String, String>,
+    pos: HashMap<String, (i64, i64)>,
     sites: HashMap<String, (String, String)>,
 }
 
@@ -202,12 +203,30 @@ impl Locator {
         let grid: Value = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
         let mut at = HashMap::new();
         let mut tile_type = HashMap::new();
+        let mut pos = HashMap::new();
         for (name, t) in grid.as_object().ok_or("tilegrid is not an object")? {
             let tt = t["type"].as_str().unwrap_or("").to_string();
-            at.insert((t["grid_x"].as_i64().unwrap_or(-1), t["grid_y"].as_i64().unwrap_or(-1)), (name.clone(), tt.clone()));
+            let xy = (t["grid_x"].as_i64().unwrap_or(-1), t["grid_y"].as_i64().unwrap_or(-1));
+            at.insert(xy, (name.clone(), tt.clone()));
             tile_type.insert(name.clone(), tt);
+            pos.insert(name.clone(), xy);
         }
-        Ok(Locator { at, tile_type, sites: placed::site_index(db) })
+        Ok(Locator { at, tile_type, pos, sites: placed::site_index(db) })
+    }
+
+    /// A tile's type.
+    pub fn tile_type(&self, tile: &str) -> Option<&str> {
+        self.tile_type.get(tile).map(String::as_str)
+    }
+
+    /// A tile's grid position (x, y).
+    pub fn grid(&self, tile: &str) -> Option<(i64, i64)> {
+        self.pos.get(tile).copied()
+    }
+
+    /// Every tile: (name, type).
+    pub fn tiles(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.tile_type.iter().map(|(n, t)| (n.as_str(), t.as_str()))
     }
 
     pub fn locate(&self, bel: &str) -> Option<Located> {

@@ -11,9 +11,9 @@
 //! counted apart, and do not fail the check:
 //!
 //! - `precyinit_const_via_ax`: nextpnr's `PRECYINIT.AX` where this writes
-//!   `PRECYINIT.C0`/`C1` (a constant carry-in). Older nextpnr-xilinx routes
-//!   the constant in on AX; its current `write_carry_config` selects C0/C1,
-//!   as this does.
+//!   `PRECYINIT.C0`/`C1` (a constant carry-in). nextpnr-himbaechel's xilinx
+//!   FASM writer routes the constant in on AX (and can leave AX undriven);
+//!   nextpnr-xilinx's `write_carry_config` selects C0/C1, as this does.
 //! - `cellless_half`: a control-set line (`NOCLKINV`) on a half slice of a
 //!   tile with no placed cell, which only nextpnr's routing uses (a
 //!   route-through LUT).

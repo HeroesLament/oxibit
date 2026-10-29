@@ -27,6 +27,8 @@ pub enum Owner {
     SliceCfg,
     /// A DSP48E1 input tie-off (`cellcfg::dsp_ties`).
     DspTie,
+    /// A clock-network enable the routing needs (`clocking`).
+    Clocking,
 }
 
 impl Owner {
@@ -39,6 +41,7 @@ impl Owner {
             Owner::SiteMux => "site_mux",
             Owner::SliceCfg => "slice_cfg",
             Owner::DspTie => "dsp_tie",
+            Owner::Clocking => "clocking",
         }
     }
 }

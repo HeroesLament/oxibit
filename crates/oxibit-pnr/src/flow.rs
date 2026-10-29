@@ -10,7 +10,9 @@
 //!   chose;
 //! - `SiteMux`: the slice routing-bel settings of the chosen site paths;
 //! - `SliceCfg`, `DspTie`: slice FF, control set, LUT mode, carry-in, and
-//!   DSP48E1 tie-offs, from the cells.
+//!   DSP48E1 tie-offs, from the cells;
+//! - `Clocking`: the clock-network enables (HCLK buffers, HROW lanes,
+//!   GCLK rebuffers, CMT buffer use) of the pips the routes use.
 //!
 //! `Base` is what is still taken from the design's FASM: the configuration
 //! of cells no writer here covers yet (IOB, MMCM, PS7, BUFG, BRAM, DSP
@@ -24,7 +26,7 @@ use oxibit_fasm::route::{EdgeKind, Graph, PipLookup};
 use oxibit_report::Progress;
 use serde_json::{Value, json};
 
-use crate::cellcfg;
+use crate::{cellcfg, clocking};
 use crate::fasm_out::{FasmOut, Owner};
 use crate::lutinit::{self, Locator};
 use crate::nets::{Net, NetClass};
@@ -94,6 +96,23 @@ pub fn standalone(db: &Database, g: &Graph, placed: &Value, imp: &Import, base: 
     report.push(json!({"route": stats.to_json(), "nets": nets.len()}));
 
     let mut fasm = FasmOut::new();
+    let loc = Locator::new(db)?;
+
+    // Clock-network enables for the pips the routes use: every hop, and
+    // the hard edges of default constant paths (nextpnr counts every pip a
+    // net binds).
+    let mut used: Vec<clocking::UsedPip> = Vec::new();
+    for (n, hops) in nets.iter().zip(&routes) {
+        let edges = hops.iter().map(|h| (h.tile, h.pi)).chain(n.edges.iter().filter(|_| n.class == NetClass::Default).map(|e| (e.tile, e.pi)));
+        for (t, pi) in edges {
+            let p = g.edge_pip(t, pi);
+            used.push((p.tile.to_string(), p.dst.to_string(), p.src.to_string()));
+        }
+    }
+    let enables = clocking::clock_enables(used, &loc);
+    for l in &enables {
+        fasm.add(Owner::Clocking, l);
+    }
 
     // Routing: every net's pips, and the `always` pseudo-pips of default
     // constant paths (as nextpnr writes them: no bits, but a BUFGCTRL's
@@ -119,7 +138,6 @@ pub fn standalone(db: &Database, g: &Graph, placed: &Value, imp: &Import, base: 
     }
 
     // LUT INITs from the cells, for the pins the router chose.
-    let loc = Locator::new(db)?;
     let (cells, skipped) = lutinit::cell_inits(placed, &|b| loc.locate(b))?;
     let moves = lutinit::moves(imp, &routes[..imp.nets.len()])?;
     let (inits, moved) = lutinit::final_inits(&cells, &moves)?;
@@ -160,9 +178,10 @@ pub fn standalone(db: &Database, g: &Graph, placed: &Value, imp: &Import, base: 
 
     // Base: the design FASM's lines no writer here owns. Dropped: every pip
     // (the routing is ours), the clock tiles' BUFHCE settings (they follow
-    // the routing), slice configuration, LUT INITs of cell LUTs and of
-    // route-through LUTs, and the routing bels the site paths set. A
-    // cell-less LUT doing logic keeps its INIT.
+    // the routing), the clock-network enables (they follow the routing),
+    // slice configuration, LUT INITs of cell LUTs and of route-through
+    // LUTs, and the routing bels the site paths set. A cell-less LUT doing
+    // logic keeps its INIT.
     let theirs = lutinit::fasm_inits(base)?;
     let (mut base_kept, mut base_dropped, mut cellless_kept, mut routing_luts) = (0usize, 0usize, 0usize, 0usize);
     let mut lut_seen: HashSet<lutinit::LutKey> = HashSet::new();
@@ -172,7 +191,13 @@ pub fn standalone(db: &Database, g: &Graph, placed: &Value, imp: &Import, base: 
             continue;
         }
         let pip = matches!(g.lookup_pip(f), PipLookup::Edge { .. } | PipLookup::SameNode(_));
-        if pip || f.contains(".BUFHCE.") || cellcfg::is_slice_config(f) || cellcfg::is_dsp_tie(f) || sm.owns(f) {
+        if pip
+            || f.contains(".BUFHCE.")
+            || clocking::is_clock_enable(f, &loc)
+            || cellcfg::is_slice_config(f)
+            || cellcfg::is_dsp_tie(f)
+            || sm.owns(f)
+        {
             base_dropped += 1;
             continue;
         }
