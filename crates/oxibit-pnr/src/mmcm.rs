@@ -234,6 +234,7 @@ fn counter(name: &str, cell: &Value, cell_name: &str, out: &mut Vec<String>) -> 
 }
 
 /// Every MMCME2_ADV cell's lines.
+#[oxibit_prof::hot]
 pub fn mmcm_config(placed: &Value, locate: &dyn Fn(&str) -> Option<Located>) -> R<BTreeSet<String>> {
     let mods = placed["modules"].as_object().ok_or("no modules")?;
     let top = mods

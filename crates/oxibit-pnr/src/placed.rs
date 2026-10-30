@@ -1090,6 +1090,7 @@ pub fn is_site_mux_line(line: &str) -> bool {
     mux_line(bel, "").is_some()
 }
 
+#[oxibit_prof::hot]
 pub fn site_mux_lines(imp: &Import) -> SiteMuxLines {
     let mut out = SiteMuxLines::default();
     for ((tile, site), muxes) in &imp.site_muxes {

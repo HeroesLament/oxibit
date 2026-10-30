@@ -75,6 +75,7 @@ pub fn permute(init: u64, moves: &[Move]) -> R<u64> {
 /// The moves the router made: for each pin group of each routed net, the
 /// pin it reached against the pins the placer used. A group the router left
 /// unreached is an error: its LUT would read nothing.
+#[oxibit_prof::hot]
 pub fn moves(imp: &Import, routes: &[Vec<Hop>]) -> R<Moves> {
     let mut out: Moves = BTreeMap::new();
     for (i, hops) in routes.iter().take(imp.nets.len()).enumerate() {
@@ -323,6 +324,7 @@ pub fn apply(fasm: &str, cells: &Inits, moves: &Moves) -> R<(String, Applied)> {
 }
 
 /// The cells' INITs with `moves` made, and how many LUTs had a pin move.
+#[oxibit_prof::hot]
 pub fn final_inits(cells: &Inits, moves: &Moves) -> R<(Inits, usize)> {
     let mut moved = 0;
     let mut fin: Inits = BTreeMap::new();

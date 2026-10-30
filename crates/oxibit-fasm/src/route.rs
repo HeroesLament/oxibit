@@ -41,6 +41,65 @@ type NetEnds = (u32, Vec<(u32, HashSet<u32>)>);
 /// tileconn: (tile type, wire) -> [(dx, dy, other tile type, other wire)].
 type Potential = HashMap<(String, String), Vec<(i32, i32, String, String)>>;
 
+/// Forward adjacency in compressed rows: node `n`'s out-edges
+/// `(dst, tile, pip)` are `e[off[n]..off[n + 1]]`. Indexes like the
+/// `Vec<Vec<_>>` it replaced.
+pub struct Adj {
+    off: Vec<u32>,
+    e: Vec<(u32, u32, u32)>,
+}
+
+impl Adj {
+    fn len(&self) -> usize {
+        self.off.len() - 1
+    }
+    fn iter(&self) -> impl Iterator<Item = &[(u32, u32, u32)]> {
+        (0..self.len()).map(|n| &self[n])
+    }
+}
+
+impl std::ops::Index<usize> for Adj {
+    type Output = [(u32, u32, u32)];
+    fn index(&self, n: usize) -> &Self::Output {
+        &self.e[self.off[n] as usize..self.off[n + 1] as usize]
+    }
+}
+
+/// Reverse adjacency in compressed rows: the sources of edges into node
+/// `n` are `src[off[n]..off[n + 1]]`.
+pub struct Rev {
+    off: Vec<u32>,
+    src: Vec<u32>,
+}
+
+impl Rev {
+    fn build(edges: &Adj) -> Self {
+        let n = edges.len();
+        let mut off = vec![0u32; n + 1];
+        for es in edges.iter() {
+            for &(d, _, _) in es {
+                off[d as usize + 1] += 1;
+            }
+        }
+        for i in 0..n {
+            off[i + 1] += off[i];
+        }
+        let mut fill = off.clone();
+        let mut src = vec![0u32; off[n] as usize];
+        for (s, es) in edges.iter().enumerate() {
+            for &(d, _, _) in es {
+                src[fill[d as usize] as usize] = s as u32;
+                fill[d as usize] += 1;
+            }
+        }
+        Rev { off, src }
+    }
+
+    fn of(&self, n: u32) -> &[u32] {
+        &self.src[self.off[n as usize] as usize..self.off[n as usize + 1] as usize]
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Window {
     pub x0: i32,
@@ -163,8 +222,10 @@ pub struct Graph {
     wire_base: Vec<u32>, // global wire id of each tile's wire 0
     node_of: Vec<u32>,   // global wire -> node
     /// node -> [(dst node, tile, type pip index)]
-    edges: Vec<Vec<(u32, u32, u32)>>,
-    types: HashMap<String, TypeData>,
+    edges: Adj,
+    types: HashMap<String, Arc<TypeData>>,
+    /// Each tile's type data (as `types[tiles[t].1]`, without the hash).
+    tile_td: Vec<Arc<TypeData>>,
     coords: Vec<(i32, i32)>,
     /// node -> grid coordinates of one of its tiles (A* heuristic).
     node_xy: Vec<(i16, i16)>,
@@ -172,7 +233,7 @@ pub struct Graph {
     /// (the nodes nextpnr gives a timing class).
     node_rc: Vec<Option<NodeRc>>,
     /// Reverse adjacency, built on first use.
-    rev: OnceLock<Vec<Vec<u32>>>,
+    rev: OnceLock<Rev>,
     /// Reverse adjacency over fixed edges only, built on first use.
     rev_fixed: OnceLock<HashMap<u32, Vec<u32>>>,
     /// sink node -> bitset of nodes that can reach it.
@@ -242,8 +303,9 @@ impl Graph {
 
     #[oxibit_prof::hot(name = "Graph::build")]
     pub fn build_with(db: &Database, window: Option<Window>, opts: GraphOpts) -> R<Self> {
-        let grid: Value = read_json(&db.root.join(&db.fabric).join("tilegrid.json"))?;
-        let tileconn: Value = read_json(&db.root.join(&db.fabric).join("tileconn.json"))?;
+        let (grid, tileconn): (Value, Value) = oxibit_prof::hot_block!("graph.read_json", {
+            (read_json(&db.root.join(&db.fabric).join("tilegrid.json"))?, read_json(&db.root.join(&db.fabric).join("tileconn.json"))?)
+        });
         let grid = grid.as_object().ok_or("tilegrid is not an object")?;
 
         // Tiles in the window, with coordinates.
@@ -260,11 +322,13 @@ impl Graph {
 
         // Tile types in use.
         let mut types: HashMap<String, TypeData> = HashMap::new();
-        for (_, ty, _, _) in &tiles {
-            if !types.contains_key(ty) {
-                types.insert(ty.clone(), load_type(db, ty)?);
+        oxibit_prof::hot_block!("graph.load_types", {
+            for (_, ty, _, _) in &tiles {
+                if !types.contains_key(ty) {
+                    types.insert(ty.clone(), load_type(db, ty)?);
+                }
             }
-        }
+        });
 
         // Global wire ids.
         let mut wire_base = Vec::with_capacity(tiles.len());
@@ -277,6 +341,7 @@ impl Graph {
         // Nodes: union-find over tileconn.
         let mut uf = UnionFind::new(total as usize);
         let mut potential: Potential = HashMap::new();
+        oxibit_prof::hot_block!("graph.potential", {
         for conn in tileconn.as_array().ok_or("tileconn is not a list")? {
             let d = &conn["grid_deltas"];
             let (dx, dy) = (d[0].as_i64().unwrap_or(0) as i32, d[1].as_i64().unwrap_or(0) as i32);
@@ -287,40 +352,84 @@ impl Graph {
                 potential.entry((t0.to_string(), w0.to_string())).or_default().push((dx, dy, t1.to_string(), w1.to_string()));
             }
         }
-        for (ti, (_, ty, x, y)) in tiles.iter().enumerate() {
-            let td = &types[ty];
+        });
+        oxibit_prof::hot_block!("graph.union", {
+        // Each tile type's connections resolved once: (wire, dx, dy, type
+        // id, wire in that type), in wire order and tileconn order, so the
+        // unions happen in the same sequence as a per-tile lookup would.
+        let type_names: Vec<&String> = types.keys().collect();
+        let type_id: HashMap<&str, u32> = type_names.iter().enumerate().map(|(i, t)| (t.as_str(), i as u32)).collect();
+        let mut conns: Vec<Vec<(u32, i32, i32, u32, u32)>> = vec![Vec::new(); type_names.len()];
+        for (ty_i, ty) in type_names.iter().enumerate() {
+            let td = &types[*ty];
             for (wi, w) in td.wires.iter().enumerate() {
-                let Some(targets) = potential.get(&(ty.clone(), w.clone())) else { continue };
+                let Some(targets) = potential.get(&((*ty).clone(), w.clone())) else { continue };
                 for (dx, dy, tty, tw) in targets {
-                    let Some(&tj) = at.get(&(x + dx, y + dy)) else { continue };
-                    let (_, jty, _, _) = &tiles[tj as usize];
-                    if jty != tty {
-                        continue;
-                    }
-                    if let Some(&wj) = types[jty].index.get(tw) {
-                        uf.union(wire_base[ti] + wi as u32, wire_base[tj as usize] + wj);
+                    let Some(&tid) = type_id.get(tty.as_str()) else { continue };
+                    if let Some(&wj) = types[tty].index.get(tw) {
+                        conns[ty_i].push((wi as u32, *dx, *dy, tid, wj));
                     }
                 }
             }
         }
-        let (node_of, nodes) = uf.dense();
-
-        // Edges.
-        let mut edges: Vec<Vec<(u32, u32, u32)>> = vec![Vec::new(); nodes];
-        for (ti, (_, ty, _, _)) in tiles.iter().enumerate() {
-            for (pi, p) in types[ty].pips.iter().enumerate() {
-                if p.default && !opts.defaults {
+        let tile_ty: Vec<u32> = tiles.iter().map(|(_, ty, _, _)| type_id[ty.as_str()]).collect();
+        // Tile index by grid position.
+        let (gw, gh) = tiles.iter().fold((0i32, 0i32), |(w, h), &(_, _, x, y)| (w.max(x + 1), h.max(y + 1)));
+        let mut grid_at = vec![u32::MAX; (gw.max(0) as usize) * (gh.max(0) as usize)];
+        for (&(x, y), &t) in &at {
+            if x >= 0 && y >= 0 {
+                grid_at[(y * gw + x) as usize] = t;
+            }
+        }
+        let tile_at = |x: i32, y: i32| -> Option<u32> {
+            (x >= 0 && y >= 0 && x < gw && y < gh).then(|| grid_at[(y * gw + x) as usize]).filter(|&t| t != u32::MAX)
+        };
+        for (ti, &(_, _, x, y)) in tiles.iter().enumerate() {
+            for &(wi, dx, dy, tid, wj) in &conns[tile_ty[ti] as usize] {
+                let Some(tj) = tile_at(x + dx, y + dy) else { continue };
+                if tile_ty[tj as usize] != tid {
                     continue;
                 }
-                let s = node_of[(wire_base[ti] + p.src) as usize];
-                let d = node_of[(wire_base[ti] + p.dst) as usize];
-                if s != d {
-                    edges[s as usize].push((d, ti as u32, pi as u32));
-                }
+                uf.union(wire_base[ti] + wi, wire_base[tj as usize] + wj);
             }
         }
+        });
+        let (node_of, nodes) = oxibit_prof::hot_block!("graph.dense", { uf.dense() });
+
+        // Edges.
+        let edges = oxibit_prof::hot_block!("graph.edges", {
+        // Two passes over the same pips (count, then fill), so each node's
+        // edges keep tile, then pip, order.
+        let each = |f: &mut dyn FnMut(u32, (u32, u32, u32))| {
+            for (ti, (_, ty, _, _)) in tiles.iter().enumerate() {
+                for (pi, p) in types[ty].pips.iter().enumerate() {
+                    if p.default && !opts.defaults {
+                        continue;
+                    }
+                    let s = node_of[(wire_base[ti] + p.src) as usize];
+                    let d = node_of[(wire_base[ti] + p.dst) as usize];
+                    if s != d {
+                        f(s, (d, ti as u32, pi as u32));
+                    }
+                }
+            }
+        };
+        let mut off = vec![0u32; nodes + 1];
+        each(&mut |s, _| off[s as usize + 1] += 1);
+        for i in 0..nodes {
+            off[i + 1] += off[i];
+        }
+        let mut fill = off.clone();
+        let mut e = vec![(0u32, 0u32, 0u32); off[nodes] as usize];
+        each(&mut |s, x| {
+            e[fill[s as usize] as usize] = x;
+            fill[s as usize] += 1;
+        });
+        Adj { off, e }
+        });
 
         // Node RC: every wire's RC, for nodes with more than one used wire.
+        let node_rc: Vec<Option<NodeRc>> = oxibit_prof::hot_block!("graph.rc", {
         let mut rc_sum = vec![NodeRc::default(); nodes];
         let mut used_wires = vec![0u32; nodes];
         let mut wires_in = vec![0u32; nodes];
@@ -334,8 +443,8 @@ impl Graph {
                 wires_in[n] += 1;
             }
         }
-        let node_rc: Vec<Option<NodeRc>> =
-            (0..nodes).map(|n| (wires_in[n] > 1 && used_wires[n] > 1).then_some(rc_sum[n])).collect();
+        (0..nodes).map(|n| (wires_in[n] > 1 && used_wires[n] > 1).then_some(rc_sum[n])).collect()
+        });
 
         let tile_index = tiles.iter().enumerate().map(|(i, (n, _, _, _))| (n.clone(), i as u32)).collect();
         let coords: Vec<(i32, i32)> = tiles.iter().map(|&(_, _, x, y)| (x, y)).collect();
@@ -347,6 +456,8 @@ impl Graph {
                 node_xy[n] = (coords[ti].0 as i16, coords[ti].1 as i16);
             }
         }
+        let types: HashMap<String, Arc<TypeData>> = types.into_iter().map(|(k, v)| (k, Arc::new(v))).collect();
+        let tile_td: Vec<Arc<TypeData>> = tiles.iter().map(|(_, ty, _, _)| types[ty].clone()).collect();
         Ok(Graph {
             coords,
             node_xy,
@@ -361,6 +472,7 @@ impl Graph {
             node_of,
             edges,
             types,
+            tile_td,
         })
     }
 
@@ -374,7 +486,7 @@ impl Graph {
     }
 
     pub fn edges(&self) -> usize {
-        self.edges.iter().map(Vec::len).sum()
+        self.edges.e.len()
     }
 
     /// The node of `TILE/WIRE`.
@@ -495,7 +607,7 @@ impl Graph {
         let parts: Vec<&str> = line.split('.').collect();
         let [tile, dst, src] = parts[..] else { return PipLookup::Malformed };
         let Some(&ti) = self.tile_index.get(tile) else { return PipLookup::NoTile };
-        let td = &self.types[&self.tiles[ti as usize].1];
+        let td = &self.tile_td[ti as usize];
         let (Some(&ws), Some(&wd)) = (td.index.get(src), td.index.get(dst)) else { return PipLookup::NoWire };
         let usable = |p: &TypePip| !p.default || self.opts.defaults;
         let Some(pi) = td.pips.iter().position(|p| p.src == ws && p.dst == wd && usable(p)) else { return PipLookup::NoPip };
@@ -515,7 +627,7 @@ impl Graph {
 
     /// How an edge conducts, without building its names.
     pub fn edge_kind(&self, tile: u32, pi: u32) -> EdgeKind {
-        let p = &self.types[&self.tiles[tile as usize].1].pips[pi as usize];
+        let p = &self.tile_td[tile as usize].pips[pi as usize];
         match (&p.feature, &p.relay) {
             (Some(_), _) => EdgeKind::Feature,
             (None, Some(_)) => EdgeKind::Relay,
@@ -526,13 +638,13 @@ impl Graph {
 
     /// Whether an edge is an I/O site route-through (see `io_pseudo`).
     pub fn edge_site_through(&self, tile: u32, pi: u32) -> bool {
-        self.types[&self.tiles[tile as usize].1].pips[pi as usize].through
+        self.tile_td[tile as usize].pips[pi as usize].through
     }
 
     /// The pip behind an edge.
     /// The timing of an edge (zero for relays and pips with no data).
     pub fn edge_timing(&self, tile: u32, pi: u32) -> PipTiming {
-        self.types[&self.tiles[tile as usize].1].pips[pi as usize].timing
+        self.tile_td[tile as usize].pips[pi as usize].timing
     }
 
     /// A node's lumped wire RC, where nextpnr gives the node a timing
@@ -555,7 +667,7 @@ impl Graph {
     pub fn node_wires(&self, nodes: &HashSet<u32>) -> HashMap<u32, Vec<(String, String)>> {
         let mut out: HashMap<u32, Vec<(String, String)>> = HashMap::new();
         for (ti, base) in self.wire_base.iter().enumerate() {
-            let td = &self.types[&self.tiles[ti].1];
+            let td = &self.tile_td[ti];
             for wi in 0..td.wires.len() as u32 {
                 let n = self.node_of[(base + wi) as usize];
                 if nodes.contains(&n) {
@@ -569,7 +681,7 @@ impl Graph {
     pub fn node_name(&self, n: u32) -> String {
         // Linear scan; reports only.
         for (ti, base) in self.wire_base.iter().enumerate() {
-            let td = &self.types[&self.tiles[ti].1];
+            let td = &self.tile_td[ti];
             for wi in 0..td.wires.len() as u32 {
                 if self.node_of[(base + wi) as usize] == n {
                     return format!("{}/{}", self.tiles[ti].0, td.wires[wi as usize]);
@@ -767,7 +879,7 @@ impl Graph {
     }
 
     fn is_fixed(&self, tile: u32, pi: u32) -> bool {
-        let p = &self.types[&self.tiles[tile as usize].1].pips[pi as usize];
+        let p = &self.tile_td[tile as usize].pips[pi as usize];
         p.feature.is_none() && p.relay.is_none() && !p.default
     }
 
@@ -813,7 +925,7 @@ impl Graph {
                 if listed {
                     pips.push(name);
                 }
-                let through = self.types[&self.tiles[tile as usize].1].pips[pi as usize].through;
+                let through = self.tile_td[tile as usize].pips[pi as usize].through;
                 let take = listed || self.is_fixed(tile, pi) || ((relays || through) && self.relay_on(tile, pi, on));
                 if take && nodes.insert(d) {
                     stack.push(d);
@@ -826,7 +938,7 @@ impl Graph {
     /// Node of a CLB site pin (`CLK`, `AX`, ...).
     pub fn site_pin(&self, tile: &str, site: &str, pin: &str) -> Option<u32> {
         let &ti = self.tile_index.get(tile)?;
-        let td = &self.types[&self.tiles[ti as usize].1];
+        let td = &self.tile_td[ti as usize];
         let &(_, _, w) = td.site_pins.iter().find(|(s, p, _)| s == site && p == pin)?;
         Some(self.node_of[(self.wire_base[ti as usize] + w) as usize])
     }
@@ -834,7 +946,7 @@ impl Graph {
     /// Tile-local wire name of a site pin (`CLBLM_M_C`).
     pub fn site_pin_wire(&self, tile: &str, site: &str, pin: &str) -> Option<String> {
         let &ti = self.tile_index.get(tile)?;
-        let td = &self.types[&self.tiles[ti as usize].1];
+        let td = &self.tile_td[ti as usize];
         let &(_, _, w) = td.site_pins.iter().find(|(s, p, _)| s == site && p == pin)?;
         Some(td.wires[w as usize].clone())
     }
@@ -842,7 +954,7 @@ impl Graph {
     /// CLB sites of a tile.
     pub fn sites(&self, tile: &str) -> Vec<String> {
         let Some(&ti) = self.tile_index.get(tile) else { return vec![] };
-        let mut s: Vec<String> = self.types[&self.tiles[ti as usize].1].site_pins.iter().map(|(s, _, _)| s.clone()).collect();
+        let mut s: Vec<String> = self.tile_td[ti as usize].site_pins.iter().map(|(s, _, _)| s.clone()).collect();
         s.dedup();
         s
     }
@@ -856,6 +968,7 @@ impl Graph {
     /// Nodes holding a tile wire whose name contains any of `pats`
     /// (`CLK_HROW_CK_INT`), or, for a `TILE/PART` pattern, a wire of that
     /// tile containing PART: what a request asks the router to stay off.
+    #[oxibit_prof::hot(name = "Graph::nodes_with_wire")]
     pub fn nodes_with_wire(&self, pats: &[String]) -> Vec<u32> {
         let mut out = Vec::new();
         if pats.is_empty() {
@@ -866,11 +979,20 @@ impl Graph {
                 Some((t, w)) => (Some(t), w),
                 None => (None, p.as_str()),
             }).collect();
+        // The wires each pattern matches, once per tile type.
+        let mut per_type: HashMap<&str, Vec<Vec<u32>>> = HashMap::new();
+        for (ty, td) in &self.types {
+            let m = pats
+                .iter()
+                .map(|(_, pw)| td.wires.iter().enumerate().filter(|(_, w)| w.contains(pw)).map(|(i, _)| i as u32).collect())
+                .collect();
+            per_type.insert(ty.as_str(), m);
+        }
         for (t, (name, ty)) in self.tiles.iter().enumerate() {
-            let Some(td) = self.types.get(ty) else { continue };
-            for (i, w) in td.wires.iter().enumerate() {
-                if pats.iter().any(|(pt, pw)| pt.is_none_or(|pt| pt == name) && w.contains(pw)) {
-                    out.push(self.node_of[self.wire_base[t] as usize + i]);
+            let Some(m) = per_type.get(ty.as_str()) else { continue };
+            for ((pt, _), wires) in pats.iter().zip(m) {
+                if pt.is_none_or(|pt| pt == name) {
+                    out.extend(wires.iter().map(|&i| self.node_of[(self.wire_base[t] + i) as usize]));
                 }
             }
         }
@@ -883,23 +1005,17 @@ impl Graph {
         self.tiles.iter().map(|(n, _)| n.as_str())
     }
 
+    fn rev(&self) -> &Rev {
+        self.rev.get_or_init(|| oxibit_prof::hot_block!("graph.reverse_index", { Rev::build(&self.edges) }))
+    }
+
     /// Feature pips driving `n` from a node in `from`, through any chain of
     /// fixed edges into `n` (e.g. INT `GCLK -> CLK_L0` for a slice CLK pin).
     /// Every edge into `n`, whatever enables it.
     pub fn drivers(&self, n: u32) -> Vec<Pip> {
-        let rev = self.rev.get_or_init(|| {
-            oxibit_prof::hot_block!("graph.reverse_index", {
-                let mut rev = vec![Vec::new(); self.edges.len()];
-                for (s, es) in self.edges.iter().enumerate() {
-                    for &(d, _, _) in es {
-                        rev[d as usize].push(s as u32);
-                    }
-                }
-                rev
-            })
-        });
+        let rev = self.rev();
         let mut out = Vec::new();
-        for &s in &rev[n as usize] {
+        for &s in rev.of(n) {
             for &(d, tile, pi) in &self.edges[s as usize] {
                 if d == n {
                     out.push(self.pip(tile, pi));
@@ -910,22 +1026,12 @@ impl Graph {
     }
 
     pub fn feature_drivers(&self, n: u32, from: &HashSet<u32>) -> Vec<Pip> {
-        let rev = self.rev.get_or_init(|| {
-            oxibit_prof::hot_block!("graph.reverse_index", {
-                let mut rev = vec![Vec::new(); self.edges.len()];
-                for (s, es) in self.edges.iter().enumerate() {
-                    for &(d, _, _) in es {
-                        rev[d as usize].push(s as u32);
-                    }
-                }
-                rev
-            })
-        });
+        let rev = self.rev();
         let mut out = Vec::new();
         let mut stack = vec![n];
         let mut seen = HashSet::from([n]);
         while let Some(c) = stack.pop() {
-            for &s in &rev[c as usize] {
+            for &s in rev.of(c) {
                 for &(d, tile, pi) in &self.edges[s as usize] {
                     if d != c {
                         continue;
@@ -934,7 +1040,7 @@ impl Graph {
                         if seen.insert(s) {
                             stack.push(s);
                         }
-                    } else if from.contains(&s) && self.types[&self.tiles[tile as usize].1].pips[pi as usize].feature.is_some() {
+                    } else if from.contains(&s) && self.tile_td[tile as usize].pips[pi as usize].feature.is_some() {
                         out.push(self.pip(tile, pi));
                     }
                 }
@@ -946,7 +1052,7 @@ impl Graph {
     /// Output nodes and lines of every relay in one site of one tile.
     pub fn site_relays(&self, tile: &str, site: &str) -> Vec<(u32, Vec<String>)> {
         let Some(&ti) = self.tile_index.get(tile) else { return vec![] };
-        let td = &self.types[&self.tiles[ti as usize].1];
+        let td = &self.tile_td[ti as usize];
         td.pips
             .iter()
             .filter_map(|p| match &p.relay {
@@ -960,7 +1066,7 @@ impl Graph {
     /// when a design already uses that site.
     pub fn relay_outputs(&self, tile: &str, site: &str) -> Vec<u32> {
         let Some(&ti) = self.tile_index.get(tile) else { return vec![] };
-        let td = &self.types[&self.tiles[ti as usize].1];
+        let td = &self.tile_td[ti as usize];
         td.pips
             .iter()
             .filter(|p| p.relay.as_ref().is_some_and(|(s, _)| s == site))
@@ -1237,17 +1343,7 @@ impl Graph {
     /// Bitset of the nodes from which any of `seeds` can be reached
     /// (ignoring blocking), seeds included.
     fn reverse_closure(&self, seeds: &[u32]) -> Vec<u64> {
-        let rev = self.rev.get_or_init(|| {
-            oxibit_prof::hot_block!("graph.reverse_index", {
-                let mut rev = vec![Vec::new(); self.edges.len()];
-                for (s, es) in self.edges.iter().enumerate() {
-                    for &(d, _, _) in es {
-                        rev[d as usize].push(s as u32);
-                    }
-                }
-                rev
-            })
-        });
+        let rev = self.rev();
         let mut bits = vec![0u64; self.edges.len().div_ceil(64)];
         let set = |bits: &mut Vec<u64>, n: u32| {
             let (w, b) = ((n / 64) as usize, n % 64);
@@ -1262,7 +1358,7 @@ impl Graph {
             }
         }
         while let Some(n) = stack.pop() {
-            for &s in &rev[n as usize] {
+            for &s in rev.of(n) {
                 if set(&mut bits, s) {
                     stack.push(s);
                 }
@@ -1285,7 +1381,7 @@ impl Graph {
         back[(dst / 64) as usize] |= 1 << (dst % 64);
         let mut stack = vec![dst];
         while let Some(n) = stack.pop() {
-            for &p in &rev[n as usize] {
+            for &p in rev.of(n) {
                 let (w, b) = ((p / 64) as usize, p % 64);
                 if back[w] >> b & 1 == 0 && !blocked.contains(&p) {
                     back[w] |= 1 << b;
@@ -1362,14 +1458,14 @@ impl Graph {
     /// Every site pin of a tile: (site, pin, node).
     pub fn tile_site_pins(&self, tile: &str) -> Vec<(String, String, u32)> {
         let Some(&ti) = self.tile_index.get(tile) else { return vec![] };
-        let td = &self.types[&self.tiles[ti as usize].1];
+        let td = &self.tile_td[ti as usize];
         td.site_pins.iter().map(|(s, p, w)| (s.clone(), p.clone(), self.node_of[(self.wire_base[ti as usize] + w) as usize])).collect()
     }
 
     /// Every pin node of one CLB site.
     pub fn site_pin_nodes(&self, tile: &str, site: &str) -> Vec<u32> {
         let Some(&ti) = self.tile_index.get(tile) else { return vec![] };
-        let td = &self.types[&self.tiles[ti as usize].1];
+        let td = &self.tile_td[ti as usize];
         td.site_pins.iter().filter(|(s, _, _)| s == site).map(|&(_, _, w)| self.node_of[(self.wire_base[ti as usize] + w) as usize]).collect()
     }
 
@@ -2005,15 +2101,19 @@ impl UnionFind {
     }
     /// Root of every element as a dense id 0..n_nodes.
     fn dense(mut self) -> (Vec<u32>, usize) {
+        // Ids in order of first appearance.
         let n = self.parent.len();
-        let mut id: HashMap<u32, u32> = HashMap::new();
+        let mut id = vec![u32::MAX; n];
+        let mut count = 0u32;
         let mut out = Vec::with_capacity(n);
         for i in 0..n as u32 {
-            let r = self.find(i);
-            let next = id.len() as u32;
-            out.push(*id.entry(r).or_insert(next));
+            let r = self.find(i) as usize;
+            if id[r] == u32::MAX {
+                id[r] = count;
+                count += 1;
+            }
+            out.push(id[r]);
         }
-        let count = id.len();
-        (out, count)
+        (out, count as usize)
     }
 }

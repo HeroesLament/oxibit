@@ -84,6 +84,7 @@ struct Ctl {
 
 /// Slice FASM lines (without the `tile.site.` prefix grouping: each line is
 /// complete) for every half slice of every CLB tile holding a logic cell.
+#[oxibit_prof::hot]
 pub fn slice_config(placed: &Value, locate: &dyn Fn(&str) -> Option<Located>) -> R<BTreeMap<Half, BTreeSet<String>>> {
     let mods = placed["modules"].as_object().ok_or("no modules")?;
     let top = mods
@@ -231,6 +232,7 @@ pub fn slice_config(placed: &Value, locate: &dyn Fn(&str) -> Option<Located>) ->
 /// place in the tile (odd Y: 1), `<side>` the tile's (`DSP_L`, `DSP_R`).
 /// These are pips of the DSP tile, not routing: the router leaves the pin
 /// alone.
+#[oxibit_prof::hot]
 pub fn dsp_ties(placed: &Value, locate: &dyn Fn(&str) -> Option<Located>) -> R<BTreeSet<String>> {
     let mods = placed["modules"].as_object().ok_or("no modules")?;
     let top = mods
@@ -299,6 +301,7 @@ fn bits_value(bits: &[bool]) -> String {
 /// `AREG_2`, `Z*REG[0]`), cascade inputs, D port and SIMD use, PATTERN,
 /// MASK and their options, and the control-bus and clock inversions
 /// (`ZIS_*_INVERTED`). The tie-offs of open inputs are `dsp_ties`.
+#[oxibit_prof::hot]
 pub fn dsp_config(placed: &Value, locate: &dyn Fn(&str) -> Option<Located>) -> R<BTreeSet<String>> {
     let mods = placed["modules"].as_object().ok_or("no modules")?;
     let top = mods
@@ -413,6 +416,7 @@ pub fn is_dsp_config(line: &str) -> bool {
 /// `IS_IGNORE1_INVERTED` where those parameters are set, and `ZINV_CE0`,
 /// `ZINV_CE1`, `ZINV_S0`, `ZINV_S1` where the matching `IS_*_INVERTED` is
 /// not. `<site>` is the BUFGCTRL's place in its tile (`BUFGCTRL_X0Y5`).
+#[oxibit_prof::hot]
 pub fn bufg_config(placed: &Value, locate: &dyn Fn(&str) -> Option<Located>) -> R<BTreeSet<String>> {
     let mods = placed["modules"].as_object().ok_or("no modules")?;
     let top = mods

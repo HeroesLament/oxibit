@@ -148,6 +148,7 @@ pub fn standalone_with(db: &Database, g: &Graph, placed: &Value, imp: &Import, b
     let mut ilogic_d: Vec<(String, String)> = Vec::new();
     let mut bram_casc: Vec<(String, String)> = Vec::new();
     let mut casc_examples: Vec<String> = Vec::new();
+    oxibit_prof::hot_block!("flow.route_lines", {
     for (n, hops) in nets.iter().zip(&routes) {
         for h in hops {
             let p = g.edge_pip(h.tile, h.pi);
@@ -175,6 +176,7 @@ pub fn standalone_with(db: &Database, g: &Graph, placed: &Value, imp: &Import, b
         }
     }
 
+    });
     // Slice routing bels of the chosen site paths. Before the cells' carry
     // inputs: a carry-in a site path sets is the path's.
     let sm = placed::site_mux_lines(imp);

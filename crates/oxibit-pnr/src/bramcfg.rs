@@ -184,6 +184,7 @@ fn half_lines(c: &Ram, half: usize) -> R<Vec<String>> {
 }
 
 /// The block RAM lines of a placed design, but for the cascade bits.
+#[oxibit_prof::hot]
 pub fn bram_config(placed: &Value, locate: &dyn Fn(&str) -> Option<Located>) -> R<BTreeSet<String>> {
     let mods = placed["modules"].as_object().ok_or("no modules")?;
     let top = mods
@@ -246,6 +247,7 @@ pub fn bram_config(placed: &Value, locate: &dyn Fn(&str) -> Option<Located>) -> 
 /// Whether any RAMB36E1 is half of a cascaded pair (`RAM_EXTENSION_A` or
 /// `_B` other than `NONE`): the only cells whose nets use the address
 /// cascade.
+#[oxibit_prof::hot]
 pub fn uses_cascade(placed: &Value) -> R<bool> {
     let mods = placed["modules"].as_object().ok_or("no modules")?;
     Ok(mods.values().flat_map(|m| m["cells"].as_object().into_iter().flatten()).any(|(_, c)| {
