@@ -58,15 +58,20 @@ fn main() -> ExitCode {
         };
         *counts.entry(k).or_default() += 1;
     }
+    let t2 = Instant::now();
     let j = yosys_json::write(&m);
+    let t_build = t2.elapsed();
+    let t3 = Instant::now();
     if let Err(e) = std::fs::write(output, serde_json::to_string(&j).unwrap()) {
         eprintln!("{output}: {e}");
         return ExitCode::from(3);
     }
+    let t_write = t3.elapsed();
     println!(
         "{}",
         serde_json::json!({"module": m.name, "signals": m.signals.len(), "cells": m.cells.len(), "connects": m.connects.len(),
-            "parse_ms": t_parse.as_millis() as u64, "elab_ms": t_elab.as_millis() as u64, "counts": counts})
+            "parse_ms": t_parse.as_millis() as u64, "elab_ms": t_elab.as_millis() as u64,
+            "json_build_ms": t_build.as_millis() as u64, "json_write_ms": t_write.as_millis() as u64, "counts": counts})
     );
     ExitCode::SUCCESS
 }
