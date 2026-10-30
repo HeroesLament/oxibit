@@ -219,6 +219,11 @@ impl Locator {
         self.tile_type.get(tile).map(String::as_str)
     }
 
+    /// The tile at a grid position.
+    pub fn tile_at(&self, x: i64, y: i64) -> Option<&str> {
+        self.at.get(&(x, y)).map(|(n, _)| n.as_str())
+    }
+
     /// A tile's grid position (x, y).
     pub fn grid(&self, tile: &str) -> Option<(i64, i64)> {
         self.pos.get(tile).copied()

@@ -772,6 +772,11 @@ impl Graph {
 
     /// A relay edge the design has configured: every line that makes it
     /// (`BUFHCE.BUFHCE_X0Y0.IN_USE`, ...) is in `on`.
+    /// Whether a relay edge conducts: all its lines are in `on`.
+    pub fn relay_conducts(&self, tile: u32, pi: u32, on: &HashSet<String>) -> bool {
+        self.relay_on(tile, pi, on)
+    }
+
     fn relay_on(&self, tile: u32, pi: u32, on: &HashSet<String>) -> bool {
         let (name, ty) = &self.tiles[tile as usize];
         match &self.types[ty].pips[pi as usize].relay {
@@ -879,6 +884,28 @@ impl Graph {
 
     /// Feature pips driving `n` from a node in `from`, through any chain of
     /// fixed edges into `n` (e.g. INT `GCLK -> CLK_L0` for a slice CLK pin).
+    /// Every edge into `n`, whatever enables it.
+    pub fn drivers(&self, n: u32) -> Vec<Pip> {
+        let rev = self.rev.get_or_init(|| {
+            let mut rev = vec![Vec::new(); self.edges.len()];
+            for (s, es) in self.edges.iter().enumerate() {
+                for &(d, _, _) in es {
+                    rev[d as usize].push(s as u32);
+                }
+            }
+            rev
+        });
+        let mut out = Vec::new();
+        for &s in &rev[n as usize] {
+            for &(d, tile, pi) in &self.edges[s as usize] {
+                if d == n {
+                    out.push(self.pip(tile, pi));
+                }
+            }
+        }
+        out
+    }
+
     pub fn feature_drivers(&self, n: u32, from: &HashSet<u32>) -> Vec<Pip> {
         let rev = self.rev.get_or_init(|| {
             let mut rev = vec![Vec::new(); self.edges.len()];

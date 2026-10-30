@@ -12,22 +12,26 @@
 //! - `SliceCfg`, `DspTie`: slice FF, control set, LUT mode, carry-in, and
 //!   DSP48E1 tie-offs, from the cells;
 //! - `Bufg`, `Dsp`, `Mmcm`: BUFGCTRL, DSP48E1 and MMCME2_ADV cell settings;
+//! - `Io`: pad, IOLOGIC and HCLK_IOI3 bank settings (`iocfg`), and the
+//!   ILOGIC bypass inversion the routes call for;
+//! - `Bram`: block RAM settings and contents (`bramcfg`), and the cascade
+//!   bits the routes call for;
 //! - `Clocking`: the clock-network enables (HCLK buffers, HROW lanes,
 //!   GCLK rebuffers, CMT buffer use) of the pips the routes use.
 //!
 //! `Base` is what is still taken from the design's FASM: the configuration
-//! of cells no writer here covers yet (IOB, MMCM, PS7, BUFG, BRAM, DSP
-//! attributes), and a cell-less LUT that does logic. The report counts it.
+//! of cells no writer here covers yet, and a cell-less LUT that does logic.
+//! The report counts it.
 
 use std::collections::{BTreeMap, HashSet};
 
 use oxibit_fasm::db::Database;
 use oxibit_fasm::parse::parse_line;
-use oxibit_fasm::route::{EdgeKind, Graph, PipLookup};
+use oxibit_fasm::route::{EdgeKind, Enable, Graph, PipLookup};
 use oxibit_report::Progress;
 use serde_json::{Value, json};
 
-use crate::{cellcfg, clocking, mmcm};
+use crate::{bramcfg, cellcfg, clocking, iocfg, mmcm};
 use crate::fasm_out::{FasmOut, Owner};
 use crate::lutinit::{self, Locator};
 use crate::nets::{Net, NetClass};
@@ -98,11 +102,26 @@ pub fn standalone_with(db: &Database, g: &Graph, placed: &Value, imp: &Import, b
     nets.extend(cnets);
 
     let mut router = Router::new(g, opts);
+    // The BRAM address cascade carries a RAMB36's address up the column to
+    // the one above it. Only a cascaded pair (RAM_EXTENSION) needs it, and
+    // nextpnr routes no other net over it; a router left free to will chain
+    // a shared address bus through it and enable cascade outputs no
+    // silicon-proven bitstream has used.
+    let cascaded = bramcfg::uses_cascade(placed)?;
+    let mut cascade_nodes = 0usize;
+    if !cascaded {
+        let pats = ["BRAM_CASCINBOT_", "BRAM_CASCINTOP_", "BRAM_CASCOUT_"].map(String::from);
+        let nodes = g.nodes_with_wire(&pats);
+        cascade_nodes = nodes.len();
+        router.forbid(nodes);
+    }
     let (routes, stats) = router.run_with(&nets, progress);
     report.push(json!({"route": stats.to_json(), "nets": nets.len()}));
 
     let mut fasm = FasmOut::new();
     let loc = Locator::new(db)?;
+    // Before the routing: the I/O pseudo-pips' settings depend on it.
+    let io = iocfg::io_config(placed, &loc, g)?;
 
     // Clock-network enables for the pips the routes use: every hop, and
     // the hard edges of default constant paths (nextpnr counts every pip a
@@ -123,10 +142,29 @@ pub fn standalone_with(db: &Database, g: &Graph, placed: &Value, imp: &Import, b
     // Routing: every net's pips, and the `always` pseudo-pips of default
     // constant paths (as nextpnr writes them: no bits, but a BUFGCTRL's
     // relay names its control pins').
+    let mut io_route_dropped = 0usize;
+    // (tile, dst) of the routed pips the I/O and BRAM writers look at.
+    let mut ilogic_d: Vec<(String, String)> = Vec::new();
+    let mut bram_casc: Vec<(String, String)> = Vec::new();
+    let mut casc_examples: Vec<String> = Vec::new();
     for (n, hops) in nets.iter().zip(&routes) {
         for h in hops {
-            for l in g.edge_pip(h.tile, h.pi).fasm_lines() {
-                fasm.add(Owner::Route, &l);
+            let p = g.edge_pip(h.tile, h.pi);
+            if p.dst.contains("_ILOGIC") {
+                ilogic_d.push((p.tile.clone(), p.dst.clone()));
+            }
+            if p.dst.starts_with("BRAM_CASCOUT_") {
+                bram_casc.push((p.tile.clone(), p.dst.clone()));
+                casc_examples.push(format!("{} ({:?})", p.name(), g.edge_kind(h.tile, h.pi)));
+            }
+            // A site route-through's settings (the I/O pseudo-pips) as
+            // nextpnr writes them; a pip's own line as it is.
+            let relay = matches!(p.enable, Enable::Relay(_));
+            for l in p.fasm_lines() {
+                match if relay { io.route_line(&l) } else { Some(l) } {
+                    Some(l) => fasm.add(Owner::Route, &l),
+                    None => io_route_dropped += 1,
+                }
             }
         }
         if n.class == NetClass::Default {
@@ -190,6 +228,13 @@ pub fn standalone_with(db: &Database, g: &Graph, placed: &Value, imp: &Import, b
     for l in &mmcm::mmcm_config(placed, &|b| loc.locate(b))? {
         fasm.add(Owner::Mmcm, l);
     }
+    for l in io.lines.iter().chain(&iocfg::ilogic_bypass_inversion(ilogic_d.iter().map(|(t, d)| (t.as_str(), d.as_str())))) {
+        fasm.add(Owner::Io, l);
+    }
+    let bram = bramcfg::bram_config(placed, &|b| loc.locate(b))?;
+    for l in bram.iter().chain(&bramcfg::cascade_lines(bram_casc.iter().map(|(t, d)| (t.as_str(), d.as_str())))) {
+        fasm.add(Owner::Bram, l);
+    }
 
     // Base: the design FASM's lines no writer here owns. Dropped: every pip
     // (the routing is ours), the clock tiles' BUFHCE settings (they follow
@@ -216,6 +261,8 @@ pub fn standalone_with(db: &Database, g: &Graph, placed: &Value, imp: &Import, b
             || cellcfg::is_bufg_config(f)
             || cellcfg::is_dsp_config(f)
             || mmcm::is_mmcm_config(f)
+            || iocfg::is_io_config(f)
+            || bramcfg::is_bram_config(f)
             || placed::is_site_mux_line(f)
         {
             base_dropped += 1;
@@ -245,6 +292,10 @@ pub fn standalone_with(db: &Database, g: &Graph, placed: &Value, imp: &Import, b
                                        "precyinit_from_paths": from_paths, "precyinit_disagree": disagree.len(),
                                        "disagree_examples": disagree.iter().take(4).collect::<Vec<_>>()}}));
     report.push(json!({"site_muxes": {"set": sm.set, "written": sm.lines.len()}}));
+    report.push(json!({"io": {"lines": io.lines.len(), "ologic_registered": io.ologic_registered.len(),
+                              "top_sing": io.top_sing.len(), "omux_dropped": io_route_dropped}}));
+    report.push(json!({"bram": {"lines": bram.len(), "cascaded": cascaded, "cascade_nodes_forbidden": cascade_nodes,
+                                "cascade_pips": bram_casc.len(), "cascade_examples": casc_examples.iter().take(8).collect::<Vec<_>>()}}));
     let counts: BTreeMap<&str, usize> = fasm.counts().into_iter().map(|(o, n)| (o.name(), n)).collect();
     report.push(json!({"fasm": {"lines_by_owner": counts, "base_kept": base_kept, "base_dropped": base_dropped,
                                 "conflicts": fasm.conflicts().len(),

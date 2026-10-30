@@ -171,6 +171,13 @@ impl<'g> Router<'g> {
         }
     }
 
+    /// Keep every net off `nodes` (as off a kept net's).
+    pub fn forbid(&mut self, nodes: impl IntoIterator<Item = u32>) {
+        for n in nodes {
+            self.reserved[n as usize] = true;
+        }
+    }
+
     /// The node and everything its fixed fan-out drives.
     fn closure(&self, n: u32, out: &mut Vec<u32>, seen: &mut HashSet<u32>) {
         let mut stack = vec![n];

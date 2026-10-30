@@ -8,11 +8,13 @@
 //! Progress goes through `oxibit_report::Progress`; nothing here prints.
 
 pub mod cellcfg;
+pub mod bramcfg;
 pub mod clocking;
 pub mod delay;
 pub mod dsp_patch;
 pub mod fasm_out;
 pub mod flow;
+pub mod iocfg;
 pub mod lutinit;
 pub mod mmcm;
 pub mod nets;

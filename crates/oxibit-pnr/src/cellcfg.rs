@@ -27,7 +27,7 @@ pub type Half = (String, String);
 
 /// A parameter as nextpnr reads it (`int_or_default`): a binary string
 /// (yosys writes `"00..01"`), a decimal string, or a number.
-fn int_param(v: &Value) -> Option<i64> {
+pub(crate) fn int_param(v: &Value) -> Option<i64> {
     match v {
         Value::Number(n) => n.as_i64(),
         Value::String(s) => {

@@ -35,6 +35,10 @@ pub enum Owner {
     Dsp,
     /// An MMCME2_ADV cell's settings (`mmcm`).
     Mmcm,
+    /// Pad, IOLOGIC and HCLK_IOI3 bank settings (`iocfg`).
+    Io,
+    /// RAMB18E1 and RAMB36E1 settings and contents (`bramcfg`).
+    Bram,
 }
 
 impl Owner {
@@ -51,6 +55,8 @@ impl Owner {
             Owner::Bufg => "bufg",
             Owner::Dsp => "dsp",
             Owner::Mmcm => "mmcm",
+            Owner::Io => "io",
+            Owner::Bram => "bram",
         }
     }
 }

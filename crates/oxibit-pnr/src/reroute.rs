@@ -148,12 +148,23 @@ pub fn run(g: &Graph, fasm: &str, opts: Opts, p: &dyn Progress) -> Reroute {
 pub fn check(g: &Graph, nets: &[Net], fasm: &str) -> Check {
     let on: HashSet<String> = pip_lines(fasm);
     // Every bare line: a clock buffer relay's lines are site settings.
-    let all: HashSet<String> = fasm
+    let mut all: HashSet<String> = fasm
         .lines()
         .map(|l| l.split('#').next().unwrap_or("").trim())
         .filter(|f| !f.is_empty() && !f.contains('=') && !f.contains('['))
         .map(String::from)
         .collect();
+    // An I/O site route-through on a top SING IOI tile is written for its
+    // site's `_Y1` (`iocfg::IoCfg::route_line`); the graph names it `_Y0`.
+    let sing: Vec<String> = all
+        .iter()
+        .filter(|l| l.contains("IOI") && l.contains("_SING_"))
+        .filter_map(|l| {
+            let (tile, c) = l.split_once('.')?;
+            c.contains("Y1").then(|| format!("{tile}.{}", c.replacen("Y1", "Y0", 1)))
+        })
+        .collect();
+    all.extend(sing);
     let set_into: HashSet<u32> = on
         .iter()
         .filter_map(|l| match g.lookup_pip(l) {
@@ -167,7 +178,7 @@ pub fn check(g: &Graph, nets: &[Net], fasm: &str) -> Check {
         if n.class == NetClass::Default {
             continue;
         }
-        let nodes = if matches!(n.class, NetClass::Clock | NetClass::GlobalClock) { g.trace(n.source, &all, true).0 } else { reach(g, n.source, &on, &set_into) };
+        let nodes = if matches!(n.class, NetClass::Clock | NetClass::GlobalClock) { g.trace(n.source, &all, true).0 } else { reach(g, n.source, &on, &all, &set_into) };
         c.sinks += n.sinks.len();
         for &s in n.sinks.iter().filter(|s| !nodes.contains(s)) {
             c.sinks_missing += 1;
@@ -188,7 +199,9 @@ pub fn check(g: &Graph, nets: &[Net], fasm: &str) -> Check {
     c
 }
 
-fn reach(g: &Graph, src: u32, on: &HashSet<String>, set_into: &HashSet<u32>) -> HashSet<u32> {
+/// Nodes `src` reaches over set pips, fixed edges no set pip overrides,
+/// and the I/O site route-throughs whose settings (in `lines`) are set.
+fn reach(g: &Graph, src: u32, on: &HashSet<String>, lines: &HashSet<String>, set_into: &HashSet<u32>) -> HashSet<u32> {
     let mut seen = HashSet::from([src]);
     let mut stack = vec![src];
     while let Some(n) = stack.pop() {
@@ -198,7 +211,7 @@ fn reach(g: &Graph, src: u32, on: &HashSet<String>, set_into: &HashSet<u32>) -> 
                 EdgeKind::Fixed => !set_into.contains(&d),
                 // A tie's default into an interconnect input no pip sets.
                 EdgeKind::Default => n == src && !set_into.contains(&d),
-                EdgeKind::Relay => false,
+                EdgeKind::Relay => g.edge_site_through(tile, pi) && g.relay_conducts(tile, pi, lines),
             };
             if conducts && seen.insert(d) {
                 stack.push(d);
