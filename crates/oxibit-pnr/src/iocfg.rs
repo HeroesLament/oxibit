@@ -150,6 +150,7 @@ const IOL_TYPES: [&str; 7] = [
 
 /// The pad, IOLOGIC and bank lines of a placed design. `g` finds each
 /// IOI tile's HCLK_IOI3 tile.
+#[oxibit_prof::hot]
 pub fn io_config(placed: &Value, loc: &Locator, g: &Graph) -> R<IoCfg> {
     let cells_v = top_module(placed)?;
     let mut cells: Vec<Cell> = Vec::new();

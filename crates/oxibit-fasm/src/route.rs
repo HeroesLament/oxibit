@@ -240,6 +240,7 @@ impl Graph {
         Self::build_with(db, window, GraphOpts::default())
     }
 
+    #[oxibit_prof::hot(name = "Graph::build")]
     pub fn build_with(db: &Database, window: Option<Window>, opts: GraphOpts) -> R<Self> {
         let grid: Value = read_json(&db.root.join(&db.fabric).join("tilegrid.json"))?;
         let tileconn: Value = read_json(&db.root.join(&db.fabric).join("tileconn.json"))?;
@@ -887,13 +888,15 @@ impl Graph {
     /// Every edge into `n`, whatever enables it.
     pub fn drivers(&self, n: u32) -> Vec<Pip> {
         let rev = self.rev.get_or_init(|| {
-            let mut rev = vec![Vec::new(); self.edges.len()];
-            for (s, es) in self.edges.iter().enumerate() {
-                for &(d, _, _) in es {
-                    rev[d as usize].push(s as u32);
+            oxibit_prof::hot_block!("graph.reverse_index", {
+                let mut rev = vec![Vec::new(); self.edges.len()];
+                for (s, es) in self.edges.iter().enumerate() {
+                    for &(d, _, _) in es {
+                        rev[d as usize].push(s as u32);
+                    }
                 }
-            }
-            rev
+                rev
+            })
         });
         let mut out = Vec::new();
         for &s in &rev[n as usize] {
@@ -908,13 +911,15 @@ impl Graph {
 
     pub fn feature_drivers(&self, n: u32, from: &HashSet<u32>) -> Vec<Pip> {
         let rev = self.rev.get_or_init(|| {
-            let mut rev = vec![Vec::new(); self.edges.len()];
-            for (s, es) in self.edges.iter().enumerate() {
-                for &(d, _, _) in es {
-                    rev[d as usize].push(s as u32);
+            oxibit_prof::hot_block!("graph.reverse_index", {
+                let mut rev = vec![Vec::new(); self.edges.len()];
+                for (s, es) in self.edges.iter().enumerate() {
+                    for &(d, _, _) in es {
+                        rev[d as usize].push(s as u32);
+                    }
                 }
-            }
-            rev
+                rev
+            })
         });
         let mut out = Vec::new();
         let mut stack = vec![n];
@@ -1233,13 +1238,15 @@ impl Graph {
     /// (ignoring blocking), seeds included.
     fn reverse_closure(&self, seeds: &[u32]) -> Vec<u64> {
         let rev = self.rev.get_or_init(|| {
-            let mut rev = vec![Vec::new(); self.edges.len()];
-            for (s, es) in self.edges.iter().enumerate() {
-                for &(d, _, _) in es {
-                    rev[d as usize].push(s as u32);
+            oxibit_prof::hot_block!("graph.reverse_index", {
+                let mut rev = vec![Vec::new(); self.edges.len()];
+                for (s, es) in self.edges.iter().enumerate() {
+                    for &(d, _, _) in es {
+                        rev[d as usize].push(s as u32);
+                    }
                 }
-            }
-            rev
+                rev
+            })
         });
         let mut bits = vec![0u64; self.edges.len().div_ceil(64)];
         let set = |bits: &mut Vec<u64>, n: u32| {

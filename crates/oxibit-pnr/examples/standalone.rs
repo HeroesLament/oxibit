@@ -29,6 +29,7 @@ use serde_json::json;
 static CANCEL: AtomicBool = AtomicBool::new(false);
 
 fn main() -> ExitCode {
+    let _prof = oxibit_prof::init();
     match run() {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::from(1),
@@ -50,10 +51,12 @@ fn run() -> Result<bool, String> {
         let _ = o.flush();
     };
     let r = Reporter::new(vec![Box::new(Human::new(std::io::stderr(), HumanStyle::Plain))], &CANCEL);
-    let db = Database::open(Path::new(db_root), part)?;
+    let db = oxibit_prof::hot_block!("db.open", { Database::open(Path::new(db_root), part)? });
     let g = Graph::build_with(&db, None, GraphOpts { defaults: true })?;
-    let text = std::fs::read_to_string(design).map_err(|e| format!("{design}: {e}"))?;
-    let placed_v: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("{design}: {e}"))?;
+    let placed_v: serde_json::Value = oxibit_prof::hot_block!("placed.read", {
+        let text = std::fs::read_to_string(design).map_err(|e| format!("{design}: {e}"))?;
+        serde_json::from_str(&text).map_err(|e| format!("{design}: {e}"))?
+    });
     let mut meta = Meta::open(Path::new(meta_dir));
     // A placer leaves signals on A6 of fractured LUTs; routing moves them.
     let imp = placed::import(&g, &placed::site_index(&db), &mut meta, &placed_v, Perm::A5)?;
@@ -68,6 +71,9 @@ fn run() -> Result<bool, String> {
     }
     if let Some(a) = std::env::var("OXIBIT_ASTAR").ok().and_then(|a| a.parse().ok()) {
         opts.astar = a;
+    }
+    if let Some(n) = std::env::var("OXIBIT_MAX_ITERS").ok().and_then(|n| n.parse().ok()) {
+        opts.max_iters = n;
     }
     let sa = flow::standalone_with(&db, &g, &placed_v, &imp, "", opts, &r)?;
     for v in &sa.report {

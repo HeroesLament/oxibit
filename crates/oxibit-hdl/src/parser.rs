@@ -56,9 +56,6 @@ impl P {
     fn expect_op(&mut self, o: &str) -> R<()> {
         self.p.expect(o)
     }
-    fn expect_kw(&mut self, k: &str) -> R<()> {
-        if self.eat_kw(k) { Ok(()) } else { perr(format!("expected {k}, found {:?}", self.peek())) }
-    }
     fn ident(&mut self) -> R<String> {
         match self.peek().cloned() {
             Some(Tok::Ident(s)) => {
@@ -117,6 +114,7 @@ impl P {
 }
 
 /// Parse every module in `src`.
+#[oxibit_prof::hot]
 pub fn parse(src: &str) -> R<Vec<ModuleAst>> {
     let toks = expr::tokenize(src)?;
     let mut p = P { p: Parser::new(toks) };

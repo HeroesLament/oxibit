@@ -145,6 +145,7 @@ pub fn run(g: &Graph, fasm: &str, opts: Opts, p: &dyn Progress) -> Reroute {
 /// and hard wiring, where a hard edge into a node a set pip also drives is a
 /// mux's unselected input and does not conduct. Clock nets also cross the
 /// clock buffers the FASM configures (`Graph::trace` with relays).
+#[oxibit_prof::hot]
 pub fn check(g: &Graph, nets: &[Net], fasm: &str) -> Check {
     let on: HashSet<String> = pip_lines(fasm);
     // Every bare line: a clock buffer relay's lines are site settings.

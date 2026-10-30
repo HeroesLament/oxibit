@@ -5,6 +5,8 @@
 
 use serde_json::{Map, Value, json};
 
+use oxibit_prof::{hot, hot_block};
+
 use crate::netlist::{Bit, Cell, Dir, Module, Param, SigSpec};
 
 /// Union-find over every signal bit (flat index), with path halving; a
@@ -90,15 +92,20 @@ fn param(p: &Param) -> Value {
     }
 }
 
+#[hot]
 pub fn write(m: &Module) -> Value {
     // Resolve connections.
-    let mut alias = Alias::new(m);
-    for (l, r) in &m.connects {
-        for (a, b) in l.0.iter().zip(&r.0) {
-            alias.union(*a, *b);
+    let mut alias = hot_block!("json.alias", {
+        let mut alias = Alias::new(m);
+        for (l, r) in &m.connects {
+            for (a, b) in l.0.iter().zip(&r.0) {
+                alias.union(*a, *b);
+            }
         }
-    }
+        alias
+    });
     // Number every set; a set tied to a constant is that constant.
+    let nets = hot_block!("json.number", {
     let n = *alias.offs.last().unwrap();
     let mut root_num: Vec<u64> = vec![0; n];
     let mut next = 2u64;
@@ -116,6 +123,8 @@ pub fn write(m: &Module) -> Value {
             }
         });
     }
+    nets
+    });
     let offs = alias.offs.clone();
     let bitval = |b: Bit| -> Value {
         match b {
@@ -125,6 +134,7 @@ pub fn write(m: &Module) -> Value {
     };
     let spec = |s: &SigSpec| -> Value { Value::Array(s.0.iter().map(|b| bitval(*b)).collect()) };
 
+    let (ports, netnames) = hot_block!("json.netnames", {
     let mut ports = Map::new();
     let mut netnames = Map::new();
     for (si, s) in m.signals.iter().enumerate() {
@@ -151,7 +161,10 @@ pub fn write(m: &Module) -> Value {
             ]),
         );
     }
+    (ports, netnames)
+    });
 
+    let cells = hot_block!("json.cells", {
     let mut cells = Map::new();
     for (ci, c) in m.cells.iter().enumerate() {
         let (ty, params, dirs, conns): (String, Map<String, Value>, Vec<(&str, &str)>, Vec<(&str, &SigSpec)>) = match c {
@@ -233,6 +246,8 @@ pub fn write(m: &Module) -> Value {
             ]),
         );
     }
+    cells
+    });
     let module = obj([
         ("attributes", json!({"top": "00000000000000000000000000000001"})),
         ("ports", Value::Object(ports)),

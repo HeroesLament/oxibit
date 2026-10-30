@@ -435,6 +435,7 @@ pub fn pin_conflicts(nets: &[Net]) -> Vec<(u32, Vec<usize>)> {
 }
 
 /// Resolve a placed design's nets to site pins on `g`.
+#[oxibit_prof::hot]
 pub fn import(g: &Graph, sites: &HashMap<String, (String, String)>, meta: &mut Meta, placed: &Value, perm: Perm) -> R<Import> {
     let top = top_module(placed)?;
     let cells_v = top["cells"].as_object().ok_or("no cells")?;
@@ -846,6 +847,7 @@ pub fn import(g: &Graph, sites: &HashMap<String, (String, String)>, meta: &mut M
 /// input, then the pip of a clock tile's control mux), and each tie drives
 /// one `NetClass::Constant` net the router routes. Returns the nets and the
 /// inputs no tie reaches.
+#[oxibit_prof::hot]
 pub fn constant_nets(g: &Graph, imp: &Import) -> (Vec<Net>, Vec<u32>) {
     let mut want: HashMap<u32, bool> = imp.const_sinks.iter().map(|&(v, n)| (n, v)).collect();
     let near: HashSet<(i16, i16)> = want.keys().map(|&n| g.node_xy(n)).collect();

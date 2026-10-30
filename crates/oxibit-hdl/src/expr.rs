@@ -105,6 +105,7 @@ fn decimal_bits(s: &str) -> R<Vec<Option<bool>>> {
     Ok(bits)
 }
 
+#[oxibit_prof::hot]
 pub fn tokenize(src: &str) -> R<Vec<Tok>> {
     let c: Vec<char> = src.chars().collect();
     let mut i = 0;

@@ -206,6 +206,7 @@ impl<'g> Router<'g> {
     /// behind it can be a mux whose other input is a constant (a DSP
     /// control pin tied in the tile), which nextpnr uses as such. A pin
     /// group's members are occupied only once a hop reaches one.
+    #[oxibit_prof::hot(name = "Router::footprint")]
     fn footprint(&self, net: &Net, hops: &[Hop]) -> Vec<u32> {
         let mut out = Vec::new();
         let mut seen = HashSet::new();
@@ -258,6 +259,7 @@ impl<'g> Router<'g> {
     /// those on the path from the source to a sink that crosses no node in
     /// `bad` (a node the net shares with another), counting the fixed
     /// fan-out of every node it routes through as the footprint does.
+    #[oxibit_prof::hot(name = "Router::keep_hops")]
     fn keep_hops(&self, net: &Net, hops: &[Hop], bad: &HashSet<u32>) -> Vec<Hop> {
         if bad.is_empty() {
             return hops.to_vec();
@@ -489,6 +491,7 @@ impl<'g> Router<'g> {
 
     /// `run_with`, handing `observe` each iteration's number and the nets
     /// on every node once the iteration's nets are routed.
+    #[oxibit_prof::hot(name = "Router::run")]
     pub fn run_observed(&mut self, nets: &[Net], progress: &dyn Progress, observe: &mut dyn FnMut(u32, &[u16])) -> (Vec<Vec<Hop>>, Stats) {
         let t0 = Instant::now();
         let mut stats = Stats::default();
@@ -519,6 +522,7 @@ impl<'g> Router<'g> {
         let mut todo: Vec<usize> = (0..nets.len()).filter(|&i| routed[i]).collect();
         stats.routed_nets = todo.len();
         for iter in 1..=self.opts.max_iters {
+            oxibit_prof::hot_scope!("route.iter", iter, nets = todo.len());
             let ti = Instant::now();
             let mut pops = 0u64;
             let mut failed = 0;
@@ -539,7 +543,11 @@ impl<'g> Router<'g> {
                     self.occ[n as usize] -= 1;
                 }
                 let before = pops;
-                let (hops, f) = self.route_net(&nets[i], pres, &mut pops, &mut outside, &keep, margin[i]);
+                let (hops, f) = oxibit_prof::hot_block!("route.net", [net = i, sinks = nets[i].sinks.len(), pops = ::tracing::field::Empty], {
+                    let r = self.route_net(&nets[i], pres, &mut pops, &mut outside, &keep, margin[i]);
+                    oxibit_prof::hot_record!(pops, pops - before);
+                    r
+                });
                 costly.push((pops - before, i));
                 if margin[i] >= 0 {
                     margin[i] = margin[i].saturating_mul(2).max(1);
@@ -555,13 +563,16 @@ impl<'g> Router<'g> {
             stats.unroutable_sinks = failed;
 
             // Overuse and history.
-            let mut over = 0usize;
-            for (n, &o) in self.occ.iter().enumerate() {
-                if o > 1 {
-                    over += 1;
-                    self.hist[n] += self.opts.hist_fac * (o - 1) as f32;
+            let over = oxibit_prof::hot_block!("route.history", {
+                let mut over = 0usize;
+                for (n, &o) in self.occ.iter().enumerate() {
+                    if o > 1 {
+                        over += 1;
+                        self.hist[n] += self.opts.hist_fac * (o - 1) as f32;
+                    }
                 }
-            }
+                over
+            });
             stats.iterations = iter;
             stats.overused = over;
             observe(iter, &self.occ);

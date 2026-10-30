@@ -197,6 +197,7 @@ pub struct Locator {
 }
 
 impl Locator {
+    #[oxibit_prof::hot(name = "Locator::new")]
     pub fn new(db: &Database) -> R<Self> {
         let path = db.root.join(&db.fabric).join("tilegrid.json");
         let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -395,6 +396,7 @@ fn param_bits(v: &Value) -> Option<Vec<bool>> {
 ///
 /// `locate` resolves a cell's `NEXTPNR_BEL`. Returns the INITs and the LUT
 /// cells it could not place, by reason.
+#[oxibit_prof::hot]
 pub fn cell_inits(
     placed: &Value,
     locate: &dyn Fn(&str) -> Option<Located>,

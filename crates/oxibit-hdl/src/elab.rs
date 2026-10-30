@@ -58,7 +58,6 @@ struct Mem {
     index: usize,
     width: u32,
     lo: i64,
-    hi: i64,
 }
 
 /// A constant value: bits LSB first, and whether it is signed.
@@ -95,16 +94,20 @@ pub struct Elab {
 type Env = BTreeMap<SigId, Vec<Option<Bit>>>;
 
 impl Elab {
+    #[oxibit_prof::hot(name = "Elab::module")]
     pub fn module(ast: &ModuleAst) -> R<Module> {
         let mut e = Elab { m: Module::new(&ast.name), params: HashMap::new(), nets: HashMap::new(), mems: HashMap::new() };
         // Parameters, in order (later ones may use earlier ones).
+        oxibit_prof::hot_block!("elab.params", {
         for it in &ast.items {
             if let Item::Param { name, value, .. } = it {
                 let c = e.const_eval(value)?;
                 e.params.insert(name.clone(), c);
             }
         }
+        });
         // Declarations.
+        oxibit_prof::hot_block!("elab.decls", {
         for it in &ast.items {
             if let Item::Decl { name, dir, signed, range, array, attrs, .. } = it {
                 let (msb, lsb) = match range {
@@ -135,7 +138,7 @@ impl Elab {
                         reads: vec![],
                         writes: vec![],
                     }));
-                    e.mems.insert(name.clone(), Mem { index, width, lo, hi });
+                    e.mems.insert(name.clone(), Mem { index, width, lo });
                     continue;
                 }
                 match e.nets.get(name) {
@@ -166,8 +169,10 @@ impl Elab {
                 }
             }
         }
+        });
         // Declaration initialisers: a register's initial value, or a net's
         // continuous assignment.
+        oxibit_prof::hot_block!("elab.decl_inits", {
         for it in &ast.items {
             if let Item::Decl { name, is_reg, init: Some(v), array: None, .. } = it {
                 if *is_reg {
@@ -177,6 +182,8 @@ impl Elab {
                 }
             }
         }
+        });
+        oxibit_prof::hot_block!("elab.items", {
         for it in &ast.items {
             match it {
                 Item::Assign { lhs, rhs } => e.assign(lhs, rhs)?,
@@ -186,6 +193,7 @@ impl Elab {
                 _ => {}
             }
         }
+        });
         Ok(e.m)
     }
 
@@ -702,6 +710,7 @@ impl Elab {
         )
     }
 
+    #[oxibit_prof::hot(name = "Elab::process")]
     fn process(&mut self, sens: &Sens, body: &Stmt) -> R<()> {
         if let Sens::Edges(edges) = sens {
             if edges.len() > 1 {
@@ -774,6 +783,7 @@ impl Elab {
     /// first `if` tests one of the edge signals (`rst`, or `!rst` on a
     /// negedge), its branch assigns constants. Registers it resets become
     /// `$adff`; registers only the other branch assigns hold during reset.
+    #[oxibit_prof::hot(name = "Elab::async_process")]
     fn async_process(&mut self, edges: &[(bool, Expr)], body: &Stmt) -> R<()> {
         if edges.len() != 2 {
             return err("only one asynchronous reset per process is supported");
@@ -1047,6 +1057,7 @@ impl Elab {
 
     // ---- instances -------------------------------------------------------------------
 
+    #[oxibit_prof::hot(name = "Elab::instance")]
     fn instance(&mut self, ty: &str, name: &str, params: &[(String, Expr)], conns: &[(String, Option<Expr>)]) -> R<()> {
         let mut p = BTreeMap::new();
         for (k, v) in params {

@@ -10,3 +10,8 @@ publish.workspace = true
 oxibit-fasm.workspace = true
 oxibit-report.workspace = true
 serde_json.workspace = true
+oxibit-prof.workspace = true
+tracing = { workspace = true, optional = true }
+
+[features]
+profile = ["dep:tracing", "oxibit-prof/profile", "oxibit-fasm/profile"]

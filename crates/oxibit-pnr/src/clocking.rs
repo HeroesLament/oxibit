@@ -37,6 +37,7 @@ fn is_hclk(tile_type: &str) -> bool {
 }
 
 /// The clock enables `pips` need.
+#[oxibit_prof::hot]
 pub fn clock_enables(pips: impl IntoIterator<Item = UsedPip>, loc: &Locator) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     let mut gclks: BTreeSet<String> = BTreeSet::new();

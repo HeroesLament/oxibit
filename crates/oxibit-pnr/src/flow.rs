@@ -74,6 +74,7 @@ pub fn standalone(db: &Database, g: &Graph, placed: &Value, imp: &Import, base: 
 }
 
 /// `standalone` with the router's options.
+#[oxibit_prof::hot(name = "standalone")]
 pub fn standalone_with(db: &Database, g: &Graph, placed: &Value, imp: &Import, base: &str, opts: Opts, progress: &dyn Progress) -> R<Standalone> {
     let mut report = Vec::new();
 

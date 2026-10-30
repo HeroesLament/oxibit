@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/oxibit-bitstream", "crates/oxibit-fasm", "crates/oxibit-hdl", "crates/oxibit-guard", "crates/oxibit-zynq7", "crates/oxibit-pnr", "crates/oxibit-report", "crates/oxibit"]
+members = ["crates/oxibit-bitstream", "crates/oxibit-fasm", "crates/oxibit-hdl", "crates/oxibit-prof", "crates/oxibit-prof-macros", "crates/oxibit-guard", "crates/oxibit-zynq7", "crates/oxibit-pnr", "crates/oxibit-report", "crates/oxibit"]
 
 [workspace.package]
 version = "0.1.0"
@@ -15,6 +15,8 @@ oxibit-pnr = { path = "crates/oxibit-pnr" }
 oxibit-report = { path = "crates/oxibit-report" }
 oxibit-guard = { path = "crates/oxibit-guard" }
 oxibit-zynq7 = { path = "crates/oxibit-zynq7" }
+oxibit-prof = { path = "crates/oxibit-prof" }
+tracing = "0.1"
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -27,3 +29,10 @@ flate2 = "1"
 # status; unwinding with a live /dev/mem mapping has nothing to offer.
 panic = "abort"
 strip = true
+
+# Release with line tables and symbols, for samply/perf stacks.
+#   cargo build --profile profiling [--features profile]
+[profile.profiling]
+inherits = "release"
+debug = "line-tables-only"
+strip = false

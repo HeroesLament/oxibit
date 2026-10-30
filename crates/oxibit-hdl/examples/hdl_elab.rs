@@ -12,6 +12,7 @@ use oxibit_hdl::netlist::Cell;
 use oxibit_hdl::{elab, parser, yosys_json};
 
 fn main() -> ExitCode {
+    let _prof = oxibit_prof::init();
     let args: Vec<String> = std::env::args().collect();
     let [_, input, output] = &args[..] else {
         eprintln!("usage: hdl_elab IN.v OUT.json");
