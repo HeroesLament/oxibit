@@ -56,11 +56,19 @@ pub struct Opts {
     /// so a net that stays congested soon searches unbounded. Negative:
     /// no box.
     pub bbox_margin: i32,
+    /// Aim the A* heuristic at where a sink is entered from the routing
+    /// (the configurable muxes its fixed chain leads back to), not at the
+    /// sink node's own tile: a PS7 pin's node runs across the PSS tiles,
+    /// tens of tiles from its interconnect.
+    /// Off by default: on the PHY placement it cut iteration time 6-12%
+    /// but left the single-sink floods; on spi_probe it doubled the pops of
+    /// iteration 1.
+    pub entry_aim: bool,
 }
 
 impl Default for Opts {
     fn default() -> Self {
-        Opts { max_iters: 200, pres_fac: 0.5, pres_growth: 1.5, hist_fac: 1.0, astar: 0.6, delay_weight: 0.0, delay_norm: 100.0, astar_delay: 0.3, bbox_margin: -1 }
+        Opts { max_iters: 200, pres_fac: 0.5, pres_growth: 1.5, hist_fac: 1.0, astar: 0.6, delay_weight: 0.0, delay_norm: 100.0, astar_delay: 0.3, bbox_margin: -1, entry_aim: false }
     }
 }
 
@@ -147,6 +155,40 @@ pub struct Router<'g> {
     /// Net-local tree membership: tag[n] == current net tag.
     tag: Vec<u32>,
     cur_tag: u32,
+    /// The costliest single search of the last routed net.
+    diag: SearchDiag,
+    /// OXIBIT_DUMP_NET: write every pop of this net's searches (debug).
+    dump_net: Vec<usize>,
+    cur_net: usize,
+}
+
+/// One target search: how far it wandered and what it paid.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SearchDiag {
+    pub pops: u64,
+    /// Heuristic at the start (astar x tiles to the target).
+    pub h0: f32,
+    /// Path cost at the target (infinite: not reached).
+    pub cost: f32,
+    /// Farthest popped node from the target, in tiles.
+    pub far: i32,
+    /// Tiles from the nearest tree node to the target.
+    pub dist: i32,
+    /// Popped nodes another net already uses.
+    pub congested_pops: u64,
+    pub hops: usize,
+    /// Pops by tiles from the target: 0-2, 3-5, 6-10, 11-20, 21-40, 41+.
+    pub by_dist: [u64; 6],
+    /// Pops by f (heuristic plus cost) relative to the reached cost: <0.5x, <1x, <2x, >=2x.
+    pub by_f: [u64; 4],
+}
+
+impl SearchDiag {
+    pub fn to_json(&self) -> serde_json::Value {
+        json!({"pops": self.pops, "h0": self.h0, "cost": if self.cost.is_finite() { json!(self.cost) } else { json!(null) },
+               "far": self.far, "dist": self.dist, "congested_pops": self.congested_pops, "hops": self.hops,
+               "by_dist": self.by_dist, "by_f": self.by_f})
+    }
 }
 
 const NONE: u32 = u32::MAX;
@@ -174,6 +216,9 @@ impl<'g> Router<'g> {
             touched: Vec::new(),
             tag: vec![0; n],
             cur_tag: 0,
+            diag: SearchDiag::default(),
+            dump_net: std::env::var("OXIBIT_DUMP_NET").map(|v| v.split(',').filter_map(|x| x.parse().ok()).collect()).unwrap_or_default(),
+            cur_net: usize::MAX,
         }
     }
 
@@ -239,6 +284,52 @@ impl<'g> Router<'g> {
     fn node_cost(&self, n: u32, pres: f32) -> f32 {
         let others = self.occ[n as usize] as f32;
         (1.0 + self.hist[n as usize]) * (1.0 + pres * others)
+    }
+
+    /// Tiles from `n` to the nearest of `aims`.
+    fn to_aims(&self, n: u32, aims: &[(i16, i16)]) -> f32 {
+        let (x, y) = self.g.node_xy(n);
+        aims.iter().map(|&(ax, ay)| ((x - ax).abs() + (y - ay).abs()) as i32).min().unwrap_or(0) as f32
+    }
+
+    /// Where a target set is entered: the muxed nodes its fixed in-edges
+    /// lead back to (the target itself when it is muxed), at most 16.
+    fn aims(&self, set: &[u32]) -> Vec<(i16, i16)> {
+        if !self.opts.entry_aim {
+            return vec![self.g.node_xy(set[0])];
+        }
+        let mut out: Vec<(i16, i16)> = Vec::new();
+        let mut seen: HashSet<u32> = HashSet::new();
+        let mut stack: Vec<(u32, u32)> = set.iter().map(|&t| (t, 0)).collect();
+        while let Some((n, depth)) = stack.pop() {
+            if !seen.insert(n) || out.len() >= 16 {
+                continue;
+            }
+            let mut back = 0;
+            if !self.muxed[n as usize] && depth < 8 {
+                for (s, tile, pi) in self.g.in_edges(n) {
+                    if self.g.edge_kind(tile, pi) == EdgeKind::Fixed {
+                        stack.push((s, depth + 1));
+                        back += 1;
+                    }
+                }
+            }
+            if back == 0 {
+                let xy = self.g.node_xy(n);
+                if !out.contains(&xy) {
+                    out.push(xy);
+                }
+            }
+        }
+        // Only a sink entered far from its own tile (a PS7 pin) changes
+        // aim: a slice pin one column from its IMUX keeps its own, which
+        // gives the search a direction inside the switchbox.
+        let own = self.g.node_xy(set[0]);
+        let near = |&(x, y): &(i16, i16)| (x - own.0).abs() + (y - own.1).abs() <= 2;
+        if out.is_empty() || out.iter().all(near) {
+            return vec![own];
+        }
+        out
     }
 
     fn manhattan(&self, a: u32, b: u32) -> f32 {
@@ -313,6 +404,7 @@ impl<'g> Router<'g> {
     /// must already be removed.
     fn route_net(&mut self, net: &Net, pres: f32, pops: &mut u64, outside: &mut u64, keep: &[Hop], margin: i32) -> (Vec<Hop>, usize) {
         self.cur_tag += 1;
+        self.diag = SearchDiag::default();
         let tag = self.cur_tag;
         let mut tree: Vec<u32> = vec![net.source];
         self.tag[net.source as usize] = tag;
@@ -367,10 +459,15 @@ impl<'g> Router<'g> {
             if set.iter().any(|&t| self.tag[t as usize] == tag) {
                 continue; // already on the tree
             }
-            let aim = set[0];
+            let aims = self.aims(set);
             let w = self.opts.delay_weight;
             let astar = (1.0 - w) * self.opts.astar + w * self.opts.astar_delay;
             let mut reached = None;
+            let mut sd = SearchDiag { cost: f32::INFINITY, dist: i32::MAX, ..Default::default() };
+            for &t in &tree {
+                sd.dist = sd.dist.min(self.to_aims(t, &aims) as i32);
+            }
+            sd.h0 = astar * sd.dist as f32;
             for boxed in [bbox, None] {
                 if boxed.is_none() && bbox.is_some() {
                     // The boxed search found nothing: search again unbounded.
@@ -390,10 +487,27 @@ impl<'g> Router<'g> {
                     self.cost[t as usize] = start;
                     self.prev[t as usize] = (NONE, 0, 0);
                     self.touched.push(t);
-                    heap.push(Item { f: start + astar * self.manhattan(t, aim), node: t });
+                    heap.push(Item { f: start + astar * self.to_aims(t, &aims), node: t });
                 }
-                while let Some(Item { f: _, node }) = heap.pop() {
+                let mut fs: Vec<f32> = Vec::new();
+                let mut dump: Option<std::io::BufWriter<std::fs::File>> = self.dump_net.contains(&self.cur_net).then_some(self.cur_net).and_then(|d| {
+                    std::fs::File::create(format!("/tmp/oxibit_pops_{d}_{}.csv", sd.dist)).ok().map(std::io::BufWriter::new)
+                });
+                while let Some(Item { f, node }) = heap.pop() {
                     *pops += 1;
+                    sd.pops += 1;
+                    let dd = self.to_aims(node, &aims) as i32;
+                    sd.far = sd.far.max(dd);
+                    sd.by_dist[match dd { 0..=2 => 0, 3..=5 => 1, 6..=10 => 2, 11..=20 => 3, 21..=40 => 4, _ => 5 }] += 1;
+                    fs.push(f);
+                    if let Some(w) = dump.as_mut() {
+                        use std::io::Write;
+                        let (x, y) = self.g.node_xy(node);
+                        let _ = writeln!(w, "{x},{y},{},{f},{},{}", self.cost[node as usize], self.occ[node as usize], self.g.node_name(node));
+                    }
+                    if self.occ[node as usize] > 0 && self.tag[node as usize] != tag {
+                        sd.congested_pops += 1;
+                    }
                     if set.contains(&node) {
                         reached = Some(node);
                         break;
@@ -429,13 +543,23 @@ impl<'g> Router<'g> {
                             }
                             self.cost[d as usize] = c;
                             self.prev[d as usize] = (node, tile, pi);
-                            heap.push(Item { f: c + astar * self.manhattan(d, aim), node: d });
+                            heap.push(Item { f: c + astar * self.to_aims(d, &aims), node: d });
                         }
+                    }
+                }
+                if let Some(t) = reached {
+                    let c = self.cost[t as usize].max(1e-3);
+                    for f in fs {
+                        let r = f / c;
+                        sd.by_f[if r < 0.5 { 0 } else if r < 1.0 { 1 } else if r < 2.0 { 2 } else { 3 }] += 1;
                     }
                 }
                 if reached.is_some() || boxed.is_none() {
                     break;
                 }
+            }
+            if let Some(t) = reached {
+                sd.cost = self.cost[t as usize];
             }
             match reached {
                 Some(target) => {
@@ -449,6 +573,7 @@ impl<'g> Router<'g> {
                         n = from;
                     }
                     self.tag[target as usize] = tag;
+                    sd.hops = hops.len() - first;
                     // The new branch's arrivals, from where it left the tree.
                     for h in hops[first..].iter().rev() {
                         let a = arrival.get(&h.src).copied().unwrap_or(0.0) + self.g.edge_timing(h.tile, h.pi).delay as f32;
@@ -456,6 +581,9 @@ impl<'g> Router<'g> {
                     }
                 }
                 None => failed += 1,
+            }
+            if sd.pops > self.diag.pops {
+                self.diag = sd;
             }
             self.reset_scratch();
         }
@@ -529,7 +657,7 @@ impl<'g> Router<'g> {
             let mut kept = 0usize;
             let mut outside = 0u64;
             // (pops, net) of the costliest nets this iteration.
-            let mut costly: Vec<(u64, usize)> = Vec::new();
+            let mut costly: Vec<(u64, usize, SearchDiag)> = Vec::new();
             for &i in &todo {
                 if progress.cancelled() {
                     stats.cancelled = true;
@@ -543,12 +671,13 @@ impl<'g> Router<'g> {
                     self.occ[n as usize] -= 1;
                 }
                 let before = pops;
+                self.cur_net = if iter == 1 { i } else { usize::MAX };
                 let (hops, f) = oxibit_prof::hot_block!("route.net", [net = i, sinks = nets[i].sinks.len(), pops = ::tracing::field::Empty], {
                     let r = self.route_net(&nets[i], pres, &mut pops, &mut outside, &keep, margin[i]);
                     oxibit_prof::hot_record!(pops, pops - before);
                     r
                 });
-                costly.push((pops - before, i));
+                costly.push((pops - before, i, self.diag));
                 if margin[i] >= 0 {
                     margin[i] = margin[i].saturating_mul(2).max(1);
                 }
@@ -576,13 +705,13 @@ impl<'g> Router<'g> {
             stats.iterations = iter;
             stats.overused = over;
             observe(iter, &self.occ);
-            costly.sort_unstable_by(|a, b| b.cmp(a));
+            costly.sort_unstable_by(|a, b| (b.0, b.1).cmp(&(a.0, a.1)));
             let costliest: Vec<_> = costly
                 .iter()
                 .take(5)
-                .map(|&(p, i)| {
+                .map(|&(p, i, d)| {
                     json!({"pops": p, "net": i, "sinks": nets[i].sinks.len(), "groups": nets[i].pin_groups.len(),
-                           "source": self.g.node_name(nets[i].source)})
+                           "source": self.g.node_name(nets[i].source), "worst_search": d.to_json()})
                 })
                 .collect();
             progress.emit(Event::progress(
@@ -597,6 +726,8 @@ impl<'g> Router<'g> {
                     "unboxed_searches": outside,
                     "costliest": costliest,
                     "top100_pops": costly.iter().take(100).map(|c| c.0).sum::<u64>(),
+                    // [pops, sinks, h0, cost, far, dist, congested_pops, hops] of the 40 costliest.
+                    "worst40": costly.iter().take(40).map(|&(p, i, d)| json!([p, nets[i].sinks.len() + nets[i].pin_groups.len(), d.h0, if d.cost.is_finite() { d.cost } else { -1.0 }, d.far, d.dist, d.congested_pops, d.hops, d.by_dist, d.by_f])).collect::<Vec<_>>(),
                     "iter_ms": ti.elapsed().as_millis() as u64,
                 }),
             ));

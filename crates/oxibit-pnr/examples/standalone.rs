@@ -72,6 +72,9 @@ fn run() -> Result<bool, String> {
     if let Some(a) = std::env::var("OXIBIT_ASTAR").ok().and_then(|a| a.parse().ok()) {
         opts.astar = a;
     }
+    if let Ok(v) = std::env::var("OXIBIT_ENTRY_AIM") {
+        opts.entry_aim = v != "0";
+    }
     if let Some(n) = std::env::var("OXIBIT_MAX_ITERS").ok().and_then(|n| n.parse().ok()) {
         opts.max_iters = n;
     }

@@ -234,6 +234,8 @@ pub struct Graph {
     node_rc: Vec<Option<NodeRc>>,
     /// Reverse adjacency, built on first use.
     rev: OnceLock<Rev>,
+    /// node -> its first global wire id, for `node_name`; built on first use.
+    first_wire: OnceLock<Vec<u32>>,
     /// Reverse adjacency over fixed edges only, built on first use.
     rev_fixed: OnceLock<HashMap<u32, Vec<u32>>>,
     /// sink node -> bitset of nodes that can reach it.
@@ -400,9 +402,10 @@ impl Graph {
         let edges = oxibit_prof::hot_block!("graph.edges", {
         // Two passes over the same pips (count, then fill), so each node's
         // edges keep tile, then pip, order.
+        let tds: Vec<&TypeData> = tiles.iter().map(|(_, ty, _, _)| &types[ty]).collect();
         let each = |f: &mut dyn FnMut(u32, (u32, u32, u32))| {
-            for (ti, (_, ty, _, _)) in tiles.iter().enumerate() {
-                for (pi, p) in types[ty].pips.iter().enumerate() {
+            for (ti, td) in tds.iter().enumerate() {
+                for (pi, p) in td.pips.iter().enumerate() {
                     if p.default && !opts.defaults {
                         continue;
                     }
@@ -463,6 +466,7 @@ impl Graph {
             node_xy,
             node_rc,
             rev: OnceLock::new(),
+            first_wire: OnceLock::new(),
             rev_fixed: OnceLock::new(),
             reach: Mutex::new(HashMap::new()),
             opts,
@@ -679,16 +683,19 @@ impl Graph {
     }
 
     pub fn node_name(&self, n: u32) -> String {
-        // Linear scan; reports only.
-        for (ti, base) in self.wire_base.iter().enumerate() {
-            let td = &self.tile_td[ti];
-            for wi in 0..td.wires.len() as u32 {
-                if self.node_of[(base + wi) as usize] == n {
-                    return format!("{}/{}", self.tiles[ti].0, td.wires[wi as usize]);
+        // A node's first wire (in tile order), indexed on first use.
+        let first = self.first_wire.get_or_init(|| {
+            let mut first = vec![u32::MAX; self.nodes()];
+            for (w, &nd) in self.node_of.iter().enumerate() {
+                if first[nd as usize] == u32::MAX {
+                    first[nd as usize] = w as u32;
                 }
             }
-        }
-        format!("node{n}")
+            first
+        });
+        let Some(&w) = first.get(n as usize).filter(|&&w| w != u32::MAX) else { return format!("node{n}") };
+        let ti = self.wire_base.partition_point(|&b| b <= w) - 1;
+        format!("{}/{}", self.tiles[ti].0, self.tile_td[ti].wires[(w - self.wire_base[ti]) as usize])
     }
 }
 
@@ -1003,6 +1010,11 @@ impl Graph {
 
     pub fn tile_names(&self) -> impl Iterator<Item = &str> {
         self.tiles.iter().map(|(n, _)| n.as_str())
+    }
+
+    /// In-edges of a node: `(src node, tile, type pip index)`.
+    pub fn in_edges(&self, n: u32) -> impl Iterator<Item = (u32, u32, u32)> + '_ {
+        self.rev().of(n).iter().flat_map(move |&s| self.edges[s as usize].iter().filter(move |e| e.0 == n).map(move |&(_, t, pi)| (s, t, pi)))
     }
 
     fn rev(&self) -> &Rev {
