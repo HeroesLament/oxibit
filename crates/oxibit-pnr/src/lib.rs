@@ -9,6 +9,7 @@
 
 pub mod cellcfg;
 pub mod clocking;
+pub mod delay;
 pub mod dsp_patch;
 pub mod fasm_out;
 pub mod flow;

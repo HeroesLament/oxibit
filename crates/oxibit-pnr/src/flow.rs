@@ -66,6 +66,11 @@ impl Standalone {
 /// the design: `placed` is the placed design JSON `imp` came from, `base`
 /// the design's FASM for the cell configuration not written here.
 pub fn standalone(db: &Database, g: &Graph, placed: &Value, imp: &Import, base: &str, progress: &dyn Progress) -> R<Standalone> {
+    standalone_with(db, g, placed, imp, base, Opts::default(), progress)
+}
+
+/// `standalone` with the router's options.
+pub fn standalone_with(db: &Database, g: &Graph, placed: &Value, imp: &Import, base: &str, opts: Opts, progress: &dyn Progress) -> R<Standalone> {
     let mut report = Vec::new();
 
     // Nets: the import's (signal, global clock), then the constant inputs.
@@ -92,7 +97,7 @@ pub fn standalone(db: &Database, g: &Graph, placed: &Value, imp: &Import, base: 
     let mut nets = imp.nets.clone();
     nets.extend(cnets);
 
-    let mut router = Router::new(g, Opts::default());
+    let mut router = Router::new(g, opts);
     let (routes, stats) = router.run_with(&nets, progress);
     report.push(json!({"route": stats.to_json(), "nets": nets.len()}));
 

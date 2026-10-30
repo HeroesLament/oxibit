@@ -6,6 +6,8 @@
 //! cargo run --release -p oxibit-pnr --example standalone -- \
 //!     DB_ROOT PART META_DIR PLACED.json OUT.fasm
 //!
+//! OXIBIT_DELAY_WEIGHT=w (0..=1): the router's `Opts::delay_weight`.
+//!
 //! stdout: one JSON line per phase. Exit 0 when the routing is complete
 //! and clean and no two writers conflict; 1 otherwise; 3 on an error.
 
@@ -17,6 +19,7 @@ use std::sync::atomic::AtomicBool;
 use oxibit_fasm::db::Database;
 use oxibit_fasm::route::{Graph, GraphOpts};
 use oxibit_pnr::flow;
+use oxibit_pnr::router::Opts;
 use oxibit_pnr::placed::{self, Meta, Perm};
 use oxibit_report::{Human, HumanStyle, Reporter};
 use serde_json::json;
@@ -54,7 +57,11 @@ fn run() -> Result<bool, String> {
     let imp = placed::import(&g, &placed::site_index(&db), &mut meta, &placed_v, Perm::A5)?;
     line(json!({"import": {"nets": imp.nets.len(), "fixed_sinks": imp.fixed_sinks, "internal_sinks": imp.internal_sinks,
                            "skipped": imp.skipped, "unresolved": imp.unresolved.counts, "unresolved_examples": imp.unresolved.examples}}));
-    let sa = flow::standalone(&db, &g, &placed_v, &imp, "", &r)?;
+    let mut opts = Opts::default();
+    if let Some(w) = std::env::var("OXIBIT_DELAY_WEIGHT").ok().and_then(|w| w.parse().ok()) {
+        opts.delay_weight = w;
+    }
+    let sa = flow::standalone_with(&db, &g, &placed_v, &imp, "", opts, &r)?;
     for v in &sa.report {
         line(v.clone());
     }

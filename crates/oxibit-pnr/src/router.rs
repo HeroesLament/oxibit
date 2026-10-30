@@ -14,6 +14,14 @@
 //! order. The search ends on whichever member it reaches first, and the
 //! members compete for nets like any other node, so congestion decides
 //! which net gets which pin.
+//!
+//! With `Opts::delay_weight` w > 0 an edge costs, as in VPR,
+//! `(1 - w) * congestion + w * delay / delay_norm`: the congestion term as
+//! above, and the pip's intrinsic delay (`Graph::edge_timing`, the model
+//! `delay` checks against nextpnr). w = 0 is congestion alone. A sink's
+//! search then starts from each tree node at `w * arrival / delay_norm`,
+//! its delay from the source, not 0: the sink joins the tree where it
+//! arrives first, not where the tree is nearest.
 
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashSet};
@@ -36,11 +44,17 @@ pub struct Opts {
     /// A* weight on the Manhattan distance (cost units per tile). Above the
     /// admissible bound on purpose: long wires make the true bound tiny.
     pub astar: f32,
+    /// Weight of delay against congestion in an edge's cost, 0..=1.
+    pub delay_weight: f32,
+    /// ps of delay per cost unit.
+    pub delay_norm: f32,
+    /// A* weight of the delay term (delay cost units per tile).
+    pub astar_delay: f32,
 }
 
 impl Default for Opts {
     fn default() -> Self {
-        Opts { max_iters: 200, pres_fac: 0.5, pres_growth: 1.5, hist_fac: 1.0, astar: 0.6 }
+        Opts { max_iters: 200, pres_fac: 0.5, pres_growth: 1.5, hist_fac: 1.0, astar: 0.6, delay_weight: 0.0, delay_norm: 100.0, astar_delay: 0.3 }
     }
 }
 
@@ -233,6 +247,8 @@ impl<'g> Router<'g> {
         let tag = self.cur_tag;
         let mut tree: Vec<u32> = vec![net.source];
         self.tag[net.source as usize] = tag;
+        // Delay (ps) from the source to each tree node.
+        let mut arrival: std::collections::HashMap<u32, f32> = std::collections::HashMap::from([(net.source, 0.0)]);
         let mut hops = Vec::new();
         let mut failed = 0;
 
@@ -247,12 +263,15 @@ impl<'g> Router<'g> {
                 continue; // already on the tree
             }
             let aim = set[0];
+            let w = self.opts.delay_weight;
+            let astar = (1.0 - w) * self.opts.astar + w * self.opts.astar_delay;
             let mut heap = BinaryHeap::new();
             for &t in &tree {
-                self.cost[t as usize] = 0.0;
+                let start = w * arrival.get(&t).copied().unwrap_or(0.0) / self.opts.delay_norm;
+                self.cost[t as usize] = start;
                 self.prev[t as usize] = (NONE, 0, 0);
                 self.touched.push(t);
-                heap.push(Item { f: self.opts.astar * self.manhattan(t, aim), node: t });
+                heap.push(Item { f: start + astar * self.manhattan(t, aim), node: t });
             }
             let mut reached = None;
             while let Some(Item { f: _, node }) = heap.pop() {
@@ -275,20 +294,28 @@ impl<'g> Router<'g> {
                     if self.reserved[d as usize] && !set.contains(&d) {
                         continue;
                     }
-                    let c = base + if self.tag[d as usize] == tag { 0.0 } else { self.node_cost(d, pres) };
+                    let step = if self.tag[d as usize] == tag {
+                        0.0
+                    } else if w > 0.0 {
+                        (1.0 - w) * self.node_cost(d, pres) + w * self.g.edge_timing(tile, pi).delay as f32 / self.opts.delay_norm
+                    } else {
+                        self.node_cost(d, pres)
+                    };
+                    let c = base + step;
                     if c < self.cost[d as usize] {
                         if self.cost[d as usize].is_infinite() {
                             self.touched.push(d);
                         }
                         self.cost[d as usize] = c;
                         self.prev[d as usize] = (node, tile, pi);
-                        heap.push(Item { f: c + self.opts.astar * self.manhattan(d, aim), node: d });
+                        heap.push(Item { f: c + astar * self.manhattan(d, aim), node: d });
                     }
                 }
             }
             match reached {
                 Some(target) => {
                     let mut n = target;
+                    let first = hops.len();
                     while self.prev[n as usize].0 != NONE && self.tag[n as usize] != tag {
                         let (from, tile, pi) = self.prev[n as usize];
                         hops.push(Hop { src: from, dst: n, tile, pi });
@@ -297,6 +324,11 @@ impl<'g> Router<'g> {
                         n = from;
                     }
                     self.tag[target as usize] = tag;
+                    // The new branch's arrivals, from where it left the tree.
+                    for h in hops[first..].iter().rev() {
+                        let a = arrival.get(&h.src).copied().unwrap_or(0.0) + self.g.edge_timing(h.tile, h.pi).delay as f32;
+                        arrival.insert(h.dst, a);
+                    }
                 }
                 None => failed += 1,
             }
