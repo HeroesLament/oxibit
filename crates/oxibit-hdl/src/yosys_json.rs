@@ -133,7 +133,7 @@ pub fn write(m: &Module) -> Value {
             Cell::Binary { op, a, b, signed, y } => (
                 op.yosys().into(),
                 [
-                    ("A_SIGNED", bin(u64::from(*signed), 32)),
+                    ("A_SIGNED", bin(u64::from(*signed && *op != crate::netlist::Op::Shiftx), 32)),
                     ("B_SIGNED", bin(u64::from(*signed), 32)),
                     ("A_WIDTH", bin(a.width() as u64, 32)),
                     ("B_WIDTH", bin(b.width() as u64, 32)),
@@ -156,6 +156,19 @@ pub fn write(m: &Module) -> Value {
                 [("CLK_POLARITY".to_string(), bin(u64::from(*posedge), 1)), ("WIDTH".to_string(), bin(q.width() as u64, 32))].into_iter().collect(),
                 vec![("CLK", "input"), ("D", "input"), ("Q", "output")],
                 vec![("CLK", clk), ("D", d), ("Q", q)],
+            ),
+            Cell::Adff { clk, posedge, arst, arst_high, value, d, q } => (
+                "$adff".into(),
+                [
+                    ("CLK_POLARITY".to_string(), bin(u64::from(*posedge), 1)),
+                    ("ARST_POLARITY".to_string(), bin(u64::from(*arst_high), 1)),
+                    ("ARST_VALUE".to_string(), bits_str(value.iter().map(|b| Some(*b)).collect::<Vec<_>>().into_iter())),
+                    ("WIDTH".to_string(), bin(q.width() as u64, 32)),
+                ]
+                .into_iter()
+                .collect(),
+                vec![("CLK", "input"), ("ARST", "input"), ("D", "input"), ("Q", "output")],
+                vec![("CLK", clk), ("ARST", arst), ("D", d), ("Q", q)],
             ),
             Cell::Instance { ty, name, params, conns } => {
                 let p = params.iter().map(|(k, v)| (k.clone(), param(v))).collect();

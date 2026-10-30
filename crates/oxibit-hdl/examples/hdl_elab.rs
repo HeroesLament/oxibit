@@ -52,6 +52,7 @@ fn main() -> ExitCode {
             Cell::Unary { op, .. } | Cell::Binary { op, .. } => op.yosys().to_string(),
             Cell::Mux { .. } => "$mux".into(),
             Cell::Dff { .. } => "$dff".into(),
+            Cell::Adff { .. } => "$adff".into(),
             Cell::Mem(_) => "$mem".into(),
             Cell::Instance { ty, .. } => ty.clone(),
         };

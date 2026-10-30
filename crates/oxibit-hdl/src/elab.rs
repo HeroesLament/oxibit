@@ -199,7 +199,7 @@ impl Elab {
     pub fn const_eval(&self, e: &Expr) -> R<Const> {
         let int = |v: i64| Const { bits: (0..32).map(|i| Some((v >> i) & 1 == 1)).collect(), signed: true };
         Ok(match e {
-            Expr::Number { width, signed, bits } => {
+            Expr::Number { width, signed, bits, .. } => {
                 let w = width.unwrap_or(32) as usize;
                 let mut b = bits.clone();
                 b.resize(w.max(b.len()), Some(false));
@@ -319,6 +319,7 @@ impl Elab {
                 ("$signed", [a]) => (self.self_type(a)?.0, true),
                 ("$unsigned", [a]) => (self.self_type(a)?.0, false),
                 ("$clog2", _) => (32, true),
+                ("$bit", _) => (1, false),
                 _ => return err(format!("unsupported call {n}")),
             },
         })
@@ -496,15 +497,22 @@ impl Elab {
                         return Ok(self.mem_read(n, idx)?.extend(w, false));
                     }
                 }
+                if self.const_int(idx).is_err() {
+                    return Ok(self.var_select(base, idx, 0, 1)?.extend(w, false));
+                }
                 let v = self.select(base, idx, idx)?;
                 v.extend(w, false)
             }
             Expr::Range(base, msb, lsb) => self.select(base, msb, lsb)?.extend(w, false),
             Expr::IndexedRange { e, base, width, up } => {
-                let b = self.const_int(base)?;
                 let wd = self.const_int(width)?;
+                if self.const_int(base).is_err() {
+                    let back = if *up { 0 } else { wd - 1 };
+                    return Ok(self.var_select(e, base, back, wd as u32)?.extend(w, false));
+                }
+                let b = self.const_int(base)?;
                 let (msb, lsb) = if *up { (b + wd - 1, b) } else { (b, b - wd + 1) };
-                let mk = |v: i64| Expr::Number { width: None, signed: true, bits: (0..32).map(|i| Some((v >> i) & 1 == 1)).collect() };
+                let mk = |v: i64| Expr::Number { width: None, signed: true, bits: (0..32).map(|i| Some((v >> i) & 1 == 1)).collect(), z: vec![] };
                 self.select(e, &mk(msb), &mk(lsb))?.extend(w, false)
             }
             Expr::Str(_) | Expr::Real(_) => return err(format!("string or real in a value context: {e:?}")),
@@ -520,6 +528,12 @@ impl Elab {
                 ("$clog2", _) => {
                     let c = self.const_eval(e)?;
                     const_spec(&c.bits).extend(w, s)
+                }
+                ("$bit", [a, k, cw]) => {
+                    let (k, cw) = (self.const_int(k)? as u32, self.const_int(cw)? as u32);
+                    let (wa, sa) = self.self_type(a)?;
+                    let v = self.eval(a, wa.max(cw), sa)?;
+                    v.slice(k, 1).extend(w, false)
                 }
                 _ => return err(format!("unsupported call {n}")),
             },
@@ -546,6 +560,28 @@ impl Elab {
             })
             .collect();
         Ok(SigSpec(bits))
+    }
+
+    /// `width` bits of a net from variable declared index `lsb_idx - back`
+    /// up, as `$shiftx` (bits outside the net are x).
+    fn var_select(&mut self, base: &Expr, lsb_idx: &Expr, back: i64, width: u32) -> R<SigSpec> {
+        let Expr::Ident(n) = base else { return err(format!("variable select of a non-identifier: {base:?}")) };
+        let Some(net) = self.nets.get(n).cloned() else { return err(format!("select of undeclared {n}")) };
+        if net.msb < net.lsb {
+            return err(format!("variable select on ascending range of {n} is not supported yet"));
+        }
+        let (wi, si) = self.self_type(lsb_idx)?;
+        let off = net.lsb + back;
+        let (pos, bsigned) = if off == 0 && !si {
+            (self.eval(lsb_idx, wi, false)?, false)
+        } else {
+            // idx - lsb - back in a signed width that holds them without overflow.
+            let pw = wi.max(32) + 1;
+            let i = self.eval(lsb_idx, wi, si)?.extend(pw, si);
+            let l = const_spec(&(0..pw).map(|k| Some((off >> k.min(63)) & 1 == 1)).collect::<Vec<_>>());
+            (self.binary(Op::Sub, i, l, true, pw), true)
+        };
+        Ok(self.binary(Op::Shiftx, SigSpec::of(net.id, net.width), pos, bsigned, width))
     }
 
     fn mem_read(&mut self, name: &str, addr: &Expr) -> R<SigSpec> {
@@ -667,6 +703,11 @@ impl Elab {
     }
 
     fn process(&mut self, sens: &Sens, body: &Stmt) -> R<()> {
+        if let Sens::Edges(edges) = sens {
+            if edges.len() > 1 {
+                return self.async_process(edges, body);
+            }
+        }
         let mut env: Env = BTreeMap::new();
         let mut writes: Vec<(String, SigSpec, SigSpec, SigSpec)> = Vec::new(); // mem, addr, data, enable
         let one = SigSpec(vec![Bit::One]);
@@ -729,6 +770,115 @@ impl Elab {
         Ok(())
     }
 
+    /// `always @(posedge clk or posedge rst) if (rst) ... else ...`: the
+    /// first `if` tests one of the edge signals (`rst`, or `!rst` on a
+    /// negedge), its branch assigns constants. Registers it resets become
+    /// `$adff`; registers only the other branch assigns hold during reset.
+    fn async_process(&mut self, edges: &[(bool, Expr)], body: &Stmt) -> R<()> {
+        if edges.len() != 2 {
+            return err("only one asynchronous reset per process is supported");
+        }
+        let mut s = body;
+        while let Stmt::Block(v) = s {
+            if v.len() != 1 {
+                return err("asynchronous reset: the process must be a single if/else");
+            }
+            s = &v[0];
+        }
+        let Stmt::If { cond: c, then, els } = s else { return err("asynchronous reset: the process must start with if") };
+        let (rname, high) = match c {
+            Expr::Ident(n) => (n.clone(), true),
+            Expr::Unary("!" | "~", a) => match a.as_ref() {
+                Expr::Ident(n) => (n.clone(), false),
+                _ => return err("asynchronous reset: condition must be a reset signal"),
+            },
+            _ => return err("asynchronous reset: condition must be a reset signal"),
+        };
+        let ri = edges.iter().position(|(_, e)| matches!(e, Expr::Ident(n) if *n == rname));
+        let Some(ri) = ri else { return err(format!("asynchronous reset: {rname} is not in the sensitivity list")) };
+        if edges[ri].0 != high {
+            return err(format!("asynchronous reset: edge of {rname} does not match its test"));
+        }
+        let (posedge, clk_e) = &edges[1 - ri];
+        let (cw, _) = self.self_type(clk_e)?;
+        let clk = self.eval(clk_e, cw, false)?;
+        let rst = self.eval(&Expr::Ident(rname.clone()), 1, false)?;
+        // Reset branch: constants only.
+        let one = SigSpec(vec![Bit::One]);
+        let mut renv: Env = BTreeMap::new();
+        let mut rwrites = Vec::new();
+        self.exec(then, &mut renv, &one, &mut rwrites, false)?;
+        if !rwrites.is_empty() {
+            return err("asynchronous reset: memory write in the reset branch");
+        }
+        // Run branch, under "reset not active".
+        let active = if high { rst.clone() } else { self.unary(Op::Not, rst.clone(), false, 1) };
+        let run = self.unary(Op::Not, active.clone(), false, 1);
+        let mut env: Env = BTreeMap::new();
+        let mut writes = Vec::new();
+        if let Some(e) = els {
+            self.exec(e, &mut env, &run, &mut writes, false)?;
+        }
+        let mut ids: Vec<SigId> = renv.keys().chain(env.keys()).copied().collect();
+        ids.sort();
+        ids.dedup();
+        for id in ids {
+            let w = self.m.signal(id).width as usize;
+            let rb = renv.get(&id).cloned().unwrap_or_else(|| vec![None; w]);
+            let eb = env.get(&id).cloned().unwrap_or_else(|| vec![None; w]);
+            let mut rst_bits = (vec![], vec![], vec![]); // d, q, value
+            let mut hold_bits = (vec![], vec![]); // d, q
+            for i in 0..w {
+                let q = Bit::Sig(id, i as u32);
+                let d = eb[i].unwrap_or(q);
+                match rb[i] {
+                    Some(Bit::Zero) => {
+                        rst_bits.0.push(d);
+                        rst_bits.1.push(q);
+                        rst_bits.2.push(false);
+                    }
+                    Some(Bit::One) => {
+                        rst_bits.0.push(d);
+                        rst_bits.1.push(q);
+                        rst_bits.2.push(true);
+                    }
+                    Some(_) => return err(format!("asynchronous reset: {}[{i}] resets to a non-constant", self.m.signal(id).name)),
+                    None if eb[i].is_some() => {
+                        hold_bits.0.push(d);
+                        hold_bits.1.push(q);
+                    }
+                    None => {}
+                }
+            }
+            if !rst_bits.1.is_empty() {
+                self.m.cells.push(Cell::Adff {
+                    clk: clk.clone(),
+                    posedge: *posedge,
+                    arst: rst.clone(),
+                    arst_high: high,
+                    value: rst_bits.2,
+                    d: SigSpec(rst_bits.0),
+                    q: SigSpec(rst_bits.1),
+                });
+            }
+            if !hold_bits.1.is_empty() {
+                // A clock edge during reset runs the reset branch, which
+                // leaves these alone.
+                let q = SigSpec(hold_bits.1);
+                let d = self.mux(active.clone(), SigSpec(hold_bits.0), q.clone());
+                self.m.cells.push(Cell::Dff { clk: clk.clone(), posedge: *posedge, d, q });
+            }
+        }
+        for (name, addr, data, en) in writes {
+            let mem = self.mems[&name].clone();
+            let en_bits = SigSpec(vec![en.0[0]; mem.width as usize]);
+            if let Cell::Mem(mm) = &mut self.m.cells[mem.index] {
+                mm.writes.push(MemWrite { clk: (clk.clone(), *posedge), addr, data, en: en_bits });
+            }
+        }
+        Ok(())
+    }
+
     /// Execute `s` on `env` under path condition `cond`.
     fn exec(&mut self, s: &Stmt, env: &mut Env, cond: &SigSpec, writes: &mut Vec<(String, SigSpec, SigSpec, SigSpec)>, comb: bool) -> R<()> {
         match s {
@@ -749,6 +899,23 @@ impl Elab {
                             let data = self.rvalue(rhs, mem.width)?;
                             writes.push((n.clone(), addr, data, cond.clone()));
                             return Ok(());
+                        }
+                    }
+                }
+                // `x[i] = v` with a variable i: one guarded assignment per bit.
+                if let Expr::Index(b, i) = lhs {
+                    if let Expr::Ident(n) = b.as_ref() {
+                        if self.nets.contains_key(n) && self.const_int(i).is_err() {
+                            let net = self.nets[n].clone();
+                            let (lo, hi) = (net.msb.min(net.lsb), net.msb.max(net.lsb));
+                            let arms: Vec<Stmt> = (lo..=hi)
+                                .map(|k| Stmt::If {
+                                    cond: Expr::Binary("==", i.clone(), Box::new(num(k))),
+                                    then: Box::new(Stmt::Assign { lhs: Expr::Index(b.clone(), Box::new(num(k))), rhs: rhs.clone(), blocking: *blocking }),
+                                    els: None,
+                                })
+                                .collect();
+                            return self.exec(&Stmt::Block(arms), env, cond, writes, comb);
                         }
                     }
                 }
@@ -778,18 +945,41 @@ impl Elab {
                 if let Some(e) = els {
                     self.exec(e, &mut ef, &cf, writes, comb)?;
                 }
-                self.merge(env, &et, &ef, &sel);
+                self.merge(env, &et, &ef, &sel, comb);
                 Ok(())
             }
             Stmt::Case { kind, subject, arms, default } => {
                 // A priority chain of ifs, as yosys's proc builds it.
+                // casez/casex labels compare only their non-wildcard bits.
+                let mut cw = self.self_type(subject)?.0;
+                for (labels, _) in arms {
+                    for l in labels {
+                        cw = cw.max(self.self_type(l)?.0);
+                    }
+                }
                 let mut chain: Option<Stmt> = default.as_ref().map(|d| (**d).clone());
                 for (labels, body) in arms.iter().rev() {
                     let mut c: Option<Expr> = None;
                     for l in labels {
-                        let eq = match kind {
-                            CaseKind::Case => Expr::Binary("==", Box::new(subject.clone()), Box::new(l.clone())),
-                            _ => return err("casez/casex not supported yet"),
+                        let eq = match (kind, l) {
+                            (CaseKind::CaseZ | CaseKind::CaseX, Expr::Number { bits, z, signed, .. }) => {
+                                let fill = if *signed { bits.last().copied().flatten() } else { Some(false) };
+                                let zfill = *signed && z.last().copied().unwrap_or(false);
+                                let bit = |k: usize| bits.get(k).copied().unwrap_or(fill);
+                                let isz = |k: usize| z.get(k).copied().unwrap_or(zfill);
+                                let wild = |k: usize| isz(k) || (*kind == CaseKind::CaseX && bit(k).is_none());
+                                let keep: Vec<u32> = (0..cw).filter(|&k| !wild(k as usize)).collect();
+                                if keep.is_empty() {
+                                    num(1)
+                                } else {
+                                    Expr::Binary(
+                                        "==",
+                                        Box::new(Expr::Concat(keep.iter().rev().map(|&k| Expr::Call("$bit".into(), vec![subject.clone(), num(k as i64), num(cw as i64)])).collect())),
+                                        Box::new(Expr::Number { width: Some(keep.len() as u32), signed: false, bits: keep.iter().map(|&k| bit(k as usize)).collect(), z: vec![] }),
+                                    )
+                                }
+                            }
+                            _ => Expr::Binary("==", Box::new(subject.clone()), Box::new(l.clone())),
                         };
                         c = Some(match c {
                             None => eq,
@@ -814,7 +1004,7 @@ impl Elab {
 
     /// After an if: each variable either branch assigned becomes
     /// `sel ? then : else`, an unassigned side keeping the prior value.
-    fn merge(&mut self, env: &mut Env, et: &Env, ef: &Env, sel: &SigSpec) {
+    fn merge(&mut self, env: &mut Env, et: &Env, ef: &Env, sel: &SigSpec, comb: bool) {
         let mut ids: Vec<SigId> = et.keys().chain(ef.keys()).copied().collect();
         ids.sort();
         ids.dedup();
@@ -844,7 +1034,7 @@ impl Elab {
                 // A combinational bit assigned on one side only is still
                 // unassigned on the other: keep it None so the latch check
                 // sees it, unless it had a prior value.
-                if (t[i].is_none() || f[i].is_none()) && prior[i].is_none() && self.is_comb_hint(id) {
+                if (t[i].is_none() || f[i].is_none()) && prior[i].is_none() && comb {
                     out[i] = None;
                 } else {
                     out[i] = Some(y.0[k]);
@@ -854,13 +1044,6 @@ impl Elab {
         }
     }
 
-    /// Registers are written by edge processes; everything else is
-    /// combinational. Without that fact here, a one-sided assignment is
-    /// treated as a hold of the signal's own value (correct for a
-    /// register).
-    fn is_comb_hint(&self, _id: SigId) -> bool {
-        false
-    }
 
     // ---- instances -------------------------------------------------------------------
 
@@ -898,6 +1081,10 @@ impl Elab {
         self.m.cells.push(Cell::Instance { ty: ty.to_string(), name: name.to_string(), params: p, conns: c });
         Ok(())
     }
+}
+
+fn num(v: i64) -> Expr {
+    Expr::Number { width: None, signed: true, bits: (0..32).map(|i| Some((v >> i) & 1 == 1)).collect(), z: vec![] }
 }
 
 fn const_spec(bits: &[Option<bool>]) -> SigSpec {

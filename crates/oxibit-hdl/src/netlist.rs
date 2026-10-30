@@ -104,6 +104,8 @@ pub enum Op {
     Ge,
     LogicAnd,
     LogicOr,
+    /// `$shiftx`: A shifted right by B (signed B shifts left), x shifted in.
+    Shiftx,
 }
 
 impl Op {
@@ -135,6 +137,7 @@ impl Op {
             Ge => "$ge",
             LogicAnd => "$logic_and",
             LogicOr => "$logic_or",
+            Shiftx => "$shiftx",
         }
     }
     pub fn is_unary(self) -> bool {
@@ -151,6 +154,8 @@ pub enum Cell {
     Mux { a: SigSpec, b: SigSpec, s: SigSpec, y: SigSpec },
     /// A positive- or negative-edge D flip-flop.
     Dff { clk: SigSpec, posedge: bool, d: SigSpec, q: SigSpec },
+    /// A flop with an asynchronous reset to the constant `value`.
+    Adff { clk: SigSpec, posedge: bool, arst: SigSpec, arst_high: bool, value: Vec<bool>, d: SigSpec, q: SigSpec },
     /// A memory: `width` x `size` words, initial contents, ports.
     Mem(Memory),
     /// A primitive or user module instantiated by name.

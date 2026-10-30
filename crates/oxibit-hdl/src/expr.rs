@@ -26,7 +26,9 @@ pub enum Tok {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Ident(String),
-    Number { width: Option<u32>, signed: bool, bits: Vec<Option<bool>> },
+    /// `z`: which bits were written `z` or `?` (the others of `bits`
+    /// that are `None` were `x`).
+    Number { width: Option<u32>, signed: bool, bits: Vec<Option<bool>>, z: Vec<bool> },
     Unary(&'static str, Box<Expr>),
     Binary(&'static str, Box<Expr>, Box<Expr>),
     Ternary(Box<Expr>, Box<Expr>, Box<Expr>),
@@ -380,9 +382,9 @@ impl Parser {
 
     fn primary(&mut self) -> R<Expr> {
         match self.peek().cloned() {
-            Some(Tok::Number { width, signed, bits, .. }) => {
+            Some(Tok::Number { width, signed, bits, z }) => {
                 self.pos += 1;
-                Ok(Expr::Number { width, signed, bits })
+                Ok(Expr::Number { width, signed, bits, z })
             }
             Some(Tok::Str(v)) => {
                 self.pos += 1;

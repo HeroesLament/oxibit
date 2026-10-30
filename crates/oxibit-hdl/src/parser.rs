@@ -218,7 +218,7 @@ fn item(p: &mut P, items: &mut Vec<Item>) -> R<()> {
             }
             let signed = p.eat_kw("signed") || k == "integer";
             let range = if k == "integer" {
-                let n = |v: i64| Expr::Number { width: None, signed: true, bits: (0..32).map(|i| Some((v >> i) & 1 == 1)).collect() };
+                let n = |v: i64| Expr::Number { width: None, signed: true, bits: (0..32).map(|i| Some((v >> i) & 1 == 1)).collect(), z: vec![] };
                 Some(Range { msb: n(31), lsb: n(0) })
             } else {
                 p.range()?
