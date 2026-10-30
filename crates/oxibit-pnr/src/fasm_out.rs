@@ -29,6 +29,10 @@ pub enum Owner {
     DspTie,
     /// A clock-network enable the routing needs (`clocking`).
     Clocking,
+    /// A BUFGCTRL cell's settings (`cellcfg::bufg_config`).
+    Bufg,
+    /// A DSP48E1 cell's settings (`cellcfg::dsp_config`).
+    Dsp,
 }
 
 impl Owner {
@@ -42,6 +46,8 @@ impl Owner {
             Owner::SliceCfg => "slice_cfg",
             Owner::DspTie => "dsp_tie",
             Owner::Clocking => "clocking",
+            Owner::Bufg => "bufg",
+            Owner::Dsp => "dsp",
         }
     }
 }

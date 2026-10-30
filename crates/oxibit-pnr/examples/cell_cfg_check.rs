@@ -41,12 +41,14 @@ fn main() -> R<()> {
     let our_tiles: BTreeSet<String> = halves.keys().map(|(t, _)| t.clone()).collect();
     let mut ours: BTreeSet<String> = halves.into_values().flatten().collect();
     ours.extend(cellcfg::dsp_ties(&placed, &|b| loc.locate(b))?);
+    ours.extend(cellcfg::bufg_config(&placed, &|b| loc.locate(b))?);
+    ours.extend(cellcfg::dsp_config(&placed, &|b| loc.locate(b))?);
 
     let fasm_text = std::fs::read_to_string(fasm).map_err(|e| format!("{fasm}: {e}"))?;
     let mut theirs: BTreeSet<String> = fasm_text
         .lines()
         .map(|l| l.split('#').next().unwrap_or("").trim())
-        .filter(|l| cellcfg::is_slice_config(l) || cellcfg::is_dsp_tie(l))
+        .filter(|l| cellcfg::is_slice_config(l) || cellcfg::is_dsp_tie(l) || cellcfg::is_bufg_config(l) || cellcfg::is_dsp_config(l))
         .map(String::from)
         .collect();
 
@@ -71,6 +73,13 @@ fn main() -> R<()> {
         let p: Vec<&str> = l.split('.').collect();
         if cellcfg::is_dsp_tie(l) {
             return format!("DSP tie {}", &p[2][..7]);
+        }
+        if cellcfg::is_bufg_config(l) {
+            return format!("BUFGCTRL.{}", p[3]);
+        }
+        if cellcfg::is_dsp_config(l) {
+            let f = p[3].split(['[', ' ']).next().unwrap_or("");
+            return format!("DSP48.{f}");
         }
         match p[2..] {
             [x] => x.to_string(),

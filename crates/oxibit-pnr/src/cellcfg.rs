@@ -260,6 +260,190 @@ pub fn dsp_ties(placed: &Value, locate: &dyn Fn(&str) -> Option<Located>) -> R<B
     Ok(out)
 }
 
+/// A parameter as a bit vector of `width` (bit 0 first): a binary string
+/// (most significant bit first) or a number.
+fn bits_param(v: &Value, width: usize) -> Option<Vec<bool>> {
+    let mut out = vec![false; width];
+    match v {
+        Value::String(s) if !s.is_empty() && s.chars().all(|c| c == '0' || c == '1') => {
+            for (i, c) in s.chars().rev().enumerate().take(width) {
+                out[i] = c == '1';
+            }
+        }
+        _ => {
+            let n = int_param(v)?;
+            for (i, b) in out.iter_mut().enumerate().take(64) {
+                *b = (n >> i) & 1 == 1;
+            }
+        }
+    }
+    Some(out)
+}
+
+/// A FASM vector value, `N'b` with the most significant bit first.
+fn bits_value(bits: &[bool]) -> String {
+    let s: String = bits.iter().rev().map(|&b| if b { '1' } else { '0' }).collect();
+    format!("{}'b{s}", bits.len())
+}
+
+/// DSP48E1 cells' settings, as nextpnr-himbaechel's `write_dsp_cell`
+/// writes them (`TILE.DSP48.DSP_<n>.*`): pipeline registers (`AREG_0`,
+/// `AREG_2`, `Z*REG[0]`), cascade inputs, D port and SIMD use, PATTERN,
+/// MASK and their options, and the control-bus and clock inversions
+/// (`ZIS_*_INVERTED`). The tie-offs of open inputs are `dsp_ties`.
+pub fn dsp_config(placed: &Value, locate: &dyn Fn(&str) -> Option<Located>) -> R<BTreeSet<String>> {
+    let mods = placed["modules"].as_object().ok_or("no modules")?;
+    let top = mods
+        .values()
+        .find(|m| m["attributes"]["top"].is_string() || m["attributes"]["top"].is_number())
+        .or_else(|| mods.values().next())
+        .ok_or("no top module")?;
+    let mut out = BTreeSet::new();
+    for (name, c) in top["cells"].as_object().ok_or("no cells")? {
+        let attrs = &c["attributes"];
+        if attrs["X_ORIG_TYPE"].as_str() != Some("DSP48E1") {
+            continue;
+        }
+        let Some(bel) = attrs["NEXTPNR_BEL"].as_str() else { continue };
+        let Some((tile, _, _, _)) = locate(bel) else { return Err(format!("{name}: no tile for {bel}")) };
+        let y: i64 = bel.split('/').next().and_then(|s| s.rsplit_once('Y')).and_then(|(_, y)| y.parse().ok()).ok_or_else(|| format!("{name}: site of {bel}"))?;
+        let pre = format!("{tile}.DSP48.DSP_{}", y & 1);
+        let params = &c["parameters"];
+        let int = |p: &str, d: i64| params.get(p).and_then(int_param).unwrap_or(d);
+        let flag = |p: &str, d: bool| params.get(p).and_then(int_param).map(|v| v != 0).unwrap_or(d);
+        let text = |p: &str, d: &str| params.get(p).and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| d.to_string());
+        let boolstr = |p: &str| match params.get(p) {
+            Some(Value::String(s)) if s == "TRUE" => true,
+            Some(Value::String(s)) if s == "FALSE" => false,
+            Some(v) => int_param(v).is_some_and(|n| n != 0),
+            None => false,
+        };
+        let mut put = |f: String| {
+            out.insert(format!("{pre}.{f}"));
+        };
+
+        // 1 is the same as 2 (UG479); Vivado writes AREG_0, nothing, AREG_2.
+        for reg in ["AREG", "BREG"] {
+            let v = int(reg, 1);
+            if v == 0 || v == 2 {
+                put(format!("{reg}_{v}"));
+            }
+        }
+        for (p, f) in [("A_INPUT", "A_INPUT[0]"), ("B_INPUT", "B_INPUT[0]")] {
+            if text(p, "DIRECT") == "CASCADE" {
+                put(f.into());
+            }
+        }
+        if boolstr("USE_DPORT") {
+            put("USE_DPORT[0]".into());
+        }
+        match text("USE_SIMD", "ONE48").as_str() {
+            "TWO24" => put("USE_SIMD_FOUR12_TWO24".into()),
+            "FOUR12" => put("USE_SIMD_FOUR12".into()),
+            _ => {}
+        }
+        if let Some(bits) = params.get("PATTERN").and_then(|v| bits_param(v, 48)) {
+            put(format!("PATTERN[47:0] = {}", bits_value(&bits)));
+        }
+        match text("AUTORESET_PATDET", "NO_RESET").as_str() {
+            "RESET_MATCH" => put("AUTORESET_PATDET_RESET".into()),
+            "RESET_NOT_MATCH" => put("AUTORESET_PATDET_RESET_NOT_MATCH".into()),
+            _ => {}
+        }
+        // prjxray knows 46 MASK bits; the top two are 0 in practice.
+        if let Some(mut bits) = params.get("MASK").and_then(|v| bits_param(v, 48)) {
+            bits.truncate(46);
+            put(format!("MASK[45:0] = {}", bits_value(&bits)));
+        }
+        match text("SEL_MASK", "MASK").as_str() {
+            "C" => put("SEL_MASK_C".into()),
+            "ROUNDING_MODE1" => put("SEL_MASK_ROUNDING_MODE1".into()),
+            "ROUNDING_MODE2" => put("SEL_MASK_ROUNDING_MODE2".into()),
+            _ => {}
+        }
+        for (p, d, f) in [
+            ("ADREG", true, "ZADREG[0]"),
+            ("ALUMODEREG", false, "ZALUMODEREG[0]"),
+            ("ACASCREG", false, "ZAREG_2_ACASCREG_1"),
+            ("BCASCREG", false, "ZBREG_2_BCASCREG_1"),
+            ("CARRYINREG", false, "ZCARRYINREG[0]"),
+            ("CARRYINSELREG", false, "ZCARRYINSELREG[0]"),
+            ("CREG", true, "ZCREG[0]"),
+            ("DREG", true, "ZDREG[0]"),
+            ("INMODEREG", false, "ZINMODEREG[0]"),
+            ("MREG", false, "ZMREG[0]"),
+            ("OPMODEREG", false, "ZOPMODEREG[0]"),
+            ("PREG", false, "ZPREG[0]"),
+            ("IS_CLK_INVERTED", false, "ZIS_CLK_INVERTED"),
+            ("IS_CARRYIN_INVERTED", false, "ZIS_CARRYIN_INVERTED"),
+        ] {
+            if !flag(p, d) {
+                put(f.into());
+            }
+        }
+        for (bus, width) in [("ALUMODE", 4), ("INMODE", 5), ("OPMODE", 7)] {
+            for i in 0..width {
+                let inv = (int(&format!("IS_{bus}_INVERTED"), 0) >> i) & 1 == 1 || flag(&format!("IS_{bus}[{i}]_INVERTED"), false);
+                if !inv {
+                    put(format!("ZIS_{bus}_INVERTED[{i}]"));
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Whether a FASM line is a DSP48E1 setting `dsp_config` writes.
+pub fn is_dsp_config(line: &str) -> bool {
+    let f = line.split('#').next().unwrap_or("").split('=').next().unwrap_or("").trim();
+    let parts: Vec<&str> = f.split('.').collect();
+    matches!(parts[..], [t, "DSP48", d, _] if t.starts_with("DSP_") && d.starts_with("DSP_"))
+}
+
+/// BUFGCTRL cells, as nextpnr-himbaechel's `write_clocking` writes them:
+/// `TILE.BUFGCTRL.<site>.IN_USE`, `INIT_OUT`, `IS_IGNORE0_INVERTED`,
+/// `IS_IGNORE1_INVERTED` where those parameters are set, and `ZINV_CE0`,
+/// `ZINV_CE1`, `ZINV_S0`, `ZINV_S1` where the matching `IS_*_INVERTED` is
+/// not. `<site>` is the BUFGCTRL's place in its tile (`BUFGCTRL_X0Y5`).
+pub fn bufg_config(placed: &Value, locate: &dyn Fn(&str) -> Option<Located>) -> R<BTreeSet<String>> {
+    let mods = placed["modules"].as_object().ok_or("no modules")?;
+    let top = mods
+        .values()
+        .find(|m| m["attributes"]["top"].is_string() || m["attributes"]["top"].is_number())
+        .or_else(|| mods.values().next())
+        .ok_or("no top module")?;
+    let mut out = BTreeSet::new();
+    for (name, c) in top["cells"].as_object().ok_or("no cells")? {
+        if c["type"].as_str() != Some("BUFGCTRL") {
+            continue;
+        }
+        let Some(bel) = c["attributes"]["NEXTPNR_BEL"].as_str() else { continue };
+        let Some((tile, _, site, _)) = locate(bel) else { return Err(format!("{name}: no tile for {bel}")) };
+        let set = |p: &str| c["parameters"].get(p).and_then(int_param).unwrap_or(0) != 0;
+        let mut put = |f: &str| {
+            out.insert(format!("{tile}.BUFGCTRL.{site}.{f}"));
+        };
+        put("IN_USE");
+        for p in ["INIT_OUT", "IS_IGNORE0_INVERTED", "IS_IGNORE1_INVERTED"] {
+            if set(p) {
+                put(p);
+            }
+        }
+        for pin in ["CE0", "CE1", "S0", "S1"] {
+            if !set(&format!("IS_{pin}_INVERTED")) {
+                put(&format!("ZINV_{pin}"));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Whether a FASM line is a BUFGCTRL setting `bufg_config` writes.
+pub fn is_bufg_config(line: &str) -> bool {
+    let parts: Vec<&str> = line.split('.').collect();
+    matches!(parts[..], [t, "BUFGCTRL", site, _] if t.starts_with("CLK_BUFG_") && site.starts_with("BUFGCTRL_X"))
+}
+
 /// Whether a FASM line is a DSP tie-off `dsp_ties` writes.
 pub fn is_dsp_tie(line: &str) -> bool {
     let parts: Vec<&str> = line.split('.').collect();
@@ -308,5 +492,12 @@ mod tests {
         assert!(is_dsp_tie("DSP_R_X59Y65.DSP_1_RSTD.DSP_GND_R"));
         assert!(is_dsp_tie("DSP_L_X34Y65.DSP_0_CEAD.DSP_VCC_L"));
         assert!(!is_dsp_tie("DSP_R_X59Y65.DSP_1_A0.DSP_IMUX5_1"));
+        assert!(is_bufg_config("CLK_BUFG_TOP_R_X87Y53.BUFGCTRL.BUFGCTRL_X0Y5.ZINV_CE0"));
+        assert!(is_dsp_config("DSP_R_X59Y60.DSP48.DSP_0.ZIS_OPMODE_INVERTED[3]"));
+        assert!(is_dsp_config("DSP_R_X59Y60.DSP48.DSP_1.MASK[45:0] = 46'b0"));
+        assert!(!is_dsp_config("DSP_R_X59Y60.DSP_0_CEAD.DSP_VCC_R"));
+        assert_eq!(bits_param(&Value::String("101".into()), 4), Some(vec![true, false, true, false]));
+        assert_eq!(bits_value(&[true, false, true, false]), "4'b0101");
+        assert!(!is_bufg_config("CLK_BUFG_TOP_R_X87Y53.CLK_BUFG_BUFGCTRL0_I0.CLK_BUFG_IMUX28_0"));
     }
 }

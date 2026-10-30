@@ -11,6 +11,7 @@
 //! - `SiteMux`: the slice routing-bel settings of the chosen site paths;
 //! - `SliceCfg`, `DspTie`: slice FF, control set, LUT mode, carry-in, and
 //!   DSP48E1 tie-offs, from the cells;
+//! - `Bufg`, `Dsp`: BUFGCTRL and DSP48E1 cell settings;
 //! - `Clocking`: the clock-network enables (HCLK buffers, HROW lanes,
 //!   GCLK rebuffers, CMT buffer use) of the pips the routes use.
 //!
@@ -175,12 +176,20 @@ pub fn standalone(db: &Database, g: &Graph, placed: &Value, imp: &Import, base: 
     for l in &ties {
         fasm.add(Owner::DspTie, l);
     }
+    for l in &cellcfg::bufg_config(placed, &|b| loc.locate(b))? {
+        fasm.add(Owner::Bufg, l);
+    }
+    for l in &cellcfg::dsp_config(placed, &|b| loc.locate(b))? {
+        fasm.add(Owner::Dsp, l);
+    }
 
     // Base: the design FASM's lines no writer here owns. Dropped: every pip
     // (the routing is ours), the clock tiles' BUFHCE settings (they follow
     // the routing), the clock-network enables (they follow the routing),
     // slice configuration, LUT INITs of cell LUTs and of route-through
-    // LUTs, and the routing bels the site paths set. A cell-less LUT doing
+    // LUTs, and every slice routing-bel setting (the site paths set the
+    // ones the routes use; another tool's, such as an output mux its own
+    // routing used, is no setting of this design's). A cell-less LUT doing
     // logic keeps its INIT.
     let theirs = lutinit::fasm_inits(base)?;
     let (mut base_kept, mut base_dropped, mut cellless_kept, mut routing_luts) = (0usize, 0usize, 0usize, 0usize);
@@ -196,7 +205,9 @@ pub fn standalone(db: &Database, g: &Graph, placed: &Value, imp: &Import, base: 
             || clocking::is_clock_enable(f, &loc)
             || cellcfg::is_slice_config(f)
             || cellcfg::is_dsp_tie(f)
-            || sm.owns(f)
+            || cellcfg::is_bufg_config(f)
+            || cellcfg::is_dsp_config(f)
+            || placed::is_site_mux_line(f)
         {
             base_dropped += 1;
             continue;

@@ -1072,6 +1072,22 @@ impl SiteMuxLines {
     }
 }
 
+/// Whether a FASM line sets a slice routing bel this module manages (FF
+/// data and output muxes, `CY0`, `PRECYINIT`, `WEMUX`), whoever set it.
+pub fn is_site_mux_line(line: &str) -> bool {
+    let f = line.split('#').next().unwrap_or("").trim();
+    let parts: Vec<&str> = f.split('.').collect();
+    if parts.len() < 4 || !parts[0].starts_with("CLBL") || !parts[1].starts_with("SLICE") {
+        return false;
+    }
+    let bel = match parts[..] {
+        [_, _, "CARRY4", b] => b,
+        [_, _, b, ..] => b,
+        _ => return false,
+    };
+    mux_line(bel, "").is_some()
+}
+
 pub fn site_mux_lines(imp: &Import) -> SiteMuxLines {
     let mut out = SiteMuxLines::default();
     for ((tile, site), muxes) in &imp.site_muxes {
