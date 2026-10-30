@@ -7,6 +7,8 @@
 //!     DB_ROOT PART META_DIR PLACED.json OUT.fasm
 //!
 //! OXIBIT_DELAY_WEIGHT=w (0..=1): the router's `Opts::delay_weight`.
+//! OXIBIT_BBOX_MARGIN=m: the router's `Opts::bbox_margin` (negative: no box).
+//! OXIBIT_ASTAR=a: the router's `Opts::astar`.
 //!
 //! stdout: one JSON line per phase. Exit 0 when the routing is complete
 //! and clean and no two writers conflict; 1 otherwise; 3 on an error.
@@ -60,6 +62,12 @@ fn run() -> Result<bool, String> {
     let mut opts = Opts::default();
     if let Some(w) = std::env::var("OXIBIT_DELAY_WEIGHT").ok().and_then(|w| w.parse().ok()) {
         opts.delay_weight = w;
+    }
+    if let Some(m) = std::env::var("OXIBIT_BBOX_MARGIN").ok().and_then(|m| m.parse().ok()) {
+        opts.bbox_margin = m;
+    }
+    if let Some(a) = std::env::var("OXIBIT_ASTAR").ok().and_then(|a| a.parse().ok()) {
+        opts.astar = a;
     }
     let sa = flow::standalone_with(&db, &g, &placed_v, &imp, "", opts, &r)?;
     for v in &sa.report {

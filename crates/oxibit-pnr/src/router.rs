@@ -24,7 +24,7 @@
 //! arrives first, not where the tree is nearest.
 
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashSet};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::time::Instant;
 
 use oxibit_fasm::route::{EdgeKind, Graph};
@@ -50,11 +50,17 @@ pub struct Opts {
     pub delay_norm: f32,
     /// A* weight of the delay term (delay cost units per tile).
     pub astar_delay: f32,
+    /// A sink is searched for inside the bounding box of its net's
+    /// terminals grown by this many tiles, and without the box only when
+    /// none is found there. A net rerouted again has its margin doubled,
+    /// so a net that stays congested soon searches unbounded. Negative:
+    /// no box.
+    pub bbox_margin: i32,
 }
 
 impl Default for Opts {
     fn default() -> Self {
-        Opts { max_iters: 200, pres_fac: 0.5, pres_growth: 1.5, hist_fac: 1.0, astar: 0.6, delay_weight: 0.0, delay_norm: 100.0, astar_delay: 0.3 }
+        Opts { max_iters: 200, pres_fac: 0.5, pres_growth: 1.5, hist_fac: 1.0, astar: 0.6, delay_weight: 0.0, delay_norm: 100.0, astar_delay: 0.3, bbox_margin: -1 }
     }
 }
 
@@ -248,22 +254,112 @@ impl<'g> Router<'g> {
         self.touched.clear();
     }
 
-    /// Route one net. Its own previous occupancy must already be removed.
-    fn route_net(&mut self, net: &Net, pres: f32, pops: &mut u64) -> (Vec<Hop>, usize) {
+    /// The hops of `hops` (a net's routed tree) worth keeping on a reroute:
+    /// those on the path from the source to a sink that crosses no node in
+    /// `bad` (a node the net shares with another), counting the fixed
+    /// fan-out of every node it routes through as the footprint does.
+    fn keep_hops(&self, net: &Net, hops: &[Hop], bad: &HashSet<u32>) -> Vec<Hop> {
+        if bad.is_empty() {
+            return hops.to_vec();
+        }
+        let mut terminals: HashSet<u32> = net.sinks.iter().copied().collect();
+        terminals.extend(net.pin_groups.iter().flatten().copied());
+        // node -> the hop into it.
+        let parent: HashMap<u32, usize> = hops.iter().enumerate().map(|(k, h)| (h.dst, k)).collect();
+        let hop_bad: Vec<bool> = hops
+            .iter()
+            .map(|h| {
+                if bad.contains(&h.dst) {
+                    return true;
+                }
+                if terminals.contains(&h.dst) {
+                    return false;
+                }
+                let (mut out, mut seen) = (Vec::new(), HashSet::new());
+                self.closure(h.dst, &mut out, &mut seen);
+                out.iter().any(|n| bad.contains(n))
+            })
+            .collect();
+        let mut keep = vec![false; hops.len()];
+        for &t in &terminals {
+            let mut path = Vec::new();
+            let mut n = t;
+            let mut ok = true;
+            while let Some(&k) = parent.get(&n) {
+                if hop_bad[k] {
+                    ok = false;
+                    break;
+                }
+                path.push(k);
+                n = hops[k].src;
+                if path.len() > hops.len() {
+                    ok = false; // not a tree
+                    break;
+                }
+            }
+            if ok && !path.is_empty() && n == net.source {
+                for k in path {
+                    keep[k] = true;
+                }
+            }
+        }
+        hops.iter().zip(&keep).filter(|(_, k)| **k).map(|(h, _)| *h).collect()
+    }
+
+    /// Route one net, starting from the hops in `keep` (a subtree from the
+    /// source; empty to route from scratch). Its own previous occupancy
+    /// must already be removed.
+    fn route_net(&mut self, net: &Net, pres: f32, pops: &mut u64, outside: &mut u64, keep: &[Hop], margin: i32) -> (Vec<Hop>, usize) {
         self.cur_tag += 1;
         let tag = self.cur_tag;
         let mut tree: Vec<u32> = vec![net.source];
         self.tag[net.source as usize] = tag;
         // Delay (ps) from the source to each tree node.
         let mut arrival: std::collections::HashMap<u32, f32> = std::collections::HashMap::from([(net.source, 0.0)]);
-        let mut hops = Vec::new();
+        let mut hops: Vec<Hop> = keep.to_vec();
         let mut failed = 0;
+        // The kept subtree, its arrivals in order out from the source.
+        if !keep.is_empty() {
+            let mut out: HashMap<u32, Vec<usize>> = HashMap::new();
+            for (k, h) in keep.iter().enumerate() {
+                out.entry(h.src).or_default().push(k);
+            }
+            let mut stack = vec![net.source];
+            while let Some(n) = stack.pop() {
+                let a = arrival.get(&n).copied().unwrap_or(0.0);
+                for &k in out.get(&n).map(Vec::as_slice).unwrap_or(&[]) {
+                    let h = keep[k];
+                    if self.tag[h.dst as usize] == tag {
+                        continue;
+                    }
+                    self.tag[h.dst as usize] = tag;
+                    tree.push(h.dst);
+                    arrival.insert(h.dst, a + self.g.edge_timing(h.tile, h.pi).delay as f32);
+                    stack.push(h.dst);
+                }
+            }
+        }
 
         // Every sink is a set of nodes any one of which completes it: a
         // fixed sink is a set of one. Nearest first.
         let mut targets: Vec<Vec<u32>> = net.sinks.iter().map(|&s| vec![s]).collect();
         targets.extend(net.pin_groups.iter().filter(|g| !g.is_empty()).cloned());
         targets.sort_by(|a, b| self.manhattan(net.source, a[0]).total_cmp(&self.manhattan(net.source, b[0])));
+
+        // The terminals' bounding box, grown by the margin.
+        let bbox = (margin >= 0).then(|| {
+            let m = margin;
+            let (sx, sy) = self.g.node_xy(net.source);
+            let (mut x0, mut y0, mut x1, mut y1) = (sx as i32, sy as i32, sx as i32, sy as i32);
+            for &t in targets.iter().flatten() {
+                let (x, y) = self.g.node_xy(t);
+                x0 = x0.min(x as i32);
+                y0 = y0.min(y as i32);
+                x1 = x1.max(x as i32);
+                y1 = y1.max(y as i32);
+            }
+            (x0 - m, y0 - m, x1 + m, y1 + m)
+        });
 
         for set in &targets {
             if set.iter().any(|&t| self.tag[t as usize] == tag) {
@@ -272,51 +368,71 @@ impl<'g> Router<'g> {
             let aim = set[0];
             let w = self.opts.delay_weight;
             let astar = (1.0 - w) * self.opts.astar + w * self.opts.astar_delay;
-            let mut heap = BinaryHeap::new();
-            for &t in &tree {
-                let start = w * arrival.get(&t).copied().unwrap_or(0.0) / self.opts.delay_norm;
-                self.cost[t as usize] = start;
-                self.prev[t as usize] = (NONE, 0, 0);
-                self.touched.push(t);
-                heap.push(Item { f: start + astar * self.manhattan(t, aim), node: t });
-            }
             let mut reached = None;
-            while let Some(Item { f: _, node }) = heap.pop() {
-                *pops += 1;
-                if set.contains(&node) {
-                    reached = Some(node);
-                    break;
+            for boxed in [bbox, None] {
+                if boxed.is_none() && bbox.is_some() {
+                    // The boxed search found nothing: search again unbounded.
+                    self.reset_scratch();
+                    *outside += 1;
                 }
-                let base = self.cost[node as usize];
-                for &(d, tile, pi) in self.g.out_edges(node) {
-                    match self.g.edge_kind(tile, pi) {
-                        EdgeKind::Feature | EdgeKind::Fixed => {}
-                        EdgeKind::Relay if self.g.edge_site_through(tile, pi) => {}
-                        EdgeKind::Relay if net.class == NetClass::GlobalClock && self.g.edge_pip(tile, pi).tile.starts_with("CLK_") => {}
-                        // A constant net's VCC tie reads into an interconnect
-                        // input through its default (no line).
-                        EdgeKind::Default if net.class == NetClass::Constant && node == net.source => {}
-                        EdgeKind::Relay | EdgeKind::Default => continue,
+                let inside = |n: u32| {
+                    boxed.is_none_or(|(x0, y0, x1, y1)| {
+                        let (x, y) = self.g.node_xy(n);
+                        let (x, y) = (x as i32, y as i32);
+                        x >= x0 && x <= x1 && y >= y0 && y <= y1
+                    })
+                };
+                let mut heap = BinaryHeap::new();
+                for &t in &tree {
+                    let start = w * arrival.get(&t).copied().unwrap_or(0.0) / self.opts.delay_norm;
+                    self.cost[t as usize] = start;
+                    self.prev[t as usize] = (NONE, 0, 0);
+                    self.touched.push(t);
+                    heap.push(Item { f: start + astar * self.manhattan(t, aim), node: t });
+                }
+                while let Some(Item { f: _, node }) = heap.pop() {
+                    *pops += 1;
+                    if set.contains(&node) {
+                        reached = Some(node);
+                        break;
                     }
-                    if self.reserved[d as usize] && !set.contains(&d) {
-                        continue;
-                    }
-                    let step = if self.tag[d as usize] == tag {
-                        0.0
-                    } else if w > 0.0 {
-                        (1.0 - w) * self.node_cost(d, pres) + w * self.g.edge_timing(tile, pi).delay as f32 / self.opts.delay_norm
-                    } else {
-                        self.node_cost(d, pres)
-                    };
-                    let c = base + step;
-                    if c < self.cost[d as usize] {
-                        if self.cost[d as usize].is_infinite() {
-                            self.touched.push(d);
+                    let base = self.cost[node as usize];
+                    for &(d, tile, pi) in self.g.out_edges(node) {
+                        match self.g.edge_kind(tile, pi) {
+                            EdgeKind::Feature | EdgeKind::Fixed => {}
+                            EdgeKind::Relay if self.g.edge_site_through(tile, pi) => {}
+                            EdgeKind::Relay if net.class == NetClass::GlobalClock && self.g.edge_pip(tile, pi).tile.starts_with("CLK_") => {}
+                            // A constant net's VCC tie reads into an interconnect
+                            // input through its default (no line).
+                            EdgeKind::Default if net.class == NetClass::Constant && node == net.source => {}
+                            EdgeKind::Relay | EdgeKind::Default => continue,
                         }
-                        self.cost[d as usize] = c;
-                        self.prev[d as usize] = (node, tile, pi);
-                        heap.push(Item { f: c + astar * self.manhattan(d, aim), node: d });
+                        if self.reserved[d as usize] && !set.contains(&d) {
+                            continue;
+                        }
+                        if !set.contains(&d) && !inside(d) {
+                            continue;
+                        }
+                        let step = if self.tag[d as usize] == tag {
+                            0.0
+                        } else if w > 0.0 {
+                            (1.0 - w) * self.node_cost(d, pres) + w * self.g.edge_timing(tile, pi).delay as f32 / self.opts.delay_norm
+                        } else {
+                            self.node_cost(d, pres)
+                        };
+                        let c = base + step;
+                        if c < self.cost[d as usize] {
+                            if self.cost[d as usize].is_infinite() {
+                                self.touched.push(d);
+                            }
+                            self.cost[d as usize] = c;
+                            self.prev[d as usize] = (node, tile, pi);
+                            heap.push(Item { f: c + astar * self.manhattan(d, aim), node: d });
+                        }
                     }
+                }
+                if reached.is_some() || boxed.is_none() {
+                    break;
                 }
             }
             match reached {
@@ -399,21 +515,35 @@ impl<'g> Router<'g> {
         }
 
         let mut pres = self.opts.pres_fac;
+        let mut margin: Vec<i32> = vec![self.opts.bbox_margin; nets.len()];
         let mut todo: Vec<usize> = (0..nets.len()).filter(|&i| routed[i]).collect();
         stats.routed_nets = todo.len();
         for iter in 1..=self.opts.max_iters {
             let ti = Instant::now();
             let mut pops = 0u64;
             let mut failed = 0;
+            let mut kept = 0usize;
+            let mut outside = 0u64;
+            // (pops, net) of the costliest nets this iteration.
+            let mut costly: Vec<(u64, usize)> = Vec::new();
             for &i in &todo {
                 if progress.cancelled() {
                     stats.cancelled = true;
                     break;
                 }
+                // Keep the branches that share no node with another net.
+                let bad: HashSet<u32> = prints[i].iter().copied().filter(|&n| self.occ[n as usize] > 1).collect();
+                let keep = if iter == 1 { Vec::new() } else { self.keep_hops(&nets[i], &routes[i], &bad) };
+                kept += keep.len();
                 for &n in &prints[i] {
                     self.occ[n as usize] -= 1;
                 }
-                let (hops, f) = self.route_net(&nets[i], pres, &mut pops);
+                let before = pops;
+                let (hops, f) = self.route_net(&nets[i], pres, &mut pops, &mut outside, &keep, margin[i]);
+                costly.push((pops - before, i));
+                if margin[i] >= 0 {
+                    margin[i] = margin[i].saturating_mul(2).max(1);
+                }
                 failed += f;
                 prints[i] = self.footprint(&nets[i], &hops);
                 for &n in &prints[i] {
@@ -435,6 +565,15 @@ impl<'g> Router<'g> {
             stats.iterations = iter;
             stats.overused = over;
             observe(iter, &self.occ);
+            costly.sort_unstable_by(|a, b| b.cmp(a));
+            let costliest: Vec<_> = costly
+                .iter()
+                .take(5)
+                .map(|&(p, i)| {
+                    json!({"pops": p, "net": i, "sinks": nets[i].sinks.len(), "groups": nets[i].pin_groups.len(),
+                           "source": self.g.node_name(nets[i].source)})
+                })
+                .collect();
             progress.emit(Event::progress(
                 "route",
                 json!({
@@ -443,6 +582,10 @@ impl<'g> Router<'g> {
                     "overused": over,
                     "unroutable": failed,
                     "pops": pops,
+                    "kept_hops": kept,
+                    "unboxed_searches": outside,
+                    "costliest": costliest,
+                    "top100_pops": costly.iter().take(100).map(|c| c.0).sum::<u64>(),
                     "iter_ms": ti.elapsed().as_millis() as u64,
                 }),
             ));
