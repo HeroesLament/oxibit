@@ -221,7 +221,7 @@ fn why(g: &Graph, tag: &str, v: &View, target: u32) {
     }
 }
 
-fn view(g: &Graph, fasm: &str, roots: &[u32]) -> R<View> {
+fn view(g: &Graph, fasm: &str, roots: &[u32], tie: &HashMap<u32, bool>) -> R<View> {
     let lines = feature_lines(fasm);
     let inits = lutinit::fasm_inits(fasm)?;
     let set_into: HashSet<u32> = lines
@@ -242,7 +242,8 @@ fn view(g: &Graph, fasm: &str, roots: &[u32]) -> R<View> {
     // A root another root reaches is on that root's net (a clock buffer's
     // input and output pins, in a chain from the MMCM): the node's source is
     // the upstream root. Two roots neither of which reaches the other is a
-    // short.
+    // short, unless both are ties of one value (an unset mux whose default
+    // pips come from two tiles' VCC reads the one constant).
     let mut source = HashMap::new();
     let mut shorts = Vec::new();
     for (n, mut rs) in reach_of.clone() {
@@ -254,7 +255,8 @@ fn view(g: &Graph, fasm: &str, roots: &[u32]) -> R<View> {
             .filter(|r| !reach_of.get(r).is_some_and(|by| by.iter().any(|o| o != r && rs.contains(o))))
             .collect();
         let tops = if upstream.is_empty() { rs.clone() } else { upstream };
-        if tops.len() > 1 {
+        let one_constant = tops.iter().map(|t| tie.get(t)).collect::<Option<HashSet<_>>>().is_some_and(|v| v.len() == 1);
+        if tops.len() > 1 && !one_constant {
             shorts.push((n, tops.clone()));
         }
         source.insert(n, tops[0]);
@@ -465,7 +467,9 @@ fn main() -> R<()> {
         let v: Value = serde_json::from_str(&text).map_err(|e| format!("{design}: {e}"))?;
         connected_pins(&v, &Locator::new(&db)?)?
     };
-    let g = Graph::build_with(&db, None, GraphOpts::default())?;
+    // With the default pseudo-pips: an interconnect mux no pip sets reads
+    // VCC, as in silicon (a constant LUT input left on an unset pin).
+    let g = Graph::build_with(&db, None, GraphOpts { defaults: true })?;
     let ta = std::fs::read_to_string(fa).map_err(|e| format!("{fa}: {e}"))?;
     let tb = std::fs::read_to_string(fb).map_err(|e| format!("{fb}: {e}"))?;
     let mut models = HashMap::new();
@@ -499,8 +503,8 @@ fn main() -> R<()> {
     roots.sort_unstable();
     roots.dedup();
 
-    let va = view(&g, &ta, &roots)?;
-    let vb = view(&g, &tb, &roots)?;
+    let va = view(&g, &ta, &roots, &tie)?;
+    let vb = view(&g, &tb, &roots, &tie)?;
     if let Ok(w) = std::env::var("FASM_EQUIV_WHY") {
         for one in w.split(',') {
             let t = g.node(one)?;

@@ -245,10 +245,9 @@ pub fn dsp_ties(placed: &Value, locate: &dyn Fn(&str) -> Option<Located>) -> R<B
             continue;
         }
         let Some(bel) = attrs["NEXTPNR_BEL"].as_str() else { continue };
-        let Some((tile, _, _, _)) = locate(bel) else { return Err(format!("{name}: no tile for {bel}")) };
+        let Some((tile, _, site, _)) = locate(bel) else { return Err(format!("{name}: no tile for {bel}")) };
         let side = tile.chars().nth(4).filter(|c| *c == 'L' || *c == 'R').ok_or_else(|| format!("{name}: {tile} is not a DSP_L/DSP_R tile"))?;
-        let y: i64 = bel.split('/').next().and_then(|s| s.rsplit_once('Y')).and_then(|(_, y)| y.parse().ok()).ok_or_else(|| format!("{name}: site of {bel}"))?;
-        let n = y & 1;
+        let n = site_in_tile(&site).ok_or_else(|| format!("{name}: site of {bel}"))?;
         for (val, attr) in [(false, "DSP_GND_PINS"), (true, "DSP_VCC_PINS")] {
             for pin in attrs[attr].as_str().unwrap_or("").split(' ').filter(|p| !p.is_empty()) {
                 let inv = c["parameters"].get(format!("IS_{pin}_INVERTED")).and_then(int_param).unwrap_or(0) != 0;
@@ -258,6 +257,15 @@ pub fn dsp_ties(placed: &Value, locate: &dyn Fn(&str) -> Option<Located>) -> R<B
         }
     }
     Ok(out)
+}
+
+/// A DSP48E1's place in its tile (`DSP_<n>`): the Y of its site relative to
+/// the tile (`DSP48E1_X0Y1` -> 1). Not the Y of the bel name's head: that is
+/// the absolute site's in older builds' names, the tile's grid row in
+/// current ones (`X57Y54/DSP48E1_X0Y1.DSP48E1`).
+fn site_in_tile(site: &str) -> Option<i64> {
+    let y: i64 = site.rsplit_once('Y')?.1.parse().ok()?;
+    (0..=1).contains(&y).then_some(y)
 }
 
 /// A parameter as a bit vector of `width` (bit 0 first): a binary string
@@ -305,9 +313,9 @@ pub fn dsp_config(placed: &Value, locate: &dyn Fn(&str) -> Option<Located>) -> R
             continue;
         }
         let Some(bel) = attrs["NEXTPNR_BEL"].as_str() else { continue };
-        let Some((tile, _, _, _)) = locate(bel) else { return Err(format!("{name}: no tile for {bel}")) };
-        let y: i64 = bel.split('/').next().and_then(|s| s.rsplit_once('Y')).and_then(|(_, y)| y.parse().ok()).ok_or_else(|| format!("{name}: site of {bel}"))?;
-        let pre = format!("{tile}.DSP48.DSP_{}", y & 1);
+        let Some((tile, _, site, _)) = locate(bel) else { return Err(format!("{name}: no tile for {bel}")) };
+        let n = site_in_tile(&site).ok_or_else(|| format!("{name}: site of {bel}"))?;
+        let pre = format!("{tile}.DSP48.DSP_{n}");
         let params = &c["parameters"];
         let int = |p: &str, d: i64| params.get(p).and_then(int_param).unwrap_or(d);
         let flag = |p: &str, d: bool| params.get(p).and_then(int_param).map(|v| v != 0).unwrap_or(d);
@@ -470,6 +478,13 @@ pub fn is_slice_config(line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dsp_site_in_tile() {
+        assert_eq!(site_in_tile("DSP48E1_X0Y0"), Some(0));
+        assert_eq!(site_in_tile("DSP48E1_X0Y1"), Some(1));
+        assert_eq!(site_in_tile("DSP48E1_X0Y2"), None);
+    }
 
     #[test]
     fn params() {
