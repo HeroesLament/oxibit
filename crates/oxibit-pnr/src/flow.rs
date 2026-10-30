@@ -11,7 +11,7 @@
 //! - `SiteMux`: the slice routing-bel settings of the chosen site paths;
 //! - `SliceCfg`, `DspTie`: slice FF, control set, LUT mode, carry-in, and
 //!   DSP48E1 tie-offs, from the cells;
-//! - `Bufg`, `Dsp`: BUFGCTRL and DSP48E1 cell settings;
+//! - `Bufg`, `Dsp`, `Mmcm`: BUFGCTRL, DSP48E1 and MMCME2_ADV cell settings;
 //! - `Clocking`: the clock-network enables (HCLK buffers, HROW lanes,
 //!   GCLK rebuffers, CMT buffer use) of the pips the routes use.
 //!
@@ -27,7 +27,7 @@ use oxibit_fasm::route::{EdgeKind, Graph, PipLookup};
 use oxibit_report::Progress;
 use serde_json::{Value, json};
 
-use crate::{cellcfg, clocking};
+use crate::{cellcfg, clocking, mmcm};
 use crate::fasm_out::{FasmOut, Owner};
 use crate::lutinit::{self, Locator};
 use crate::nets::{Net, NetClass};
@@ -182,6 +182,9 @@ pub fn standalone(db: &Database, g: &Graph, placed: &Value, imp: &Import, base: 
     for l in &cellcfg::dsp_config(placed, &|b| loc.locate(b))? {
         fasm.add(Owner::Dsp, l);
     }
+    for l in &mmcm::mmcm_config(placed, &|b| loc.locate(b))? {
+        fasm.add(Owner::Mmcm, l);
+    }
 
     // Base: the design FASM's lines no writer here owns. Dropped: every pip
     // (the routing is ours), the clock tiles' BUFHCE settings (they follow
@@ -207,6 +210,7 @@ pub fn standalone(db: &Database, g: &Graph, placed: &Value, imp: &Import, base: 
             || cellcfg::is_dsp_tie(f)
             || cellcfg::is_bufg_config(f)
             || cellcfg::is_dsp_config(f)
+            || mmcm::is_mmcm_config(f)
             || placed::is_site_mux_line(f)
         {
             base_dropped += 1;

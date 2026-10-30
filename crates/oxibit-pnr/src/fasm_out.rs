@@ -33,6 +33,8 @@ pub enum Owner {
     Bufg,
     /// A DSP48E1 cell's settings (`cellcfg::dsp_config`).
     Dsp,
+    /// An MMCME2_ADV cell's settings (`mmcm`).
+    Mmcm,
 }
 
 impl Owner {
@@ -48,6 +50,7 @@ impl Owner {
             Owner::Clocking => "clocking",
             Owner::Bufg => "bufg",
             Owner::Dsp => "dsp",
+            Owner::Mmcm => "mmcm",
         }
     }
 }

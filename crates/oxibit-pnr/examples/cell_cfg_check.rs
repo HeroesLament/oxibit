@@ -22,7 +22,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use oxibit_fasm::db::Database;
-use oxibit_pnr::cellcfg;
+use oxibit_pnr::{cellcfg, mmcm};
 use oxibit_pnr::lutinit::Locator;
 use serde_json::{json, Value};
 
@@ -43,12 +43,15 @@ fn main() -> R<()> {
     ours.extend(cellcfg::dsp_ties(&placed, &|b| loc.locate(b))?);
     ours.extend(cellcfg::bufg_config(&placed, &|b| loc.locate(b))?);
     ours.extend(cellcfg::dsp_config(&placed, &|b| loc.locate(b))?);
+    ours.extend(mmcm::mmcm_config(&placed, &|b| loc.locate(b))?);
 
     let fasm_text = std::fs::read_to_string(fasm).map_err(|e| format!("{fasm}: {e}"))?;
     let mut theirs: BTreeSet<String> = fasm_text
         .lines()
         .map(|l| l.split('#').next().unwrap_or("").trim())
-        .filter(|l| cellcfg::is_slice_config(l) || cellcfg::is_dsp_tie(l) || cellcfg::is_bufg_config(l) || cellcfg::is_dsp_config(l))
+        .filter(|l| {
+            cellcfg::is_slice_config(l) || cellcfg::is_dsp_tie(l) || cellcfg::is_bufg_config(l) || cellcfg::is_dsp_config(l) || mmcm::is_mmcm_config(l)
+        })
         .map(String::from)
         .collect();
 
@@ -76,6 +79,10 @@ fn main() -> R<()> {
         }
         if cellcfg::is_bufg_config(l) {
             return format!("BUFGCTRL.{}", p[3]);
+        }
+        if mmcm::is_mmcm_config(l) {
+            let f = l.split_once(".MMCME2_ADV.").map(|x| x.1).unwrap_or("");
+            return format!("MMCM.{}", f.split(['[', ' ']).next().unwrap_or(""));
         }
         if cellcfg::is_dsp_config(l) {
             let f = p[3].split(['[', ' ']).next().unwrap_or("");

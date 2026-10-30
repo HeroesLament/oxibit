@@ -13,6 +13,7 @@ pub mod dsp_patch;
 pub mod fasm_out;
 pub mod flow;
 pub mod lutinit;
+pub mod mmcm;
 pub mod nets;
 pub mod placed;
 pub mod reroute;
