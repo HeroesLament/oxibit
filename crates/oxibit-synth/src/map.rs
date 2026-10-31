@@ -251,7 +251,7 @@ pub fn cut_tt(g: &Aig, root: u32, leaves: &[u32]) -> u64 {
 }
 
 #[hot]
-pub fn map(g: &Aig, outs: &[Lit], area_passes: usize) -> Mapping {
+pub fn map(g: &Aig, outs: &[Lit], area_passes: usize, rep: &dyn oxibit_report::Progress) -> Mapping {
     let n = g.nodes.len();
     let mut refs = vec![0f32; n];
     for node in &g.nodes {
@@ -274,9 +274,18 @@ pub fn map(g: &Aig, outs: &[Lit], area_passes: usize) -> Mapping {
     };
     hot_block!("map.depth", { m.pass(Goal::Depth) });
     let (mut used, mut depth) = m.cover(outs);
-    for _ in 0..area_passes {
+    let report = |pass: &str, best: &[Option<Cut>], used: &[bool], depth: u32| {
+        let luts = used.iter().enumerate().filter(|(k, u)| **u && best[*k].is_some()).count();
+        rep.emit(oxibit_report::Event::progress(
+            "map",
+            serde_json::json!({"pass": pass, "luts": luts, "depth": depth}),
+        ));
+    };
+    report("depth", &m.best, &used, depth);
+    for k in 0..area_passes {
         hot_block!("map.area", { m.pass(Goal::Area) });
         (used, depth) = m.cover(outs);
+        report(&format!("area{}", k + 1), &m.best, &used, depth);
     }
     m.cuts = Vec::new();
     hot_block!("map.tt", {
@@ -354,7 +363,7 @@ mod tests {
             c = g.or(t, u);
         }
         outs.push(c);
-        let m = map(&g, &outs, 2);
+        let m = map(&g, &outs, 2, &oxibit_report::Silent);
         check(&g, &outs, &m);
         assert!(m.luts.iter().all(|l| l.leaves.len() <= K));
     }
