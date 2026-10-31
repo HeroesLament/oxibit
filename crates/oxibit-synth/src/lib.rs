@@ -9,6 +9,7 @@
 //! primitive instances.
 
 pub mod aig;
+pub mod bram;
 pub mod dsp;
 pub mod emit;
 pub mod lib_ports;
@@ -24,6 +25,8 @@ pub struct Options {
     pub carry_min: usize,
     /// Map multipliers that fit to DSP48E1.
     pub dsp: bool,
+    /// Map memories to RAMB18E1 / RAMB36E1.
+    pub bram: bool,
 }
 
 impl Default for Options {
@@ -32,6 +35,7 @@ impl Default for Options {
             area_passes: 2,
             carry_min: 3,
             dsp: true,
+            bram: true,
         }
     }
 }
@@ -48,14 +52,17 @@ pub struct Report {
     pub dead_ff: usize,
     pub dead_chain: usize,
     pub stats: emit::Stats,
+    pub bram: bram::BramStats,
     pub lower_ms: u64,
     pub map_ms: u64,
     pub emit_ms: u64,
 }
 
 /// Synthesize `m`. `dirs` gives the port directions of the primitives the
-/// design instantiates.
-pub fn synth(m: &Module, dirs: &lib_ports::PortDirs, opt: &Options) -> Result<(Module, Report), String> {
+/// design instantiates. Returns the netlist, the checking view (the same
+/// netlist with memories still `$mem_v2`, for the equivalence oracle) and a
+/// report.
+pub fn synth(m: &Module, dirs: &lib_ports::PortDirs, opt: &Options) -> Result<(Module, Module, Report), String> {
     let t0 = std::time::Instant::now();
     let mut m = m.clone();
     let mem_rd_ff = memdff::merge(&mut m);
@@ -66,7 +73,9 @@ pub fn synth(m: &Module, dirs: &lib_ports::PortDirs, opt: &Options) -> Result<(M
     let outs = lw.outputs();
     let mp = map::map(&lw.aig, &outs, opt.area_passes);
     let t2 = std::time::Instant::now();
-    let (out, stats) = emit::emit(&lw, &mp);
+    let (mut out, stats) = emit::emit(&lw, &mp);
+    let check = out.clone();
+    let bs = if opt.bram { bram::map(&mut out) } else { bram::BramStats::default() };
     let t3 = std::time::Instant::now();
     let r = Report {
         ands: lw.aig.ands(),
@@ -80,9 +89,10 @@ pub fn synth(m: &Module, dirs: &lib_ports::PortDirs, opt: &Options) -> Result<(M
         dead_ff,
         dead_chain,
         stats,
+        bram: bs,
         lower_ms: (t1 - t0).as_millis() as u64,
         map_ms: (t2 - t1).as_millis() as u64,
         emit_ms: (t3 - t2).as_millis() as u64,
     };
-    Ok((out, r))
+    Ok((out, check, r))
 }

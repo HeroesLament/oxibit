@@ -4,6 +4,8 @@
 //!
 //! LIB.v files give primitive port directions (yosys's xilinx cells_sim.v
 //! and cells_xtra.v, or stubs). stdout: one JSON line of times and counts.
+//! When memories become block RAMs, OUT.check.json is the same netlist with
+//! the memories still `$mem_v2`, for the equivalence check.
 
 use std::process::ExitCode;
 use std::time::Instant;
@@ -59,6 +61,7 @@ fn main() -> ExitCode {
         area_passes: std::env::var("OXIBIT_AREA_PASSES").ok().and_then(|s| s.parse().ok()).unwrap_or(2),
         carry_min: std::env::var("OXIBIT_CARRY_MIN").ok().and_then(|s| s.parse().ok()).unwrap_or(3),
         dsp: std::env::var("OXIBIT_DSP").map(|v| v != "0").unwrap_or(true),
+        bram: std::env::var("OXIBIT_BRAM").map(|v| v != "0").unwrap_or(true),
     };
     // Deep cones recurse once per cell; give the walk room.
     let res = std::thread::Builder::new()
@@ -67,7 +70,7 @@ fn main() -> ExitCode {
         .unwrap()
         .join()
         .unwrap();
-    let (out, r) = match res {
+    let (out, check, r) = match res {
         Ok(x) => x,
         Err(e) => {
             eprintln!("synth: {e}");
@@ -80,6 +83,14 @@ fn main() -> ExitCode {
         eprintln!("{}: {e}", args[2]);
         return ExitCode::from(3);
     }
+    // The checking view, when memories were mapped: OUT.check.json.
+    if r.bram.mapped > 0 {
+        let path = args[2].strip_suffix(".json").unwrap_or(&args[2]).to_string() + ".check.json";
+        if let Err(e) = std::fs::write(&path, serde_json::to_string(&yosys_json::write(&check)).unwrap()) {
+            eprintln!("{path}: {e}");
+            return ExitCode::from(3);
+        }
+    }
     let t_write = t3.elapsed();
     let s = &r.stats;
     println!(
@@ -87,7 +98,8 @@ fn main() -> ExitCode {
         serde_json::json!({"module": out.name, "front_ms": t_front.as_millis() as u64, "lower_ms": r.lower_ms, "map_ms": r.map_ms,
             "emit_ms": r.emit_ms, "write_ms": t_write.as_millis() as u64, "ands": r.ands, "aig_inputs": r.aig_inputs,
             "depth": r.depth, "undriven": r.undriven, "carry4": r.carry4, "dsp": r.dsp.dsp, "mul_left": r.dsp.mul_left, "mem_rd_ff": r.mem_rd_ff, "dead_ff": r.dead_ff, "dead_chain": r.dead_chain, "lut": s.luts.iter().sum::<usize>(), "lut_by_k": s.luts,
-            "inverters": s.inverters, "ff": s.ffs, "named": s.named, "nodes_by_op": r.ands_by_op})
+            "inverters": s.inverters, "ff": s.ffs, "named": s.named, "nodes_by_op": r.ands_by_op, "ramb18": r.bram.ramb18,
+            "ramb36": r.bram.ramb36, "ram32m": r.bram.ram32m, "ram64m": r.bram.ram64m, "ram128x1d": r.bram.ram128x1d, "mem_mapped": r.bram.mapped, "mem_left": r.bram.left})
     );
     ExitCode::SUCCESS
 }
