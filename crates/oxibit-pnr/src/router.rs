@@ -15,6 +15,14 @@
 //! members compete for nets like any other node, so congestion decides
 //! which net gets which pin.
 //!
+//! The present factor follows `Opts::schedule`, which always has a
+//! ceiling, and the A* estimate is `Opts::estimate`: a per-tile distance
+//! term (`Bound::Greedy` above `ADMISSIBLE_PER_TILE`) plus the target's
+//! unavoidable congestion cost of entry (beyond the uncongested cost the
+//! distance term stands for), a lower bound on its last
+//! hops. Together they keep a search for a sink behind a contested entrance
+//! from clearing the whole cheaper device first.
+//!
 //! With `Opts::delay_weight` w > 0 an edge costs, as in VPR,
 //! `(1 - w) * congestion + w * delay / delay_norm`: the congestion term as
 //! above, and the pip's intrinsic delay (`Graph::edge_timing`, the model
@@ -33,17 +41,68 @@ use serde_json::json;
 
 use crate::nets::{Net, NetClass};
 
+/// The present-congestion factor over iterations. Every variant has a
+/// ceiling: unbounded, the cost of crossing a contested node outgrows the
+/// A* estimate until one-sink searches flood the device.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Schedule {
+    /// p = min(p0 * growth^(iter - 1), cap).
+    Geometric { p0: f32, growth: f32, cap: f32 },
+}
+
+impl Schedule {
+    pub fn first(&self) -> f32 {
+        match *self {
+            Schedule::Geometric { p0, cap, .. } => p0.min(cap),
+        }
+    }
+    pub fn next(&self, p: f32) -> f32 {
+        match *self {
+            Schedule::Geometric { growth, cap, .. } => (p * growth).min(cap),
+        }
+    }
+}
+
+/// What an estimate guarantees about the cost still to pay.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Bound {
+    /// Never more than the true remaining cost: searches find cheapest paths.
+    Lower,
+    /// May exceed it, by up to the given factor over the lower bound per
+    /// tile: faster, paths possibly dearer.
+    Greedy(f32),
+}
+
+/// Cost per tile no path can beat: the longest wire (an 18-tile long line)
+/// costs 1 like any node.
+pub const ADMISSIBLE_PER_TILE: f32 = 1.0 / 18.0;
+
+/// The A* estimate: `per_tile` x Manhattan distance to the target, plus,
+/// with `entry`, the congestion cost the target's entry cannot avoid
+/// (a lower bound on the last hops, `Router::entry_bound`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Estimate {
+    pub per_tile: f32,
+    pub entry: bool,
+}
+
+impl Estimate {
+    pub fn bound(&self) -> Bound {
+        if self.per_tile <= ADMISSIBLE_PER_TILE {
+            Bound::Lower
+        } else {
+            Bound::Greedy(self.per_tile / ADMISSIBLE_PER_TILE)
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Opts {
     pub max_iters: u32,
-    /// Present-congestion factor at iteration 1, and its growth per iteration.
-    pub pres_fac: f32,
-    pub pres_growth: f32,
+    pub schedule: Schedule,
     /// History added per unit of overuse per iteration.
     pub hist_fac: f32,
-    /// A* weight on the Manhattan distance (cost units per tile). Above the
-    /// admissible bound on purpose: long wires make the true bound tiny.
-    pub astar: f32,
+    pub estimate: Estimate,
     /// Weight of delay against congestion in an edge's cost, 0..=1.
     pub delay_weight: f32,
     /// ps of delay per cost unit.
@@ -64,11 +123,25 @@ pub struct Opts {
     /// but left the single-sink floods; on spi_probe it doubled the pops of
     /// iteration 1.
     pub entry_aim: bool,
+    /// After routing, write the nodes still used by two or more nets
+    /// (name, occupancy, history) to this file.
+    pub overuse_dump: Option<String>,
 }
 
 impl Default for Opts {
     fn default() -> Self {
-        Opts { max_iters: 200, pres_fac: 0.5, pres_growth: 1.5, hist_fac: 1.0, astar: 0.6, delay_weight: 0.0, delay_norm: 100.0, astar_delay: 0.3, bbox_margin: -1, entry_aim: false }
+        Opts {
+            max_iters: 200,
+            schedule: Schedule::Geometric { p0: 0.5, growth: 1.5, cap: 8.0 },
+            hist_fac: 1.0,
+            estimate: Estimate { per_tile: 0.6, entry: true },
+            delay_weight: 0.0,
+            delay_norm: 100.0,
+            astar_delay: 0.3,
+            bbox_margin: -1,
+            entry_aim: false,
+            overuse_dump: None,
+        }
     }
 }
 
@@ -286,6 +359,52 @@ impl<'g> Router<'g> {
         (1.0 + self.hist[n as usize]) * (1.0 + pres * others)
     }
 
+    /// Congestion part of entering `n` during the current net's search: its
+    /// cost as `route_net` charges it, less the uncongested cost of 1 that
+    /// the distance term already stands for (tree nodes are free).
+    fn enter_excess(&self, n: u32, pres: f32, tag: u32) -> f32 {
+        if self.tag[n as usize] == tag { 0.0 } else { self.node_cost(n, pres) - 1.0 }
+    }
+
+    /// Lower bound on the congestion cost still to pay, beyond the
+    /// uncongested cost the distance term covers, to reach a node of `set`:
+    /// 0 on the set, the target's own excess on its drivers, two hops'
+    /// worth on theirs; every other node pays at least three hops' worth
+    /// (`far`). Delay terms are ignored (a lower bound).
+    fn entry_bound(&self, set: &[u32], pres: f32, tag: u32) -> (HashMap<u32, f32>, f32) {
+        let mut near: HashMap<u32, f32> = HashMap::new();
+        let mut far = f32::INFINITY;
+        for &t in set {
+            near.insert(t, 0.0);
+        }
+        for &t in set {
+            let ct = self.enter_excess(t, pres, tag);
+            for (p1, _, _) in self.g.in_edges(t) {
+                let c1 = self.enter_excess(p1, pres, tag);
+                let e1 = near.entry(p1).or_insert(f32::INFINITY);
+                *e1 = e1.min(ct);
+                let mut any = false;
+                for (p2, _, _) in self.g.in_edges(p1) {
+                    any = true;
+                    let e2 = near.entry(p2).or_insert(f32::INFINITY);
+                    *e2 = e2.min(ct + c1);
+                    far = far.min(ct + c1 + self.enter_excess(p2, pres, tag));
+                }
+                if !any {
+                    far = far.min(ct + c1);
+                }
+            }
+        }
+        // Set members stay at 0 even when they also drive each other.
+        for &t in set {
+            near.insert(t, 0.0);
+        }
+        if !far.is_finite() {
+            far = 0.0;
+        }
+        (near, far)
+    }
+
     /// Tiles from `n` to the nearest of `aims`.
     fn to_aims(&self, n: u32, aims: &[(i16, i16)]) -> f32 {
         let (x, y) = self.g.node_xy(n);
@@ -460,14 +579,16 @@ impl<'g> Router<'g> {
                 continue; // already on the tree
             }
             let aims = self.aims(set);
+            let (near, far) = if self.opts.estimate.entry { self.entry_bound(set, pres, tag) } else { (HashMap::new(), 0.0) };
+            let eb = |n: u32| near.get(&n).copied().unwrap_or(far);
             let w = self.opts.delay_weight;
-            let astar = (1.0 - w) * self.opts.astar + w * self.opts.astar_delay;
+            let astar = (1.0 - w) * self.opts.estimate.per_tile + w * self.opts.astar_delay;
             let mut reached = None;
             let mut sd = SearchDiag { cost: f32::INFINITY, dist: i32::MAX, ..Default::default() };
             for &t in &tree {
                 sd.dist = sd.dist.min(self.to_aims(t, &aims) as i32);
             }
-            sd.h0 = astar * sd.dist as f32;
+            sd.h0 = astar * sd.dist as f32 + tree.iter().map(|&t| eb(t)).fold(f32::INFINITY, f32::min).min(1e30);
             for boxed in [bbox, None] {
                 if boxed.is_none() && bbox.is_some() {
                     // The boxed search found nothing: search again unbounded.
@@ -487,7 +608,7 @@ impl<'g> Router<'g> {
                     self.cost[t as usize] = start;
                     self.prev[t as usize] = (NONE, 0, 0);
                     self.touched.push(t);
-                    heap.push(Item { f: start + astar * self.to_aims(t, &aims), node: t });
+                    heap.push(Item { f: start + astar * self.to_aims(t, &aims) + eb(t), node: t });
                 }
                 let mut fs: Vec<f32> = Vec::new();
                 let mut dump: Option<std::io::BufWriter<std::fs::File>> = self.dump_net.contains(&self.cur_net).then_some(self.cur_net).and_then(|d| {
@@ -543,7 +664,7 @@ impl<'g> Router<'g> {
                             }
                             self.cost[d as usize] = c;
                             self.prev[d as usize] = (node, tile, pi);
-                            heap.push(Item { f: c + astar * self.to_aims(d, &aims), node: d });
+                            heap.push(Item { f: c + astar * self.to_aims(d, &aims) + eb(d), node: d });
                         }
                     }
                 }
@@ -645,7 +766,7 @@ impl<'g> Router<'g> {
             }
         }
 
-        let mut pres = self.opts.pres_fac;
+        let mut pres = self.opts.schedule.first();
         let mut margin: Vec<i32> = vec![self.opts.bbox_margin; nets.len()];
         let mut todo: Vec<usize> = (0..nets.len()).filter(|&i| routed[i]).collect();
         stats.routed_nets = todo.len();
@@ -718,6 +839,8 @@ impl<'g> Router<'g> {
                 "route",
                 json!({
                     "iter": iter,
+                    "pres": pres,
+                    "estimate": format!("{:?}", self.opts.estimate.bound()),
                     "routed": todo.len(),
                     "overused": over,
                     "unroutable": failed,
@@ -735,9 +858,18 @@ impl<'g> Router<'g> {
                 break;
             }
             todo = (0..nets.len()).filter(|&i| routed[i] && prints[i].iter().any(|&n| self.occ[n as usize] > 1)).collect();
-            pres *= self.opts.pres_growth;
+            pres = self.opts.schedule.next(pres);
         }
         stats.seconds = t0.elapsed().as_secs_f64();
+        if let Some(path) = &self.opts.overuse_dump {
+            let mut text = String::new();
+            for (n, &o) in self.occ.iter().enumerate() {
+                if o > 1 {
+                    text.push_str(&format!("{}\t{o}\t{}\n", self.g.node_name(n as u32), self.hist[n]));
+                }
+            }
+            let _ = std::fs::write(path, text);
+        }
         (routes, stats)
     }
 }

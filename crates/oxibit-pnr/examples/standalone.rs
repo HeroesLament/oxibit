@@ -8,7 +8,11 @@
 //!
 //! OXIBIT_DELAY_WEIGHT=w (0..=1): the router's `Opts::delay_weight`.
 //! OXIBIT_BBOX_MARGIN=m: the router's `Opts::bbox_margin` (negative: no box).
-//! OXIBIT_ASTAR=a: the router's `Opts::astar`.
+//! OXIBIT_ASTAR=a: the router's `Estimate::per_tile`.
+//! OXIBIT_PRES_FAC / OXIBIT_PRES_GROWTH / OXIBIT_PRES_MAX: the router's
+//! `Schedule::Geometric` p0 / growth / cap. OXIBIT_HIST_FAC: history factor.
+//! OXIBIT_ENTRY_BOUND=0|1: `Estimate::entry`. OXIBIT_OVERUSE_DUMP=path: the
+//! nodes still overused after routing.
 //!
 //! stdout: one JSON line per phase. Exit 0 when the routing is complete
 //! and clean and no two writers conflict; 1 otherwise; 3 on an error.
@@ -70,7 +74,7 @@ fn run() -> Result<bool, String> {
         opts.bbox_margin = m;
     }
     if let Some(a) = std::env::var("OXIBIT_ASTAR").ok().and_then(|a| a.parse().ok()) {
-        opts.astar = a;
+        opts.estimate.per_tile = a;
     }
     if let Ok(v) = std::env::var("OXIBIT_ENTRY_AIM") {
         opts.entry_aim = v != "0";
@@ -78,9 +82,42 @@ fn run() -> Result<bool, String> {
     if let Some(n) = std::env::var("OXIBIT_MAX_ITERS").ok().and_then(|n| n.parse().ok()) {
         opts.max_iters = n;
     }
+    let envf = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<f32>().ok());
+    let oxibit_pnr::router::Schedule::Geometric { mut p0, mut growth, mut cap } = opts.schedule;
+    p0 = envf("OXIBIT_PRES_FAC").unwrap_or(p0);
+    growth = envf("OXIBIT_PRES_GROWTH").unwrap_or(growth);
+    cap = envf("OXIBIT_PRES_MAX").unwrap_or(cap);
+    opts.schedule = oxibit_pnr::router::Schedule::Geometric { p0, growth, cap };
+    if let Some(v) = envf("OXIBIT_HIST_FAC") {
+        opts.hist_fac = v;
+    }
+    opts.overuse_dump = std::env::var("OXIBIT_OVERUSE_DUMP").ok();
+    if let Ok(v) = std::env::var("OXIBIT_ENTRY_BOUND") {
+        opts.estimate.entry = v != "0";
+    }
     let sa = flow::standalone_with(&db, &g, &placed_v, &imp, "", opts, &r)?;
     for v in &sa.report {
         line(v.clone());
+    }
+    // Each short node, and the nets whose routes touch it.
+    let shorts: Vec<serde_json::Value> = sa
+        .check
+        .shorts
+        .iter()
+        .take(10)
+        .map(|&n| {
+            let on: Vec<String> = sa
+                .nets
+                .iter()
+                .zip(&sa.routes)
+                .filter(|(net, hops)| net.source == n || net.sinks.contains(&n) || hops.iter().any(|h| h.src == n || h.dst == n))
+                .map(|(net, _)| g.node_name(net.source))
+                .collect();
+            json!({"node": g.node_name(n), "nets": on})
+        })
+        .collect();
+    if !shorts.is_empty() {
+        line(json!({ "shorts": shorts }));
     }
     std::fs::write(out_path, sa.fasm.text()).map_err(|e| format!("{out_path}: {e}"))?;
     let ok = sa.ok() && imp.unresolved.counts.is_empty();
