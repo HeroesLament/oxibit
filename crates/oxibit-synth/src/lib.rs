@@ -7,10 +7,17 @@
 //! which `oxibit_hdl::yosys_json` writes. Every cell synthesis creates is
 //! named `oxsyn_*`, so a checker can tell them from the design's own
 //! primitive instances.
+//!
+//! The run is driven by a `policy::Policy` against a `caps::DeviceCaps`:
+//! every optional pass is a typed `stage::Pass` bound to the stage it may
+//! run in (`stage` has the typestates), states the primitive modes it emits
+//! and, after the checking view, its evidence; `stage::Flow` runs, refuses
+//! or skips each and records why in `Report::passes`.
 
 pub mod aig;
 pub mod balance;
 pub mod bram;
+pub mod caps;
 pub mod dsp;
 pub mod emit;
 pub mod ffmerge;
@@ -20,44 +27,17 @@ pub mod lower;
 pub mod map;
 pub mod memdff;
 pub mod muxchain;
+pub mod policy;
 pub mod srl;
+pub mod stage;
 
 use oxibit_hdl::netlist::Module;
 use oxibit_report::{Event, Progress};
 use serde_json::json;
 
-pub struct Options {
-    pub area_passes: usize,
-    /// Adders / comparators at least this wide use CARRY4 (0: never).
-    pub carry_min: usize,
-    /// Map multipliers that fit to DSP48E1.
-    pub dsp: bool,
-    /// Map memories to RAMB18E1 / RAMB36E1.
-    pub bram: bool,
-    /// Map flop shift registers to SRLC32E.
-    pub srl: bool,
-    /// Rebalance AND / XOR supergates before mapping.
-    pub balance: bool,
-    /// Priority mux chains over one selector to parallel form.
-    pub muxpack: bool,
-    /// IBUF / OBUF on top-level ports not already on a pad primitive.
-    pub iopad: bool,
-}
-
-impl Default for Options {
-    fn default() -> Self {
-        Options {
-            area_passes: 2,
-            carry_min: 3,
-            dsp: true,
-            bram: true,
-            srl: true,
-            balance: true,
-            muxpack: true,
-            iopad: true,
-        }
-    }
-}
+use caps::{DeviceCaps, Mode};
+use policy::Policy;
+use stage::{Flow, Mapped, PassRecord, Rtl};
 
 pub struct Report {
     pub ands: usize,
@@ -77,54 +57,108 @@ pub struct Report {
     pub srl: srl::SrlStats,
     pub ffmerge: ffmerge::FfMergeStats,
     pub iopad: iopad::IoPadStats,
+    pub balance: balance::BalanceStats,
+    pub muxpack: muxchain::MuxChainStats,
+    /// Every optional pass: ran, disabled or refused, with its evidence.
+    pub passes: Vec<PassRecord>,
     pub lower_ms: u64,
     pub map_ms: u64,
     pub emit_ms: u64,
 }
 
-/// Synthesize `m`. `dirs` gives the port directions of the primitives the
-/// design instantiates. Returns the netlist, the checking view (the same
-/// netlist with memories still `$mem_v2`, shift registers and constant or
-/// duplicate flops still flops,
-/// for the equivalence oracle) and a
-/// report. Phases and per-pass counters go to `rep` (oxibit-report events).
-pub fn synth(m: &Module, dirs: &lib_ports::PortDirs, opt: &Options, rep: &dyn Progress) -> Result<(Module, Module, Report), String> {
+/// What `synth` returns.
+pub struct Synth {
+    /// The netlist for place and route.
+    pub netlist: Module,
+    /// The netlist the equivalence check compares against the source.
+    pub check: Module,
+    pub report: Report,
+}
+
+/// Synthesize `m` for `caps` under `policy`. `dirs` gives the port
+/// directions of the primitives the design instantiates. Phases, per-pass
+/// counters and refusals go to `rep` (oxibit-report events).
+pub fn synth(m: &Module, dirs: &lib_ports::PrimPorts, caps: &DeviceCaps, policy: &Policy, rep: &dyn Progress) -> Result<Synth, String> {
     let t0 = std::time::Instant::now();
-    let mut m = m.clone();
+    let mut flow = Flow::new(caps, policy, rep);
+    // The core's own output must meet the floor too.
+    let mut core = vec![Mode::Lut, Mode::FfSync];
+    if policy.carry_min > 0 {
+        core.push(Mode::Carry4);
+    }
+    if let Some(why) = flow.below_floor(&core) {
+        return Err(format!("core synthesis output {why}"));
+    }
+    if caps.cost.lut_k != map::K {
+        return Err(format!(
+            "{} has {}-input LUTs; the mapper covers with {}-input cuts",
+            caps.part,
+            caps.cost.lut_k,
+            map::K
+        ));
+    }
+
     rep.emit(phase("prepare", true));
-    let mem_rd_ff = memdff::merge(&mut m);
-    let mc = if opt.muxpack {
-        muxchain::pack(&mut m)
-    } else {
-        muxchain::MuxChainStats::default()
-    };
-    let ds = if opt.dsp { dsp::infer(&mut m, 4) } else { dsp::DspStats::default() };
+    let mut rtl = Rtl::new(m.clone());
+    let mem_rd_ff = flow.rtl(&memdff::MemDff, &mut rtl);
+    let mc = flow.rtl(&muxchain::MuxPack, &mut rtl);
+    let ds = flow.rtl(
+        &dsp::Dsp {
+            max_per_mul: policy.dsp_max_per_mul,
+        },
+        &mut rtl,
+    );
     rep.emit(phase("prepare", false));
-    rep.emit(Event::progress(
-        "prepare",
-        json!({"mem_rd_ff": mem_rd_ff, "dsp": ds.dsp, "mul_left": ds.mul_left, "mux_chains": mc.chains, "mux_arms": mc.arms}),
-    ));
+
     rep.emit(phase("lower", true));
-    let mut lw = lower::lower(&m, dirs, opt.carry_min)?;
+    let mut lw = lower::lower(
+        rtl.module(),
+        dirs,
+        lower::Config {
+            carry_min: policy.carry_min,
+            lut_k: caps.cost.lut_k,
+        },
+    )?;
+    if lw.ffs.iter().any(|f| matches!(f.kind, lower::FfKind::Fdce | lower::FfKind::Fdpe)) {
+        if let Some(why) = flow.below_floor(&[Mode::FfAsync]) {
+            return Err(format!("asynchronous flops: {why}"));
+        }
+    }
+    for t in &lw.truncated {
+        rep.emit(Event::Warn {
+            code: "port_resized".into(),
+            msg: format!("connection wider than the primitive port: {t}"),
+        });
+    }
     let (dead_ff, dead_chain) = lw.sweep();
-    let (ands_pre_balance, _) = if opt.balance { balance::balance(&mut lw) } else { (lw.aig.ands(), 0) };
+    let bal = flow.aig(&balance::Balance, &mut lw);
     rep.emit(phase("lower", false));
     rep.emit(Event::progress(
         "lower",
         json!({"ands": lw.aig.ands(), "aig_inputs": lw.aig.inputs.len(), "flops": lw.ffs.len(), "carry_chains": lw.aig.chains.len(),
-               "dead_ff": dead_ff, "dead_chain": dead_chain, "ands_pre_balance": ands_pre_balance}),
+               "dead_ff": dead_ff, "dead_chain": dead_chain}),
     ));
     let t1 = std::time::Instant::now();
+
     let outs = lw.outputs();
     rep.emit(phase("map", true));
-    let mp = map::map(&lw.aig, &outs, opt.area_passes, rep);
+    let mp = map::map(&lw.aig, &outs, policy.area_passes, rep);
     rep.emit(phase("map", false));
     let t2 = std::time::Instant::now();
+
     rep.emit(phase("emit", true));
-    let (mut out, stats) = emit::emit(&lw, &mp);
-    let check = out.clone();
-    let fm = ffmerge::merge(&mut out);
-    let ss = if opt.srl { srl::map(&mut out) } else { srl::SrlStats::default() };
+    let (out, stats) = emit::emit(&lw, &mp);
+    let (check, mut phys) = Mapped(out).split();
+    let fm = flow.physical(&ffmerge::FfMerge, &mut phys);
+    let ss = flow.physical(&srl::Srl, &mut phys);
+    let bs = flow.physical(&bram::Bram, &mut phys);
+    let io = flow.physical(&iopad::IoPad, &mut phys);
+    for p in &io.inout_bare {
+        rep.emit(Event::Warn {
+            code: "inout_unbuffered".into(),
+            msg: format!("inout port bit {p} has no pad primitive; left unbuffered"),
+        });
+    }
     // Flop counts are of the final netlist.
     let mut stats = stats;
     for (ty, n) in ss.by_type.iter().chain(&fm.by_type) {
@@ -132,28 +166,13 @@ pub fn synth(m: &Module, dirs: &lib_ports::PortDirs, opt: &Options, rep: &dyn Pr
             *c -= n;
         }
     }
-    let bs = if opt.bram { bram::map(&mut out) } else { bram::BramStats::default() };
-    let io = if opt.iopad {
-        iopad::insert(&mut out)
-    } else {
-        iopad::IoPadStats::default()
-    };
-    for p in &io.inout_bare {
-        rep.emit(Event::Warn {
-            code: "inout_unbuffered".into(),
-            msg: format!("inout port bit {p} has no pad primitive; left unbuffered"),
-        });
-    }
     rep.emit(phase("emit", false));
     rep.emit(Event::progress(
         "emit",
-        json!({"lut": stats.luts.iter().sum::<usize>(), "ff": stats.ffs.values().sum::<usize>(), "carry4": stats.carry4,
-               "ramb18": bs.ramb18, "ramb36": bs.ramb36, "lutram": bs.ram32m + bs.ram64m + bs.ram128x1d, "mem_left": bs.left.len(),
-               "srlc32e": ss.srlc32e, "srl_ffs": ss.ffs,
-               "ff_constant": fm.constant, "ff_duplicate": fm.duplicate, "ibuf": io.ibuf, "obuf": io.obuf}),
+        json!({"lut": stats.luts.iter().sum::<usize>(), "ff": stats.ffs.values().sum::<usize>(), "carry4": stats.carry4}),
     ));
     let t3 = std::time::Instant::now();
-    let r = Report {
+    let report = Report {
         ands: lw.aig.ands(),
         aig_inputs: lw.aig.inputs.len(),
         depth: mp.depth,
@@ -170,11 +189,18 @@ pub fn synth(m: &Module, dirs: &lib_ports::PortDirs, opt: &Options, rep: &dyn Pr
         srl: ss,
         ffmerge: fm,
         iopad: io,
+        balance: bal,
+        muxpack: mc,
+        passes: flow.records,
         lower_ms: (t1 - t0).as_millis() as u64,
         map_ms: (t2 - t1).as_millis() as u64,
         emit_ms: (t3 - t2).as_millis() as u64,
     };
-    Ok((out, check, r))
+    Ok(Synth {
+        netlist: phys.into_module(),
+        check: check.into_module(),
+        report,
+    })
 }
 
 fn phase(name: &str, begin: bool) -> Event {

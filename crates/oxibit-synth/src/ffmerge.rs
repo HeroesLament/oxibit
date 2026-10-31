@@ -191,6 +191,29 @@ pub fn merge(m: &mut Module) -> FfMergeStats {
     }
 }
 
+pub struct FfMerge;
+
+impl crate::stage::Pass for FfMerge {
+    const NAME: &'static str = "ffmerge";
+    const EMITS: &'static [crate::caps::Mode] = &[];
+    type Stats = FfMergeStats;
+    fn enabled(p: &crate::policy::PassSet) -> bool {
+        p.ffmerge
+    }
+    fn json(s: &FfMergeStats) -> serde_json::Value {
+        serde_json::json!({ "constant": s.constant, "duplicate": s.duplicate })
+    }
+}
+
+impl crate::stage::PhysicalPass for FfMerge {
+    const EVIDENCE: crate::policy::PostCheckEvidence = crate::policy::PostCheckEvidence::Inspection {
+        tests: &["ffmerge::tests::constant_and_duplicates"],
+    };
+    fn run(&self, m: &mut crate::stage::Physical) -> FfMergeStats {
+        merge(&mut m.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -281,3 +281,23 @@ pub fn pack(m: &mut Module) -> MuxChainStats {
     m.cells.extend(add);
     st
 }
+
+pub struct MuxPack;
+
+impl crate::stage::Pass for MuxPack {
+    const NAME: &'static str = "muxpack";
+    const EMITS: &'static [crate::caps::Mode] = &[];
+    type Stats = MuxChainStats;
+    fn enabled(p: &crate::policy::PassSet) -> bool {
+        p.muxpack
+    }
+    fn json(s: &MuxChainStats) -> serde_json::Value {
+        serde_json::json!({ "chains": s.chains, "arms": s.arms, "dropped_arms": s.dropped_arms })
+    }
+}
+
+impl crate::stage::RtlPass for MuxPack {
+    fn run(&self, m: &mut crate::stage::Rtl) -> MuxChainStats {
+        pack(&mut m.0)
+    }
+}

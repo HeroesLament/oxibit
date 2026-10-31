@@ -169,6 +169,29 @@ pub fn insert(m: &mut Module) -> IoPadStats {
     st
 }
 
+pub struct IoPad;
+
+impl crate::stage::Pass for IoPad {
+    const NAME: &'static str = "iopad";
+    const EMITS: &'static [crate::caps::Mode] = &[crate::caps::Mode::Ibuf, crate::caps::Mode::Obuf];
+    type Stats = IoPadStats;
+    fn enabled(p: &crate::policy::PassSet) -> bool {
+        p.iopad
+    }
+    fn json(s: &IoPadStats) -> serde_json::Value {
+        serde_json::json!({ "ibuf": s.ibuf, "obuf": s.obuf, "padded": s.padded, "inout_bare": s.inout_bare })
+    }
+}
+
+impl crate::stage::PhysicalPass for IoPad {
+    const EVIDENCE: crate::policy::PostCheckEvidence = crate::policy::PostCheckEvidence::Inspection {
+        tests: &["iopad::tests::buffers_bare_ports_only"],
+    };
+    fn run(&self, m: &mut crate::stage::Physical) -> IoPadStats {
+        insert(&mut m.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -263,6 +263,29 @@ pub fn map(m: &mut Module) -> SrlStats {
     st
 }
 
+pub struct Srl;
+
+impl crate::stage::Pass for Srl {
+    const NAME: &'static str = "srl";
+    const EMITS: &'static [crate::caps::Mode] = &[crate::caps::Mode::Srlc32e];
+    type Stats = SrlStats;
+    fn enabled(p: &crate::policy::PassSet) -> bool {
+        p.srl
+    }
+    fn json(s: &SrlStats) -> serde_json::Value {
+        serde_json::json!({ "srlc32e": s.srlc32e, "ffs": s.ffs, "chains": s.chains })
+    }
+}
+
+impl crate::stage::PhysicalPass for Srl {
+    const EVIDENCE: crate::policy::PostCheckEvidence = crate::policy::PostCheckEvidence::ShapeProof {
+        harness: "models/srl_shapes.sh over examples/srlcases (yosys k-induction)",
+    };
+    fn run(&self, m: &mut crate::stage::Physical) -> SrlStats {
+        map(&mut m.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

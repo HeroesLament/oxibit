@@ -242,6 +242,7 @@ pub fn balance(lw: &mut Lowered) -> (usize, usize) {
     }
     let mut new = Aig::new();
     new.carry_min = old.carry_min;
+    new.lut_k = old.lut_k;
     let mut b = Bal {
         old: &old,
         refs,
@@ -312,6 +313,33 @@ pub fn balance(lw: &mut Lowered) -> (usize, usize) {
     }
     lw.dead = lw.dead.iter().filter_map(|n| map[*n as usize].map(|l| l.node())).collect();
     (before, lw.aig.ands())
+}
+
+pub struct Balance;
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct BalanceStats {
+    pub ands_before: usize,
+    pub ands_after: usize,
+}
+
+impl crate::stage::Pass for Balance {
+    const NAME: &'static str = "balance";
+    const EMITS: &'static [crate::caps::Mode] = &[];
+    type Stats = BalanceStats;
+    fn enabled(p: &crate::policy::PassSet) -> bool {
+        p.balance
+    }
+    fn json(s: &BalanceStats) -> serde_json::Value {
+        serde_json::json!({ "ands_before": s.ands_before, "ands_after": s.ands_after })
+    }
+}
+
+impl crate::stage::AigPass for Balance {
+    fn run(&self, lw: &mut Lowered) -> BalanceStats {
+        let (ands_before, ands_after) = balance(lw);
+        BalanceStats { ands_before, ands_after }
+    }
 }
 
 #[cfg(test)]

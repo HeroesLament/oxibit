@@ -4,8 +4,10 @@
 //!
 //! LIB.v files give primitive port directions (yosys's xilinx cells_sim.v
 //! and cells_xtra.v, or stubs). stdout: one JSON line of times and counts.
-//! When memories become block RAMs, OUT.check.json is the same netlist with
-//! the memories still `$mem_v2`, for the equivalence check. Progress goes
+//! OUT.check.json is the netlist the equivalence check sees (before the
+//! post-check passes: RAM mapping, SRLs, flop merging, I/O buffers).
+//! OXIBIT_POLICY (exploration | production) picks the policy; OXIBIT_<PASS>=0
+//! turns a pass off. Progress goes
 //! through oxibit-report (docs/events.md): human on stderr, the JSON Lines
 //! stream to the file named by OXIBIT_EVENTS, systemd status when
 //! NOTIFY_SOCKET is set.
@@ -17,7 +19,9 @@ use std::time::Instant;
 
 use oxibit_hdl::{elab, parser, yosys_json};
 use oxibit_report::{Event, Human, HumanStyle, JsonLines, Progress, Reporter, Sink};
-use oxibit_synth::{Options, lib_ports, synth};
+use oxibit_synth::caps::DeviceCaps;
+use oxibit_synth::policy::Policy;
+use oxibit_synth::{Synth, lib_ports, synth};
 
 static CANCEL: AtomicBool = AtomicBool::new(false);
 
@@ -61,7 +65,7 @@ fn main() -> ExitCode {
         eprintln!("usage: synth IN.v OUT.json [LIB.v ...]");
         return ExitCode::from(3);
     }
-    let mut dirs = lib_ports::PortDirs::new();
+    let mut dirs = lib_ports::PrimPorts::new();
     for lib in &args[3..] {
         match std::fs::read_to_string(lib) {
             Ok(s) => dirs.extend(lib_ports::scan(&s)),
@@ -106,26 +110,41 @@ fn main() -> ExitCode {
     };
     rep.end("front");
     let t_front = t0.elapsed();
-    let opt = Options {
-        area_passes: std::env::var("OXIBIT_AREA_PASSES").ok().and_then(|s| s.parse().ok()).unwrap_or(2),
-        carry_min: std::env::var("OXIBIT_CARRY_MIN").ok().and_then(|s| s.parse().ok()).unwrap_or(3),
-        dsp: std::env::var("OXIBIT_DSP").map(|v| v != "0").unwrap_or(true),
-        bram: std::env::var("OXIBIT_BRAM").map(|v| v != "0").unwrap_or(true),
-        srl: std::env::var("OXIBIT_SRL").map(|v| v != "0").unwrap_or(true),
-        balance: std::env::var("OXIBIT_BALANCE").map(|v| v != "0").unwrap_or(true),
-        muxpack: std::env::var("OXIBIT_MUXPACK").map(|v| v != "0").unwrap_or(true),
-        iopad: std::env::var("OXIBIT_IOPAD").map(|v| v != "0").unwrap_or(true),
+    let env_num = |k: &str, d: usize| std::env::var(k).ok().and_then(|s| s.parse().ok()).unwrap_or(d);
+    let env_on = |k: &str, d: bool| std::env::var(k).map(|v| v != "0").unwrap_or(d);
+    let mut policy = match std::env::var("OXIBIT_POLICY").as_deref() {
+        Ok("production") => Policy::production(),
+        Ok("exploration") | Err(_) => Policy::exploration(),
+        Ok(other) => {
+            eprintln!("OXIBIT_POLICY={other}: expected exploration or production");
+            return fail(&rep, 3);
+        }
     };
+    policy.area_passes = env_num("OXIBIT_AREA_PASSES", policy.area_passes);
+    policy.carry_min = env_num("OXIBIT_CARRY_MIN", policy.carry_min);
+    let p = &mut policy.passes;
+    p.dsp = env_on("OXIBIT_DSP", p.dsp);
+    p.bram = env_on("OXIBIT_BRAM", p.bram);
+    p.srl = env_on("OXIBIT_SRL", p.srl);
+    p.balance = env_on("OXIBIT_BALANCE", p.balance);
+    p.muxpack = env_on("OXIBIT_MUXPACK", p.muxpack);
+    p.iopad = env_on("OXIBIT_IOPAD", p.iopad);
+    p.ffmerge = env_on("OXIBIT_FFMERGE", p.ffmerge);
+    let caps = DeviceCaps::xc7z020();
     // Deep cones recurse once per cell; give the walk room.
     let res = std::thread::scope(|sc| {
         std::thread::Builder::new()
             .stack_size(1 << 30)
-            .spawn_scoped(sc, || synth(&m, &dirs, &opt, &rep))
+            .spawn_scoped(sc, || synth(&m, &dirs, &caps, &policy, &rep))
             .unwrap()
             .join()
             .unwrap()
     });
-    let (out, check, r) = match res {
+    let Synth {
+        netlist: out,
+        check,
+        report: r,
+    } = match res {
         Ok(x) => x,
         Err(e) => {
             eprintln!("synth: {e}");
@@ -140,10 +159,8 @@ fn main() -> ExitCode {
         eprintln!("{}: {e}", args[2]);
         return fail(&rep, 3);
     }
-    // The checking view, when memories, shift registers or merged flops
-    // differ from it:
-    // OUT.check.json.
-    if r.bram.mapped > 0 || r.srl.srlc32e > 0 || r.ffmerge.constant + r.ffmerge.duplicate + r.iopad.ibuf + r.iopad.obuf > 0 {
+    // The checking view: OUT.check.json.
+    {
         let path = args[2].strip_suffix(".json").unwrap_or(&args[2]).to_string() + ".check.json";
         if let Err(e) = std::fs::write(
             &path,
@@ -166,6 +183,9 @@ fn main() -> ExitCode {
             "depth": r.depth, "undriven": r.undriven, "carry4": r.carry4, "dsp": r.dsp.dsp, "mul_left": r.dsp.mul_left, "mul_fabric": r.dsp.mul_fabric, "fabric_partials": r.dsp.fabric_partials, "mem_rd_ff": r.mem_rd_ff, "dead_ff": r.dead_ff, "dead_chain": r.dead_chain, "lut": s.luts.iter().sum::<usize>(), "lut_by_k": s.luts,
             "inverters": s.inverters, "dup_luts": s.dup_luts, "ff": s.ffs, "named": s.named, "nodes_by_op": r.ands_by_op, "carry_by_op": r.carry_by_op, "ramb18": r.bram.ramb18,
             "ramb36": r.bram.ramb36, "ram32m": r.bram.ram32m, "ram64m": r.bram.ram64m, "ram128x1d": r.bram.ram128x1d, "mem_mapped": r.bram.mapped, "srlc32e": r.srl.srlc32e, "srl_ffs": r.srl.ffs, "ff_constant": r.ffmerge.constant, "ff_duplicate": r.ffmerge.duplicate, "ibuf": r.iopad.ibuf, "obuf": r.iopad.obuf, "mem_left": r.bram.left});
+    let mut line = line;
+    line["policy"] = serde_json::json!({"floor": format!("{:?}", policy.floor), "evidence": format!("{:?}", policy.evidence)});
+    line["passes"] = serde_json::Value::Array(r.passes.iter().map(|p| p.json()).collect());
     println!("{line}");
     rep.emit(Event::Done {
         ok: true,

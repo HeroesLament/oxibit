@@ -208,3 +208,25 @@ pub fn merge(m: &mut Module) -> usize {
     m.cells.retain(|c| !matches!(c, Cell::Dff { q, .. } if q.width() == 0));
     merged
 }
+
+/// Read-data flops into memory read ports (always on: the RAM mapping
+/// needs synchronous read ports).
+pub struct MemDff;
+
+impl crate::stage::Pass for MemDff {
+    const NAME: &'static str = "memdff";
+    const EMITS: &'static [crate::caps::Mode] = &[];
+    type Stats = usize;
+    fn enabled(_: &crate::policy::PassSet) -> bool {
+        true
+    }
+    fn json(s: &usize) -> serde_json::Value {
+        serde_json::json!({ "mem_rd_ff": s })
+    }
+}
+
+impl crate::stage::RtlPass for MemDff {
+    fn run(&self, m: &mut crate::stage::Rtl) -> usize {
+        merge(&mut m.0)
+    }
+}

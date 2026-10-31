@@ -345,3 +345,25 @@ pub fn infer(m: &mut Module, opt_max: usize) -> DspStats {
     m.cells = out;
     st
 }
+
+pub struct Dsp {
+    pub max_per_mul: usize,
+}
+
+impl crate::stage::Pass for Dsp {
+    const NAME: &'static str = "dsp";
+    const EMITS: &'static [crate::caps::Mode] = &[crate::caps::Mode::Dsp48Comb];
+    type Stats = DspStats;
+    fn enabled(p: &crate::policy::PassSet) -> bool {
+        p.dsp
+    }
+    fn json(s: &DspStats) -> serde_json::Value {
+        serde_json::json!({ "dsp": s.dsp, "mul_left": s.mul_left, "mul_fabric": s.mul_fabric, "fabric_partials": s.fabric_partials })
+    }
+}
+
+impl crate::stage::RtlPass for Dsp {
+    fn run(&self, m: &mut crate::stage::Rtl) -> DspStats {
+        infer(&mut m.0, self.max_per_mul)
+    }
+}

@@ -61,6 +61,8 @@ pub struct Aig {
     strash: HashMap<(Lit, Lit), u32>,
     /// Adders at least this wide become carry chains (0: never).
     pub carry_min: usize,
+    /// LUT inputs of the target (sizes comparator chunks).
+    pub lut_k: usize,
     pub chains: Vec<Chain>,
 }
 
@@ -71,6 +73,7 @@ impl Aig {
             inputs: Vec::new(),
             strash: HashMap::new(),
             carry_min: 0,
+            lut_k: 6,
             chains: Vec::new(),
         }
     }

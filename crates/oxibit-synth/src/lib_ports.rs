@@ -9,7 +9,16 @@ use std::collections::HashMap;
 
 use oxibit_hdl::netlist::Dir;
 
-pub type PortDirs = HashMap<String, HashMap<String, Dir>>;
+/// A primitive port: direction, and width when the declaration gives a
+/// numeric range (`None` for a parameterized one).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Port {
+    pub dir: Dir,
+    pub width: Option<u32>,
+}
+
+/// Primitive type -> port name -> port.
+pub type PrimPorts = HashMap<String, HashMap<String, Port>>;
 
 fn tokens(src: &str) -> Vec<&str> {
     let b = src.as_bytes();
@@ -56,9 +65,9 @@ fn tokens(src: &str) -> Vec<&str> {
     out
 }
 
-pub fn scan(src: &str) -> PortDirs {
+pub fn scan(src: &str) -> PrimPorts {
     let t = tokens(src);
-    let mut out = PortDirs::new();
+    let mut out = PrimPorts::new();
     let mut i = 0;
     while i < t.len() {
         if t[i] != "module" {
@@ -69,20 +78,36 @@ pub fn scan(src: &str) -> PortDirs {
         let mut ports = HashMap::new();
         i += 2;
         let mut dir: Option<Dir> = None;
+        let mut width: Option<u32> = Some(1);
         let mut depth = 0i32; // [] nesting
         while i < t.len() && t[i] != "endmodule" {
             match t[i] {
-                "input" => dir = Some(Dir::Input),
-                "output" => dir = Some(Dir::Output),
-                "inout" => dir = Some(Dir::Inout),
-                "[" => depth += 1,
+                "input" | "output" | "inout" => {
+                    dir = Some(match t[i] {
+                        "input" => Dir::Input,
+                        "output" => Dir::Output,
+                        _ => Dir::Inout,
+                    });
+                    width = Some(1);
+                }
+                "[" => {
+                    // `[msb:lsb]` with numbers gives the width.
+                    if depth == 0 && dir.is_some() {
+                        let num = |k: usize| t.get(i + k).and_then(|x| x.parse::<i64>().ok());
+                        width = match (num(1), t.get(i + 2), num(3), t.get(i + 4)) {
+                            (Some(a), Some(&":"), Some(b), Some(&"]")) => Some((a - b).unsigned_abs() as u32 + 1),
+                            _ => None,
+                        };
+                    }
+                    depth += 1;
+                }
                 "]" => depth -= 1,
                 ";" | ")" => dir = None,
                 "wire" | "reg" | "signed" | "logic" | "integer" | "," => {}
                 tok if depth == 0 && dir.is_some() => {
                     let ok = tok.as_bytes()[0].is_ascii_alphabetic() || tok.starts_with('_') || tok.starts_with('\\');
                     if ok {
-                        ports.insert(tok.trim_start_matches('\\').to_string(), dir.unwrap());
+                        ports.insert(tok.trim_start_matches('\\').to_string(), Port { dir: dir.unwrap(), width });
                     } else if tok == "=" || tok == "(" {
                         dir = None;
                     }
@@ -104,8 +129,8 @@ mod tests {
     fn star_sensitivity_is_not_an_attribute() {
         let src = "module A(input x); always @(*) y = x; endmodule\nmodule B (\n (* clkbuf_sink *)\n input c,\n output q);\nendmodule";
         let d = scan(src);
-        assert_eq!(d["B"]["c"], Dir::Input);
-        assert_eq!(d["B"]["q"], Dir::Output);
+        assert_eq!(d["B"]["c"].dir, Dir::Input);
+        assert_eq!(d["B"]["q"].dir, Dir::Output);
     }
 
     #[test]
@@ -114,10 +139,10 @@ mod tests {
             "(* abc9_lut=1 *) module LUT2(output O, input I0, I1);\n parameter [3:0] INIT = 0;\n assign O = INIT[{I1,I0}];\nendmodule\n\
              module FDRE (Q, C, CE, D, R);\n output reg Q; input C; input [1:0] CE, D; input R;\n always @(posedge C) Q <= D;\nendmodule",
         );
-        assert_eq!(d["LUT2"]["O"], Dir::Output);
-        assert_eq!(d["LUT2"]["I1"], Dir::Input);
-        assert_eq!(d["FDRE"]["Q"], Dir::Output);
-        assert_eq!(d["FDRE"]["D"], Dir::Input);
+        assert_eq!(d["LUT2"]["O"].dir, Dir::Output);
+        assert_eq!(d["LUT2"]["I1"].dir, Dir::Input);
+        assert_eq!(d["FDRE"]["Q"].dir, Dir::Output);
+        assert_eq!(d["FDRE"]["D"].dir, Dir::Input);
         assert_eq!(d["FDRE"].len(), 5);
     }
 }
@@ -125,7 +150,7 @@ mod tests {
 /// Add yosys-style `port_directions` to every cell of a yosys JSON netlist
 /// whose type `dirs` knows (nextpnr reads cell port directions from the
 /// netlist). Ports `dirs` does not list are left out.
-pub fn annotate(j: &mut serde_json::Value, dirs: &PortDirs) {
+pub fn annotate(j: &mut serde_json::Value, dirs: &PrimPorts) {
     let Some(mods) = j.get_mut("modules").and_then(|m| m.as_object_mut()) else {
         return;
     };
@@ -141,8 +166,8 @@ pub fn annotate(j: &mut serde_json::Value, dirs: &PortDirs) {
             };
             let mut out = serde_json::Map::new();
             for p in conns.keys() {
-                if let Some(d) = pd.get(p) {
-                    let s = match d {
+                if let Some(port) = pd.get(p) {
+                    let s = match port.dir {
                         Dir::Input => "input",
                         Dir::Output => "output",
                         Dir::Inout => "inout",

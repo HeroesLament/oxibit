@@ -14,7 +14,7 @@ use oxibit_hdl::netlist::{Bit, Cell, Dir, Module, Op, Param, SigId, SigSpec};
 use oxibit_prof::hot;
 
 use crate::aig::{Aig, Lit};
-use crate::lib_ports::PortDirs;
+use crate::lib_ports::{Port, PrimPorts};
 
 pub type R<T> = Result<T, String>;
 
@@ -80,6 +80,8 @@ pub struct Lowered {
     pub ands_by_op: BTreeMap<&'static str, usize>,
     /// Carry-chain bits added per word-level cell type.
     pub carry_by_op: BTreeMap<&'static str, usize>,
+    /// Instance connections cut to the primitive's port width.
+    pub truncated: Vec<String>,
     /// AIG input nodes whose driver `sweep` removed.
     pub dead: std::collections::HashSet<u32>,
 }
@@ -261,7 +263,7 @@ enum CBit {
 
 struct Lower<'a> {
     m: &'a Module,
-    dirs: &'a PortDirs,
+    dirs: &'a PrimPorts,
     offs: Vec<usize>,
     parent: Vec<u32>,
     konst: Vec<Option<bool>>,
@@ -303,7 +305,7 @@ impl<'a> Lower<'a> {
         }
     }
 
-    fn inst_dir(&self, ty: &str, port: &str) -> R<Dir> {
+    fn inst_port(&self, ty: &str, port: &str) -> R<Port> {
         self.dirs
             .get(ty)
             .and_then(|p| p.get(port))
@@ -311,7 +313,11 @@ impl<'a> Lower<'a> {
             .ok_or_else(|| format!("no port direction for {ty}.{port} (pass the primitive library)"))
     }
 
-    fn new(m: &'a Module, dirs: &'a PortDirs) -> R<Self> {
+    fn inst_dir(&self, ty: &str, port: &str) -> R<Dir> {
+        Ok(self.inst_port(ty, port)?.dir)
+    }
+
+    fn new(m: &'a Module, dirs: &'a PrimPorts) -> R<Self> {
         let mut offs = Vec::with_capacity(m.signals.len() + 1);
         let mut n = 0usize;
         for s in &m.signals {
@@ -761,7 +767,8 @@ fn ult_aig(g: &mut Aig, a: &[Lit], b: &[Lit]) -> Lit {
 /// chunk less (decides when not equal), so CO = S ? CI : DI. A chunk takes
 /// as many bits as keep it within one 6-input LUT for S and one for DI:
 /// three bit pairs, or six bits against a constant. Constant chunks at
-/// either end fold into the AIG.
+/// either end fold into the AIG, and so does a compare left with fewer
+/// than three chunks.
 fn ult(g: &mut Aig, a: &[Lit], b: &[Lit]) -> Lit {
     if g.carry_min == 0 || a.len() < g.carry_min {
         return ult_aig(g, a, b);
@@ -774,7 +781,7 @@ fn ult(g: &mut Aig, a: &[Lit], b: &[Lit]) -> Lit {
         let mut vars = 0;
         while j < a.len() {
             let v = usize::from(!a[j].is_const()) + usize::from(!b[j].is_const());
-            if vars + v > 6 {
+            if vars + v > g.lut_k {
                 break;
             }
             vars += v;
@@ -797,7 +804,9 @@ fn ult(g: &mut Aig, a: &[Lit], b: &[Lit]) -> Lit {
     while hi > lo && chunks[hi - 1].0.is_const() && chunks[hi - 1].1.is_const() {
         hi -= 1;
     }
-    if hi - lo >= 2 {
+    // Two chunks are cheaper as LUTs (S and DI per chunk plus the chain
+    // vs the chunk compares and one combining LUT); from three a chain wins.
+    if hi - lo >= 3 {
         let s: Vec<Lit> = chunks[lo..hi].iter().map(|p| p.0).collect();
         let di: Vec<Lit> = chunks[lo..hi].iter().map(|p| p.1).collect();
         let o: Vec<Lit> = (lo..hi).map(|_| g.input()).collect();
@@ -986,10 +995,20 @@ fn binary(g: &mut Aig, op: Op, a: &[Lit], b: &[Lit], signed: bool, yw: usize) ->
     }
 }
 
+/// Target facts lowering uses.
+#[derive(Clone, Copy, Debug)]
+pub struct Config {
+    /// Adders and comparators at least this wide use carry chains (0: never).
+    pub carry_min: usize,
+    /// LUT inputs (comparator chunk size).
+    pub lut_k: usize,
+}
+
 #[hot]
-pub fn lower(m: &Module, dirs: &PortDirs, carry_min: usize) -> R<Lowered> {
+pub fn lower(m: &Module, dirs: &PrimPorts, cfg: Config) -> R<Lowered> {
     let mut l = Lower::new(m, dirs)?;
-    l.g.carry_min = carry_min;
+    l.g.carry_min = cfg.carry_min;
+    l.g.lut_k = cfg.lut_k;
     let mut out = Lowered {
         name: m.name.clone(),
         ..Default::default()
@@ -1053,7 +1072,18 @@ pub fn lower(m: &Module, dirs: &PortDirs, carry_min: usize) -> R<Lowered> {
             Cell::Instance { ty, name, params, conns } => {
                 let mut cv = Vec::new();
                 for (p, s) in conns {
-                    let bits = match l.inst_dir(ty, p)? {
+                    let port = l.inst_port(ty, p)?;
+                    // A connection wider than the primitive's port loses its
+                    // top bits, as yosys resizes it (they stay undriven for
+                    // an output).
+                    let s = match port.width {
+                        Some(w) if s.width() > w => {
+                            out.truncated.push(format!("{name}.{p}: {} -> {w} bits ({ty})", s.width()));
+                            &s.slice(0, w)
+                        }
+                        _ => s,
+                    };
+                    let bits = match port.dir {
                         Dir::Input => l.spec(s)?,
                         _ => {
                             // Outputs (and inouts) are cut points this

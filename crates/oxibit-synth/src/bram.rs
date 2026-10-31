@@ -510,6 +510,36 @@ fn tile(m: &mut Module, mem: &Memory, s: Shape, t: usize, mi: usize) -> Cell {
     }
 }
 
+pub struct Bram;
+
+impl crate::stage::Pass for Bram {
+    const NAME: &'static str = "bram";
+    const EMITS: &'static [crate::caps::Mode] = &[
+        crate::caps::Mode::Ramb18,
+        crate::caps::Mode::Ramb36,
+        crate::caps::Mode::Ram32m,
+        crate::caps::Mode::Ram64m,
+        crate::caps::Mode::Ram128x1d,
+    ];
+    type Stats = BramStats;
+    fn enabled(p: &crate::policy::PassSet) -> bool {
+        p.bram
+    }
+    fn json(s: &BramStats) -> serde_json::Value {
+        serde_json::json!({ "ramb18": s.ramb18, "ramb36": s.ramb36, "ram32m": s.ram32m, "ram64m": s.ram64m,
+                            "ram128x1d": s.ram128x1d, "mapped": s.mapped, "left": s.left.len() })
+    }
+}
+
+impl crate::stage::PhysicalPass for Bram {
+    const EVIDENCE: crate::policy::PostCheckEvidence = crate::policy::PostCheckEvidence::CoSimulation {
+        harness: "models/cosim.sh over examples/memcases (block RAM on models/ramb.v, LUTRAM on cells_sim)",
+    };
+    fn run(&self, m: &mut crate::stage::Physical) -> BramStats {
+        map(&mut m.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
