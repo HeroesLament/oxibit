@@ -111,6 +111,9 @@ fn main() -> ExitCode {
         carry_min: std::env::var("OXIBIT_CARRY_MIN").ok().and_then(|s| s.parse().ok()).unwrap_or(3),
         dsp: std::env::var("OXIBIT_DSP").map(|v| v != "0").unwrap_or(true),
         bram: std::env::var("OXIBIT_BRAM").map(|v| v != "0").unwrap_or(true),
+        srl: std::env::var("OXIBIT_SRL").map(|v| v != "0").unwrap_or(true),
+        balance: std::env::var("OXIBIT_BALANCE").map(|v| v != "0").unwrap_or(true),
+        muxpack: std::env::var("OXIBIT_MUXPACK").map(|v| v != "0").unwrap_or(true),
     };
     // Deep cones recurse once per cell; give the walk room.
     let res = std::thread::scope(|sc| {
@@ -135,8 +138,10 @@ fn main() -> ExitCode {
         eprintln!("{}: {e}", args[2]);
         return fail(&rep, 3);
     }
-    // The checking view, when memories were mapped: OUT.check.json.
-    if r.bram.mapped > 0 {
+    // The checking view, when memories, shift registers or merged flops
+    // differ from it:
+    // OUT.check.json.
+    if r.bram.mapped > 0 || r.srl.srlc32e > 0 || r.ffmerge.constant + r.ffmerge.duplicate > 0 {
         let path = args[2].strip_suffix(".json").unwrap_or(&args[2]).to_string() + ".check.json";
         if let Err(e) = std::fs::write(&path, serde_json::to_string(&yosys_json::write(&check)).unwrap()) {
             eprintln!("{path}: {e}");
@@ -148,9 +153,9 @@ fn main() -> ExitCode {
     let s = &r.stats;
     let line = serde_json::json!({"module": out.name, "front_ms": t_front.as_millis() as u64, "lower_ms": r.lower_ms, "map_ms": r.map_ms,
             "emit_ms": r.emit_ms, "write_ms": t_write.as_millis() as u64, "ands": r.ands, "aig_inputs": r.aig_inputs,
-            "depth": r.depth, "undriven": r.undriven, "carry4": r.carry4, "dsp": r.dsp.dsp, "mul_left": r.dsp.mul_left, "mem_rd_ff": r.mem_rd_ff, "dead_ff": r.dead_ff, "dead_chain": r.dead_chain, "lut": s.luts.iter().sum::<usize>(), "lut_by_k": s.luts,
-            "inverters": s.inverters, "ff": s.ffs, "named": s.named, "nodes_by_op": r.ands_by_op, "ramb18": r.bram.ramb18,
-            "ramb36": r.bram.ramb36, "ram32m": r.bram.ram32m, "ram64m": r.bram.ram64m, "ram128x1d": r.bram.ram128x1d, "mem_mapped": r.bram.mapped, "mem_left": r.bram.left});
+            "depth": r.depth, "undriven": r.undriven, "carry4": r.carry4, "dsp": r.dsp.dsp, "mul_left": r.dsp.mul_left, "mul_fabric": r.dsp.mul_fabric, "fabric_partials": r.dsp.fabric_partials, "mem_rd_ff": r.mem_rd_ff, "dead_ff": r.dead_ff, "dead_chain": r.dead_chain, "lut": s.luts.iter().sum::<usize>(), "lut_by_k": s.luts,
+            "inverters": s.inverters, "dup_luts": s.dup_luts, "ff": s.ffs, "named": s.named, "nodes_by_op": r.ands_by_op, "carry_by_op": r.carry_by_op, "ramb18": r.bram.ramb18,
+            "ramb36": r.bram.ramb36, "ram32m": r.bram.ram32m, "ram64m": r.bram.ram64m, "ram128x1d": r.bram.ram128x1d, "mem_mapped": r.bram.mapped, "srlc32e": r.srl.srlc32e, "srl_ffs": r.srl.ffs, "ff_constant": r.ffmerge.constant, "ff_duplicate": r.ffmerge.duplicate, "mem_left": r.bram.left});
     println!("{line}");
     rep.emit(Event::Done {
         ok: true,

@@ -19,6 +19,8 @@ pub struct Stats {
     pub carry4: usize,
     pub ffs: BTreeMap<&'static str, usize>,
     pub named: usize,
+    /// Second LUTs for roots wanted in both polarities.
+    pub dup_luts: usize,
 }
 
 struct Emit<'a> {
@@ -26,7 +28,22 @@ struct Emit<'a> {
     mp: &'a Mapping,
     out: Module,
     net: HashMap<Lit, Bit>,
+    /// LUT roots built with the complemented function: every cell port
+    /// wants the complement, so the LUT computes it and the LUTs reading
+    /// the root take the inversion into their truth tables.
+    inv: Vec<bool>,
     stats: Stats,
+}
+
+/// `tt` with input `i` of `k` complemented.
+fn flip_input(tt: u64, i: usize, k: usize) -> u64 {
+    let mut o = 0u64;
+    for x in 0..1usize << k {
+        if (tt >> (x ^ (1 << i))) & 1 == 1 {
+            o |= 1 << x;
+        }
+    }
+    o
 }
 
 impl<'a> Emit<'a> {
@@ -79,10 +96,10 @@ impl<'a> Emit<'a> {
         let mp = self.mp;
         match (lw.aig.nodes[p.node() as usize], mp.lut_of[p.node() as usize]) {
             (_, Some(i)) => {
-                let lut = &mp.luts[i as usize];
-                let leaves: Vec<Bit> = lut.leaves.iter().map(|n| self.net[&Lit(n << 1)]).collect();
-                let tt = !lut.tt;
-                self.lut(&leaves, tt, o);
+                // Both polarities are wanted by cell ports: a second LUT.
+                let (leaves, tt) = self.lut_view(i as usize);
+                self.stats.dup_luts += 1;
+                self.lut(&leaves, if l.compl() { !tt } else { tt }, o);
             }
             (Node::Input(_), None) => {
                 let a = self.of(p);
@@ -93,6 +110,24 @@ impl<'a> Emit<'a> {
         }
         self.net.insert(l, o);
         o
+    }
+
+    /// Leaf nets and truth table of mapped LUT `i` computing its root's
+    /// positive function, reading complemented roots through flipped inputs.
+    fn lut_view(&self, i: usize) -> (Vec<Bit>, u64) {
+        let lut = &self.mp.luts[i];
+        let k = lut.leaves.len();
+        let mut tt = lut.tt;
+        let mut leaves = Vec::with_capacity(k);
+        for (j, n) in lut.leaves.iter().enumerate() {
+            if self.inv[*n as usize] {
+                leaves.push(self.net[&Lit(n << 1).not()]);
+                tt = flip_input(tt, j, k);
+            } else {
+                leaves.push(self.net[&Lit(n << 1)]);
+            }
+        }
+        (leaves, tt)
     }
 
     fn spec(&mut self, v: &[Lit]) -> SigSpec {
@@ -107,8 +142,21 @@ pub fn emit(lw: &Lowered, mp: &Mapping) -> (Module, Stats) {
         mp,
         out: Module::new(&lw.name),
         net: HashMap::new(),
+        inv: vec![false; lw.aig.nodes.len()],
         stats: Stats::default(),
     };
+    // Polarities cell ports want of each LUT root.
+    let mut pos = vec![false; lw.aig.nodes.len()];
+    let mut neg = vec![false; lw.aig.nodes.len()];
+    for l in lw.outputs() {
+        let n = l.positive().node() as usize;
+        if mp.lut_of[n].is_some() {
+            if l.compl() { neg[n] = true } else { pos[n] = true }
+        }
+    }
+    for n in 0..e.inv.len() {
+        e.inv[n] = neg[n] && !pos[n];
+    }
     // Ports. Input bits are the nets of their AIG inputs.
     let mut outs = Vec::new();
     for (name, dir, signed, bits) in &lw.ports {
@@ -141,13 +189,15 @@ pub fn emit(lw: &Lowered, mp: &Mapping) -> (Module, Stats) {
     }
     for lut in &mp.luts {
         let b = e.fresh();
-        e.net.insert(Lit(lut.root << 1), b);
+        let l = Lit(lut.root << 1);
+        e.net.insert(if e.inv[lut.root as usize] { l.not() } else { l }, b);
     }
     for i in 0..mp.luts.len() {
-        let lut = &mp.luts[i];
-        let leaves: Vec<Bit> = lut.leaves.iter().map(|n| e.net[&Lit(n << 1)]).collect();
-        let o = e.net[&Lit(lut.root << 1)];
-        e.lut(&leaves, lut.tt, o);
+        let (leaves, tt) = e.lut_view(i);
+        let root = mp.luts[i].root;
+        let inv = e.inv[root as usize];
+        let o = e.net[&if inv { Lit(root << 1).not() } else { Lit(root << 1) }];
+        e.lut(&leaves, if inv { !tt } else { tt }, o);
     }
     for (id, bits) in outs {
         let s = e.spec(&bits);
@@ -204,7 +254,9 @@ pub fn emit(lw: &Lowered, mp: &Mapping) -> (Module, Stats) {
                     di.push(Bit::Zero);
                     o.push(e.fresh());
                 }
-                co.push(if lo + j == n - 1 { e.net[&ch.co] } else { e.fresh() });
+                // A chain cut short at an unread top has no carry out.
+                let top = lo + j == n - 1 && !ch.co.is_const();
+                co.push(if top { e.net[&ch.co] } else { e.fresh() });
             }
             let (ci_b, cyinit) = if k == 0 {
                 if ch.cin.is_const() {

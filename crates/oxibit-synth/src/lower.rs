@@ -78,6 +78,8 @@ pub struct Lowered {
     pub undriven: usize,
     /// AIG nodes (ANDs and chain outputs) added per word-level cell type.
     pub ands_by_op: BTreeMap<&'static str, usize>,
+    /// Carry-chain bits added per word-level cell type.
+    pub carry_by_op: BTreeMap<&'static str, usize>,
     /// AIG input nodes whose driver `sweep` removed.
     pub dead: std::collections::HashSet<u32>,
 }
@@ -134,7 +136,8 @@ impl Lowered {
         enum Owner {
             None,
             Ff(u32),
-            Chain(u32),
+            /// Chain, position (`o` index; the length for `co`).
+            Chain(u32, u32),
         }
         let n = self.aig.nodes.len();
         let mut owner = vec![Owner::None; n];
@@ -142,13 +145,15 @@ impl Lowered {
             owner[f.q.node() as usize] = Owner::Ff(i as u32);
         }
         for (i, c) in self.aig.chains.iter().enumerate() {
-            for l in c.o.iter().chain([&c.co]) {
-                owner[l.node() as usize] = Owner::Chain(i as u32);
+            for (p, l) in c.o.iter().chain([&c.co]).enumerate() {
+                owner[l.node() as usize] = Owner::Chain(i as u32, p as u32);
             }
         }
         let mut mark = vec![false; n];
         let mut ff_live = vec![false; self.ffs.len()];
-        let mut ch_live = vec![false; self.aig.chains.len()];
+        // Chain positions something reads: a carry only flows upward, so
+        // positions above the highest read sum bit (carry out unread) go.
+        let mut need = vec![0usize; self.aig.chains.len()];
         let mut stack: Vec<u32> = Vec::new();
         // Roots: everything but flop and chain inputs.
         let mut roots: Vec<Lit> = Vec::new();
@@ -190,10 +195,18 @@ impl Lowered {
                         let f = &self.ffs[i as usize];
                         stack.extend([f.d, f.ce, f.clk, f.sr].map(|l| l.node()));
                     }
-                    Owner::Chain(i) if !ch_live[i as usize] => {
-                        ch_live[i as usize] = true;
+                    Owner::Chain(i, p) => {
                         let c = &self.aig.chains[i as usize];
-                        stack.extend(c.s.iter().chain(&c.di).chain([&c.cin]).map(|l| l.node()));
+                        let n = c.s.len();
+                        let want = if p as usize == n { n } else { p as usize + 1 };
+                        let have = need[i as usize];
+                        if want > have {
+                            if have == 0 {
+                                stack.push(c.cin.node());
+                            }
+                            stack.extend(c.s[have..want].iter().chain(&c.di[have..want]).map(|l| l.node()));
+                            need[i as usize] = want;
+                        }
                     }
                     _ => {}
                 },
@@ -212,10 +225,17 @@ impl Lowered {
         });
         let mut i = 0;
         let dead = &mut self.dead;
-        self.aig.chains.retain(|c| {
-            let keep = ch_live[i];
+        self.aig.chains.retain_mut(|c| {
+            let keep = need[i] > 0;
             if !keep {
                 dead.extend(c.o.iter().chain([&c.co]).map(|l| l.node()));
+            } else if need[i] < c.s.len() {
+                let k = need[i];
+                dead.extend(c.o[k..].iter().chain([&c.co]).map(|l| l.node()));
+                c.s.truncate(k);
+                c.di.truncate(k);
+                c.o.truncate(k);
+                c.co = Lit::FALSE;
             }
             i += 1;
             keep
@@ -252,6 +272,7 @@ struct Lower<'a> {
     g: Aig,
     undriven: usize,
     ands_by_op: BTreeMap<&'static str, usize>,
+    carry_by_op: BTreeMap<&'static str, usize>,
 }
 
 impl<'a> Lower<'a> {
@@ -310,6 +331,7 @@ impl<'a> Lower<'a> {
             g: Aig::new(),
             undriven: 0,
             ands_by_op: BTreeMap::new(),
+            carry_by_op: BTreeMap::new(),
         };
         for (lhs, rhs) in &m.connects {
             for (a, b) in lhs.0.iter().zip(&rhs.0) {
@@ -447,12 +469,17 @@ impl<'a> Lower<'a> {
             self.bit(s.0[0])?;
         }
         let before = self.g.nodes.len();
+        let chains_before = self.g.chains.len();
         self.eval_own(ci)?;
         let kind = match &m.cells[ci] {
             Cell::Unary { op, .. } | Cell::Binary { op, .. } => op.yosys(),
             _ => "$mux",
         };
         *self.ands_by_op.entry(kind).or_default() += self.g.nodes.len() - before;
+        let bits: usize = self.g.chains[chains_before..].iter().map(|c| c.s.len()).sum();
+        if bits > 0 {
+            *self.carry_by_op.entry(kind).or_default() += bits;
+        }
         Ok(())
     }
 
@@ -635,12 +662,56 @@ fn ext(v: &[Lit], w: usize, signed: bool) -> Vec<Lit> {
     o
 }
 
+/// One ripple position in the AIG: (sum, carry out).
+fn ripple(g: &mut Aig, x: Lit, y: Lit, c: Lit) -> (Lit, Lit) {
+    let t = g.xor(x, y);
+    let s = g.xor(t, c);
+    let p = g.and(x, y);
+    let q = g.and(t, c);
+    (s, g.or(p, q))
+}
+
+/// `a + b + c` over equal widths: (sum, carry out of the top bit).
+///
+/// Only the positions that need a carry chain get one (yosys `wreduce` and
+/// `alumacc` trimming, done per bit):
+/// - low positions ripple in the AIG while the carry into them is constant
+///   and one operand is (the carry folds or becomes that operand bit);
+/// - when both operands are extensions of their bit k (equal literals from
+///   k up; sign or zero extension, or constants), the carry out of k is the
+///   carry out of the top, and every sum bit above k is
+///   `a[k] ^ b[k] ^ carry`;
+/// - top positions where both operands are constant ripple in the AIG
+///   (each folds to generate, kill or propagate).
 fn add(g: &mut Aig, a: &[Lit], b: &[Lit], mut c: Lit) -> (Vec<Lit>, Lit) {
-    if g.carry_min > 0 && a.len() >= g.carry_min {
-        let s: Vec<Lit> = a.iter().zip(b).map(|(x, y)| g.xor(*x, *y)).collect();
+    let n = a.len();
+    let mut out = Vec::with_capacity(n);
+    let mut i = 0;
+    while i < n && c.is_const() && (a[i].is_const() || b[i].is_const()) {
+        let (s, c2) = ripple(g, a[i], b[i], c);
+        out.push(s);
+        c = c2;
+        i += 1;
+    }
+    if i == n {
+        return (out, c);
+    }
+    // Extension region: a[m] == a[k] and b[m] == b[k] for all m >= k.
+    let mut k = n - 1;
+    while k > i && a[k - 1] == a[n - 1] && b[k - 1] == b[n - 1] {
+        k -= 1;
+    }
+    let e = k + 1;
+    // Constant top of [i, e).
+    let mut j = e;
+    while j > i && a[j - 1].is_const() && b[j - 1].is_const() {
+        j -= 1;
+    }
+    if g.carry_min > 0 && j - i >= g.carry_min {
+        let s: Vec<Lit> = (i..j).map(|m| g.xor(a[m], b[m])).collect();
         // DI is the carry when a == b: either operand; prefer a constant.
-        let di: Vec<Lit> = a.iter().zip(b).map(|(x, y)| if y.is_const() { *y } else { *x }).collect();
-        let o: Vec<Lit> = (0..a.len()).map(|_| g.input()).collect();
+        let di: Vec<Lit> = (i..j).map(|m| if b[m].is_const() { b[m] } else { a[m] }).collect();
+        let o: Vec<Lit> = (i..j).map(|_| g.input()).collect();
         let co = g.input();
         g.chains.push(crate::aig::Chain {
             s,
@@ -649,25 +720,99 @@ fn add(g: &mut Aig, a: &[Lit], b: &[Lit], mut c: Lit) -> (Vec<Lit>, Lit) {
             o: o.clone(),
             co,
         });
-        return (o, co);
+        out.extend(o);
+        c = co;
+    } else {
+        for m in i..j {
+            let (s, c2) = ripple(g, a[m], b[m], c);
+            out.push(s);
+            c = c2;
+        }
     }
-    let mut s = Vec::with_capacity(a.len());
+    for m in j..e {
+        let (s, c2) = ripple(g, a[m], b[m], c);
+        out.push(s);
+        c = c2;
+    }
+    if e < n {
+        let t = g.xor(a[k], b[k]);
+        let s = g.xor(t, c);
+        out.resize(n, s);
+    }
+    (out, c)
+}
+
+/// `a < b`, unsigned, same width, rippled in the AIG.
+fn ult_aig(g: &mut Aig, a: &[Lit], b: &[Lit]) -> Lit {
+    let mut c = Lit::FALSE;
     for (x, y) in a.iter().zip(b) {
-        let t = g.xor(*x, *y);
-        s.push(g.xor(t, c));
-        let p = g.and(*x, *y);
-        let q = g.and(t, c);
-        c = g.or(p, q);
+        let lt = g.and(x.not(), *y);
+        let eq = g.xor(*x, *y).not();
+        let keep = g.and(eq, c);
+        c = g.or(lt, keep);
     }
-    (s, c)
+    c
 }
 
 /// `a < b`, unsigned, same width.
+///
+/// On a carry chain each position compares a chunk of bits instead of one
+/// (yosys `cmp2lcu`): S = chunk equal (propagate the lower result), DI =
+/// chunk less (decides when not equal), so CO = S ? CI : DI. A chunk takes
+/// as many bits as keep it within one 6-input LUT for S and one for DI:
+/// three bit pairs, or six bits against a constant. Constant chunks at
+/// either end fold into the AIG.
 fn ult(g: &mut Aig, a: &[Lit], b: &[Lit]) -> Lit {
-    // a - b borrows iff a < b: carry of a + ~b + 1 is 0.
-    let nb: Vec<Lit> = b.iter().map(|l| l.not()).collect();
-    let (_, c) = add(g, a, &nb, Lit::TRUE);
-    c.not()
+    if g.carry_min == 0 || a.len() < g.carry_min {
+        return ult_aig(g, a, b);
+    }
+    // Chunks, LSB first: (S, DI).
+    let mut chunks: Vec<(Lit, Lit)> = Vec::new();
+    let mut i = 0;
+    while i < a.len() {
+        let mut j = i;
+        let mut vars = 0;
+        while j < a.len() {
+            let v = usize::from(!a[j].is_const()) + usize::from(!b[j].is_const());
+            if vars + v > 6 {
+                break;
+            }
+            vars += v;
+            j += 1;
+        }
+        let j = j.max(i + 1);
+        let x: Vec<Lit> = (i..j).map(|k| g.xor(a[k], b[k]).not()).collect();
+        let eq = g.and_all(&x);
+        let lt = ult_aig(g, &a[i..j], &b[i..j]);
+        chunks.push((eq, lt));
+        i = j;
+    }
+    let mut c = Lit::FALSE;
+    let mut lo = 0;
+    while lo < chunks.len() && chunks[lo].0.is_const() && chunks[lo].1.is_const() {
+        c = g.mux(chunks[lo].0, chunks[lo].1, c);
+        lo += 1;
+    }
+    let mut hi = chunks.len();
+    while hi > lo && chunks[hi - 1].0.is_const() && chunks[hi - 1].1.is_const() {
+        hi -= 1;
+    }
+    if hi - lo >= 2 {
+        let s: Vec<Lit> = chunks[lo..hi].iter().map(|p| p.0).collect();
+        let di: Vec<Lit> = chunks[lo..hi].iter().map(|p| p.1).collect();
+        let o: Vec<Lit> = (lo..hi).map(|_| g.input()).collect();
+        let co = g.input();
+        g.chains.push(crate::aig::Chain { s, di, cin: c, o, co });
+        c = co;
+    } else {
+        for &(eq, lt) in &chunks[lo..hi] {
+            c = g.mux(eq, lt, c);
+        }
+    }
+    for &(eq, lt) in &chunks[hi..] {
+        c = g.mux(eq, lt, c);
+    }
+    c
 }
 
 fn lt(g: &mut Aig, a: &[Lit], b: &[Lit], signed: bool) -> Lit {
@@ -962,6 +1107,7 @@ pub fn lower(m: &Module, dirs: &PortDirs, carry_min: usize) -> R<Lowered> {
     }
     out.undriven = l.undriven;
     out.ands_by_op = std::mem::take(&mut l.ands_by_op);
+    out.carry_by_op = std::mem::take(&mut l.carry_by_op);
     out.aig = l.g;
     Ok(out)
 }

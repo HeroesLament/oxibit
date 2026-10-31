@@ -8,7 +8,10 @@
 //! Wider operands are split into chunks (top chunk signed, the rest
 //! unsigned) and the shifted partial products summed with `$add` cells,
 //! which lowering puts on carry chains. Multipliers needing more DSPs than
-//! the limit stay as logic.
+//! the limit stay as logic. A partial product with a chunk of at most
+//! `SMALL` bits (the slivers left over when an operand is a bit or two
+//! wider than the multiplier input) is a `$mul` in fabric instead of a
+//! DSP: a few AND rows into the adder that sums the partials anyway.
 
 use std::collections::BTreeMap;
 
@@ -16,20 +19,20 @@ use oxibit_hdl::netlist::{Bit, Cell, Module, Op, Param, SigSpec};
 use oxibit_prof::hot;
 
 /// Bit identity through the module's continuous connections.
-struct Canon {
+pub(crate) struct Canon {
     offs: Vec<usize>,
     parent: Vec<u32>,
     konst: Vec<Option<Bit>>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
-enum K {
+pub(crate) enum K {
     Net(usize),
     Const(Bit),
 }
 
 impl Canon {
-    fn new(m: &Module) -> Self {
+    pub(crate) fn new(m: &Module) -> Self {
         let mut offs = Vec::with_capacity(m.signals.len() + 1);
         let mut n = 0;
         for s in &m.signals {
@@ -81,7 +84,7 @@ impl Canon {
         }
         x
     }
-    fn k(&mut self, b: Bit) -> K {
+    pub(crate) fn k(&mut self, b: Bit) -> K {
         match self.idx(b) {
             Some(x) => {
                 let r = self.find(x);
@@ -234,7 +237,14 @@ fn dsp_cell(name: String, a: SigSpec, b: SigSpec, p: SigSpec) -> Cell {
 pub struct DspStats {
     pub dsp: usize,
     pub mul_left: usize,
+    /// Partial products left to fabric (a chunk of at most `SMALL` bits).
+    pub fabric_partials: usize,
+    /// Multipliers whose every partial is narrow, left whole to fabric.
+    pub mul_fabric: usize,
 }
+
+/// Chunks this narrow (sign position included) multiply in fabric.
+pub const SMALL: usize = 4;
 
 #[hot]
 /// Map multipliers needing at most `opt_max` DSPs; leave the rest as logic.
@@ -267,7 +277,19 @@ pub fn infer(m: &mut Module, opt_max: usize) -> DspStats {
         let (pa, pb) = if wa >= wb { (ea, eb) } else { (eb, ea) };
         let ca = chunks(&pa, 25);
         let cb = chunks(&pb, 18);
-        if ca.len() * cb.len() > opt_max {
+        let small = |x: &Vec<Bit>, y: &Vec<Bit>| x.len() <= SMALL || y.len() <= SMALL;
+        let need = ca
+            .iter()
+            .flat_map(|(_, xa)| cb.iter().map(move |(_, xb)| (xa, xb)))
+            .filter(|(xa, xb)| !small(xa, xb))
+            .count();
+        // Every partial narrow: the multiplier is cheaper in fabric whole.
+        if need == 0 {
+            st.mul_fabric += 1;
+            out.push(cell);
+            continue;
+        }
+        if need > opt_max {
             st.mul_left += 1;
             out.push(cell);
             continue;
@@ -277,6 +299,22 @@ pub fn infer(m: &mut Module, opt_max: usize) -> DspStats {
             for (sb, xb) in &cb {
                 let shift = sa + sb;
                 if shift >= yw {
+                    continue;
+                }
+                if small(xa, xb) {
+                    // Signed chunks, product modulo 2^(yw - shift).
+                    let p = m.wire((yw - shift) as u32);
+                    out.push(Cell::Binary {
+                        op: Op::Mul,
+                        a: SigSpec(xa.clone()),
+                        b: SigSpec(xb.clone()),
+                        signed: true,
+                        y: p.clone(),
+                    });
+                    st.fabric_partials += 1;
+                    let mut t = vec![Bit::Zero; shift];
+                    t.extend(p.0.iter().copied());
+                    terms.push(SigSpec(t));
                     continue;
                 }
                 let p = m.wire(48);
