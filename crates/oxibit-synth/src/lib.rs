@@ -14,6 +14,7 @@ pub mod bram;
 pub mod dsp;
 pub mod emit;
 pub mod ffmerge;
+pub mod iopad;
 pub mod lib_ports;
 pub mod lower;
 pub mod map;
@@ -39,6 +40,8 @@ pub struct Options {
     pub balance: bool,
     /// Priority mux chains over one selector to parallel form.
     pub muxpack: bool,
+    /// IBUF / OBUF on top-level ports not already on a pad primitive.
+    pub iopad: bool,
 }
 
 impl Default for Options {
@@ -51,6 +54,7 @@ impl Default for Options {
             srl: true,
             balance: true,
             muxpack: true,
+            iopad: true,
         }
     }
 }
@@ -72,6 +76,7 @@ pub struct Report {
     pub bram: bram::BramStats,
     pub srl: srl::SrlStats,
     pub ffmerge: ffmerge::FfMergeStats,
+    pub iopad: iopad::IoPadStats,
     pub lower_ms: u64,
     pub map_ms: u64,
     pub emit_ms: u64,
@@ -128,13 +133,24 @@ pub fn synth(m: &Module, dirs: &lib_ports::PortDirs, opt: &Options, rep: &dyn Pr
         }
     }
     let bs = if opt.bram { bram::map(&mut out) } else { bram::BramStats::default() };
+    let io = if opt.iopad {
+        iopad::insert(&mut out)
+    } else {
+        iopad::IoPadStats::default()
+    };
+    for p in &io.inout_bare {
+        rep.emit(Event::Warn {
+            code: "inout_unbuffered".into(),
+            msg: format!("inout port bit {p} has no pad primitive; left unbuffered"),
+        });
+    }
     rep.emit(phase("emit", false));
     rep.emit(Event::progress(
         "emit",
         json!({"lut": stats.luts.iter().sum::<usize>(), "ff": stats.ffs.values().sum::<usize>(), "carry4": stats.carry4,
                "ramb18": bs.ramb18, "ramb36": bs.ramb36, "lutram": bs.ram32m + bs.ram64m + bs.ram128x1d, "mem_left": bs.left.len(),
                "srlc32e": ss.srlc32e, "srl_ffs": ss.ffs,
-               "ff_constant": fm.constant, "ff_duplicate": fm.duplicate}),
+               "ff_constant": fm.constant, "ff_duplicate": fm.duplicate, "ibuf": io.ibuf, "obuf": io.obuf}),
     ));
     let t3 = std::time::Instant::now();
     let r = Report {
@@ -153,6 +169,7 @@ pub fn synth(m: &Module, dirs: &lib_ports::PortDirs, opt: &Options, rep: &dyn Pr
         bram: bs,
         srl: ss,
         ffmerge: fm,
+        iopad: io,
         lower_ms: (t1 - t0).as_millis() as u64,
         map_ms: (t2 - t1).as_millis() as u64,
         emit_ms: (t3 - t2).as_millis() as u64,

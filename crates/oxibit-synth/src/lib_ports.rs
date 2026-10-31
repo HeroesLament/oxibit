@@ -29,7 +29,8 @@ fn tokens(src: &str) -> Vec<&str> {
                 i += 1;
             }
             i += 2;
-        } else if b[i..].starts_with(b"(*") {
+        } else if b[i..].starts_with(b"(*") && !b[i..].starts_with(b"(*)") {
+            // An attribute; `@(*)` is a sensitivity list, not one.
             i += 2;
             while i + 1 < b.len() && !b[i..].starts_with(b"*)") {
                 i += 1;
@@ -100,6 +101,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn star_sensitivity_is_not_an_attribute() {
+        let src = "module A(input x); always @(*) y = x; endmodule\nmodule B (\n (* clkbuf_sink *)\n input c,\n output q);\nendmodule";
+        let d = scan(src);
+        assert_eq!(d["B"]["c"], Dir::Input);
+        assert_eq!(d["B"]["q"], Dir::Output);
+    }
+
+    #[test]
     fn ansi_and_body() {
         let d = scan(
             "(* abc9_lut=1 *) module LUT2(output O, input I0, I1);\n parameter [3:0] INIT = 0;\n assign O = INIT[{I1,I0}];\nendmodule\n\
@@ -110,5 +119,38 @@ mod tests {
         assert_eq!(d["FDRE"]["Q"], Dir::Output);
         assert_eq!(d["FDRE"]["D"], Dir::Input);
         assert_eq!(d["FDRE"].len(), 5);
+    }
+}
+
+/// Add yosys-style `port_directions` to every cell of a yosys JSON netlist
+/// whose type `dirs` knows (nextpnr reads cell port directions from the
+/// netlist). Ports `dirs` does not list are left out.
+pub fn annotate(j: &mut serde_json::Value, dirs: &PortDirs) {
+    let Some(mods) = j.get_mut("modules").and_then(|m| m.as_object_mut()) else {
+        return;
+    };
+    for m in mods.values_mut() {
+        let Some(cells) = m.get_mut("cells").and_then(|c| c.as_object_mut()) else {
+            continue;
+        };
+        for c in cells.values_mut() {
+            let Some(ty) = c.get("type").and_then(|t| t.as_str()) else { continue };
+            let Some(pd) = dirs.get(ty) else { continue };
+            let Some(conns) = c.get("connections").and_then(|x| x.as_object()) else {
+                continue;
+            };
+            let mut out = serde_json::Map::new();
+            for p in conns.keys() {
+                if let Some(d) = pd.get(p) {
+                    let s = match d {
+                        Dir::Input => "input",
+                        Dir::Output => "output",
+                        Dir::Inout => "inout",
+                    };
+                    out.insert(p.clone(), serde_json::Value::String(s.into()));
+                }
+            }
+            c["port_directions"] = serde_json::Value::Object(out);
+        }
     }
 }
