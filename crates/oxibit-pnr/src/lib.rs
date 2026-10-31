@@ -18,6 +18,7 @@ pub mod iocfg;
 pub mod lutinit;
 pub mod mmcm;
 pub mod nets;
+pub mod packed;
 pub mod placed;
 pub mod reroute;
 pub mod router;
