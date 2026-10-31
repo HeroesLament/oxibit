@@ -130,6 +130,7 @@ fn main() -> ExitCode {
     p.muxpack = env_on("OXIBIT_MUXPACK", p.muxpack);
     p.iopad = env_on("OXIBIT_IOPAD", p.iopad);
     p.ffmerge = env_on("OXIBIT_FFMERGE", p.ffmerge);
+    p.dfeed = env_on("OXIBIT_DFEED", p.dfeed);
     let caps = DeviceCaps::xc7z020();
     // Deep cones recurse once per cell; give the walk room.
     let res = std::thread::scope(|sc| {

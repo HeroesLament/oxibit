@@ -18,6 +18,7 @@ pub mod aig;
 pub mod balance;
 pub mod bram;
 pub mod caps;
+pub mod dfeed;
 pub mod dsp;
 pub mod emit;
 pub mod ffmerge;
@@ -57,6 +58,7 @@ pub struct Report {
     pub srl: srl::SrlStats,
     pub ffmerge: ffmerge::FfMergeStats,
     pub iopad: iopad::IoPadStats,
+    pub dfeed: dfeed::DFeedStats,
     pub balance: balance::BalanceStats,
     pub muxpack: muxchain::MuxChainStats,
     /// Every optional pass: ran, disabled or refused, with its evidence.
@@ -153,6 +155,7 @@ pub fn synth(m: &Module, dirs: &lib_ports::PrimPorts, caps: &DeviceCaps, policy:
     let ss = flow.physical(&srl::Srl, &mut phys);
     let bs = flow.physical(&bram::Bram, &mut phys);
     let io = flow.physical(&iopad::IoPad, &mut phys);
+    let df = flow.physical(&dfeed::DFeed { dirs }, &mut phys);
     for p in &io.inout_bare {
         rep.emit(Event::Warn {
             code: "inout_unbuffered".into(),
@@ -189,6 +192,7 @@ pub fn synth(m: &Module, dirs: &lib_ports::PrimPorts, caps: &DeviceCaps, policy:
         srl: ss,
         ffmerge: fm,
         iopad: io,
+        dfeed: df,
         balance: bal,
         muxpack: mc,
         passes: flow.records,
