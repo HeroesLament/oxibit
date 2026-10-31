@@ -409,6 +409,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxibit-synth"
+version = "0.1.0"
+dependencies = [
+ "oxibit-hdl",
+ "oxibit-prof",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "oxibit-zynq7"
 version = "0.1.0"
 dependencies = [

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/oxibit-bitstream", "crates/oxibit-fasm", "crates/oxibit-hdl", "crates/oxibit-prof", "crates/oxibit-prof-macros", "crates/oxibit-guard", "crates/oxibit-zynq7", "crates/oxibit-pnr", "crates/oxibit-report", "crates/oxibit"]
+members = ["crates/oxibit-bitstream", "crates/oxibit-fasm", "crates/oxibit-hdl", "crates/oxibit-synth", "crates/oxibit-prof", "crates/oxibit-prof-macros", "crates/oxibit-guard", "crates/oxibit-zynq7", "crates/oxibit-pnr", "crates/oxibit-report", "crates/oxibit"]
 
 [workspace.package]
 version = "0.1.0"
