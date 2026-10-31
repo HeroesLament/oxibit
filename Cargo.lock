@@ -395,6 +395,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxibit-place"
+version = "0.1.0"
+dependencies = [
+ "oxibit-pnr",
+ "serde_json",
+]
+
+[[package]]
 name = "oxibit-pnr"
 version = "0.1.0"
 dependencies = [

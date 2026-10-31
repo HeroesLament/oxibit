@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/oxibit-bitstream", "crates/oxibit-fasm", "crates/oxibit-hdl", "crates/oxibit-synth", "crates/oxibit-cec", "crates/oxibit-prof", "crates/oxibit-prof-macros", "crates/oxibit-guard", "crates/oxibit-zynq7", "crates/oxibit-pnr", "crates/oxibit-report", "crates/oxibit"]
+members = ["crates/oxibit-bitstream", "crates/oxibit-fasm", "crates/oxibit-hdl", "crates/oxibit-synth", "crates/oxibit-cec", "crates/oxibit-prof", "crates/oxibit-prof-macros", "crates/oxibit-guard", "crates/oxibit-zynq7", "crates/oxibit-pnr", "crates/oxibit-place", "crates/oxibit-report", "crates/oxibit"]
 
 [workspace.package]
 version = "0.1.0"
@@ -12,6 +12,7 @@ publish = false
 oxibit-bitstream = { path = "crates/oxibit-bitstream" }
 oxibit-fasm = { path = "crates/oxibit-fasm" }
 oxibit-pnr = { path = "crates/oxibit-pnr" }
+oxibit-place = { path = "crates/oxibit-place" }
 oxibit-report = { path = "crates/oxibit-report" }
 oxibit-guard = { path = "crates/oxibit-guard" }
 oxibit-zynq7 = { path = "crates/oxibit-zynq7" }
