@@ -62,8 +62,6 @@ pub struct PassSet {
     pub srl: bool,
     pub bram: bool,
     pub iopad: bool,
-    /// LUT1 in front of flops whose D would need a bypass pin.
-    pub dfeed: bool,
 }
 
 impl PassSet {
@@ -75,7 +73,6 @@ impl PassSet {
         srl: true,
         bram: true,
         iopad: true,
-        dfeed: true,
     };
 }
 

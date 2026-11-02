@@ -7,4 +7,5 @@ pub mod device;
 pub mod netlist;
 pub mod pack;
 pub mod place;
+pub mod placer;
 pub mod xdc;

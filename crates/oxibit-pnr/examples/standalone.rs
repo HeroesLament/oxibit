@@ -110,14 +110,54 @@ fn run() -> Result<bool, String> {
                 .nets
                 .iter()
                 .zip(&sa.routes)
-                .filter(|(net, hops)| net.source == n || net.sinks.contains(&n) || hops.iter().any(|h| h.src == n || h.dst == n))
-                .map(|(net, _)| g.node_name(net.source))
+                .filter(|(net, hops)| net.driver.contains(n) || net.sinks.contains(&n) || hops.iter().any(|h| h.src == n || h.dst == n))
+                .map(|(net, _)| g.node_name(net.driver.anchor()))
                 .collect();
             json!({"node": g.node_name(n), "nets": on})
         })
         .collect();
     if !shorts.is_empty() {
         line(json!({ "shorts": shorts }));
+    }
+    // Global clock hops onto general interconnect, and the clock pins
+    // reached through it: zero when every clock pin hangs off the clock
+    // network.
+    {
+        use oxibit_fasm::route::Fabric;
+        use oxibit_pnr::nets::NetClass;
+        let mut hops = 0usize;
+        let mut pins = 0usize;
+        for (net, route) in sa.nets.iter().zip(&sa.routes) {
+            if net.class != NetClass::GlobalClock {
+                continue;
+            }
+            hops += route.iter().filter(|h| g.node_fabric(h.dst) == Fabric::Interconnect).count();
+            pins += route.iter().filter(|h| g.node_fabric(h.src) == Fabric::Interconnect && g.node_fabric(h.dst) == Fabric::Dedicated && net.sinks.contains(&h.dst)).count();
+        }
+        line(json!({"global_clock_interconnect": {"hops": hops, "clock_pins": pins}}));
+    }
+    // OXIBIT_DUMP_ROUTE=a,b: the hops of every imported net whose name
+    // contains one of these, with each edge's kind and pip.
+    if let Ok(pats) = std::env::var("OXIBIT_DUMP_ROUTE") {
+        let pats: Vec<&str> = pats.split(',').filter(|p| !p.is_empty()).collect();
+        // Every routed net: an imported one by its name, the rest (clock
+        // and constant nets built after import) by their source node.
+        for i in 0..sa.nets.len() {
+            let source = g.node_name(sa.nets[i].driver.anchor());
+            let name = imp.names.get(i).cloned().unwrap_or_else(|| source.clone());
+            if !pats.iter().any(|p| name.contains(p) || source.contains(p)) {
+                continue;
+            }
+            let hops: Vec<String> = sa.routes[i]
+                .iter()
+                .map(|h| {
+                    let p = g.edge_pip(h.tile, h.pi);
+                    format!("{:?} {}.{}.{} ({} -> {})", g.edge_kind(h.tile, h.pi), p.tile, p.dst, p.src, g.node_name(h.src), g.node_name(h.dst))
+                })
+                .collect();
+            line(json!({"route_dump": {"net": name, "class": format!("{:?}", sa.nets[i].class), "source": source,
+                "sinks": sa.nets[i].sinks.iter().map(|&s| g.node_name(s)).collect::<Vec<_>>(), "hops": hops}}));
+        }
     }
     std::fs::write(out_path, sa.fasm.text()).map_err(|e| format!("{out_path}: {e}"))?;
     let ok = sa.ok() && imp.unresolved.counts.is_empty();

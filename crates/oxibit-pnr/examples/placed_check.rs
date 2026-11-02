@@ -118,8 +118,8 @@ fn run() -> Result<bool, String> {
             }
         }
     }
-    let by_src: HashMap<u32, usize> = fnets.iter().enumerate().map(|(i, n)| (n.source, i)).collect();
-    let ours_src: HashSet<u32> = imp.nets.iter().map(|n| n.source).collect();
+    let by_src: HashMap<u32, usize> = fnets.iter().enumerate().map(|(i, n)| (n.driver.anchor(), i)).collect();
+    let ours_src: HashSet<u32> = imp.nets.iter().map(|n| n.driver.anchor()).collect();
     let mut absorbed: HashSet<usize> = HashSet::new();
     let mut through = 0usize;
     let expanded: Vec<Vec<u32>> = fnets
@@ -155,7 +155,7 @@ fn run() -> Result<bool, String> {
     let mut examples = Vec::new();
     let mut claimed: HashSet<usize> = HashSet::new();
     for (i, n) in imp.nets.iter().enumerate() {
-        let fi = match by_src.get(&n.source) {
+        let fi = match by_src.get(&n.driver.anchor()) {
             Some(&fi) => fi,
             None => match by_sinks.get(&n.sinks) {
                 Some(&fi) => {
@@ -165,7 +165,7 @@ fn run() -> Result<bool, String> {
                 None => {
                     no_match += 1;
                     if examples.len() < 16 {
-                        examples.push(json!({"why": "no nextpnr net from source or with these sinks", "net": imp.names[i], "source": g.node_name(n.source),
+                        examples.push(json!({"why": "no nextpnr net from source or with these sinks", "net": imp.names[i], "source": g.node_name(n.driver.anchor()),
                                              "sinks": n.sinks.iter().take(4).map(|&s| g.node_name(s)).collect::<Vec<_>>()}));
                     }
                     continue;
@@ -183,7 +183,7 @@ fn run() -> Result<bool, String> {
         // The rest of an O6 net that nextpnr sent out through XMUX.
         if !missing.is_empty() {
             missing.sort_unstable();
-            if let Some(&mi) = out_mux.get(&n.source).and_then(|m| by_src.get(m)) {
+            if let Some(&mi) = out_mux.get(&n.driver.anchor()).and_then(|m| by_src.get(m)) {
                 if expanded[mi] == missing && !claimed.contains(&mi) {
                     claimed.insert(mi);
                     split_exit += 1;
@@ -197,7 +197,7 @@ fn run() -> Result<bool, String> {
             exact += 1;
         } else if examples.len() < 16 {
             examples.push(json!({
-                "why": "sinks differ", "net": imp.names[i], "source": g.node_name(n.source),
+                "why": "sinks differ", "net": imp.names[i], "source": g.node_name(n.driver.anchor()),
                 "only_ours": missing.iter().take(4).map(|&s| g.node_name(s)).collect::<Vec<_>>(),
                 "only_nextpnr": extra.iter().take(4).map(|&s| g.node_name(s)).collect::<Vec<_>>(),
             }));
@@ -208,7 +208,7 @@ fn run() -> Result<bool, String> {
         if n.class == NetClass::Signal && !claimed.contains(&fi) && !absorbed.contains(&fi) {
             unclaimed += 1;
             if examples.len() < 24 {
-                examples.push(json!({"why": "nextpnr signal net not imported", "source": g.node_name(n.source),
+                examples.push(json!({"why": "nextpnr signal net not imported", "source": g.node_name(n.driver.anchor()),
                                      "sinks": expanded[fi].iter().take(4).map(|&s| g.node_name(s)).collect::<Vec<_>>()}));
             }
         }

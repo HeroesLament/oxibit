@@ -74,7 +74,7 @@ impl<'g> Routing<'g> {
             sinks.sort_unstable();
             t.sinks = sinks;
         }
-        let by_root = trees.iter().enumerate().map(|(i, t)| (t.source, i)).collect();
+        let by_root = trees.iter().enumerate().map(|(i, t)| (t.driver.anchor(), i)).collect();
         Routing { g, model, trees, by_root, arr: HashMap::new() }
     }
 
@@ -98,7 +98,7 @@ impl<'g> Routing<'g> {
         let (g, model, tree) = (self.g, self.model, &self.trees[t]);
         self.arr.entry(t).or_insert_with(|| {
             let edges: Vec<TreeEdge> = tree.edges.iter().map(|e| (e.src, e.dst, e.tile, e.pi)).collect();
-            delay::arrivals_with(g, tree.source, &edges, model)
+            delay::arrivals_with(g, tree.driver.anchor(), &edges, model)
         })
     }
 
@@ -143,7 +143,7 @@ fn main() -> R<()> {
     // imported net of that bit -> its source node.
     let roots = |design: &Value, perm: Perm, meta: &mut Meta| -> R<HashMap<String, u32>> {
         let imp = placed::import(&g, &sites, meta, design, perm)?;
-        let src_of_bit: HashMap<i64, u32> = imp.bits.iter().zip(&imp.nets).map(|(&b, net)| (b, net.source)).collect();
+        let src_of_bit: HashMap<i64, u32> = imp.bits.iter().zip(&imp.nets).map(|(&b, net)| (b, net.driver.anchor())).collect();
         let top = design["modules"].as_object().and_then(|m| m.values().find(|m| m["attributes"].get("top").is_some())).ok_or("no top module")?;
         Ok(top["netnames"]
             .as_object()

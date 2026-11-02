@@ -236,6 +236,8 @@ pub struct Graph {
     rev: OnceLock<Rev>,
     /// node -> its first global wire id, for `node_name`; built on first use.
     first_wire: OnceLock<Vec<u32>>,
+    /// node -> whether it is general interconnect; built on first use.
+    interconnect: OnceLock<Vec<bool>>,
     /// Reverse adjacency over fixed edges only, built on first use.
     rev_fixed: OnceLock<HashMap<u32, Vec<u32>>>,
     /// sink node -> bitset of nodes that can reach it.
@@ -467,6 +469,7 @@ impl Graph {
             node_rc,
             rev: OnceLock::new(),
             first_wire: OnceLock::new(),
+            interconnect: OnceLock::new(),
             rev_fixed: OnceLock::new(),
             reach: Mutex::new(HashMap::new()),
             opts,
@@ -682,6 +685,26 @@ impl Graph {
         out
     }
 
+    /// What a node is built from (see `Fabric`).
+    pub fn node_fabric(&self, n: u32) -> Fabric {
+        let general = self.interconnect.get_or_init(|| {
+            let mut general = vec![false; self.nodes()];
+            for (ti, (_, ty)) in self.tiles.iter().enumerate() {
+                if ty != "INT_L" && ty != "INT_R" {
+                    continue;
+                }
+                let base = self.wire_base[ti];
+                for (wi, w) in self.tile_td[ti].wires.iter().enumerate() {
+                    if !is_int_clock_wire(w) {
+                        general[self.node_of[(base + wi as u32) as usize] as usize] = true;
+                    }
+                }
+            }
+            general
+        });
+        if general[n as usize] { Fabric::Interconnect } else { Fabric::Dedicated }
+    }
+
     pub fn node_name(&self, n: u32) -> String {
         // A node's first wire (in tile order), indexed on first use.
         let first = self.first_wire.get_or_init(|| {
@@ -697,6 +720,25 @@ impl Graph {
         let ti = self.wire_base.partition_point(|&b| b <= w) - 1;
         format!("{}/{}", self.tiles[ti].0, self.tile_td[ti].wires[(w - self.wire_base[ti]) as usize])
     }
+}
+
+/// The INT tile wires that belong to clock distribution: the GCLK leaves
+/// and the CLK pin inputs they drive. `GFAN` is not one: it is where a
+/// clock leaves the clock network for general interconnect.
+fn is_int_clock_wire(w: &str) -> bool {
+    w.starts_with("GCLK") || matches!(w, "CLK0" | "CLK1" | "CLK_L0" | "CLK_L1")
+}
+
+/// What a node is built from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Fabric {
+    /// Anything not general interconnect: the clock network (BUFG, HROW,
+    /// HCLK, the GCLK leaves, the CLK pins), site-local and I/O wiring.
+    Dedicated,
+    /// General interconnect: a node with an INT wire other than a GCLK
+    /// leaf or a CLK pin input. A clock routed through it reaches its pin
+    /// late by the fabric delay, off the skew the clock network balances.
+    Interconnect,
 }
 
 /// How an edge conducts (`Enable` without the names).
@@ -1820,6 +1862,16 @@ fn read_json(p: &std::path::Path) -> R<Value> {
         .map_err(|e| format!("{}: {e}", p.display()))
 }
 
+/// Pips prjxray lists as hard (`->`) that are in fact the unselected input
+/// of a bitless mux, so a route through one writes nothing and leaves the
+/// destination undriven. An OLOGIC's CLKB takes IOI_OCLKM (the zero-bit
+/// default) or IOI_OCLK (unknown bits): routed through IOI_OCLK, an ODDR's
+/// CLKB was dead and the output never toggled (dr-b, 2026-10-31: AD9363 TX
+/// loopback constant 0xFFF; Vivado's own bitstream drives CLKB from OCLKM).
+fn unconfigurable_alternate(src: &str, dst: &str) -> bool {
+    matches!((src, dst), ("IOI_OCLK_0", "IOI_OLOGIC0_CLKB") | ("IOI_OCLK_1", "IOI_OLOGIC1_CLKB"))
+}
+
 /// The I/O tiles' site route-through pseudo-pips a design router may take,
 /// with the tile-relative lines that make each conduct (as nextpnr's
 /// xilinx pseudo-pip table configures them): the ILOGIC bypass from D or
@@ -1942,8 +1994,23 @@ fn load_type(db: &Database, ty: &str) -> R<TypeData> {
         None
     };
 
-    let seg = db.segbits.get(&ty.to_uppercase());
-    let has_bits = |f: &str| seg.is_some_and(|s| s.by_block.iter().any(|(_, m)| m.contains_key(f)));
+    let own = ty.to_uppercase();
+    let seg = db.segbits.get(&own);
+    // Bits come from the alias type for a tile type with none of its own
+    // (an I/O SING tile): a feature `RIOI3_SING.X` is looked up as
+    // `RIOI3.X`, and the assembler maps it back through the tile's alias.
+    // Without this every SING-tile feature reads as bitless, and an I/O
+    // route-through there (ILOGIC D -> O) becomes a fixed edge that writes
+    // no ZINV_D: the input conducts inverted.
+    let bits_ty = db.segbits_type(&own);
+    let bits_seg = db.segbits.get(&bits_ty);
+    let has_bits = |f: &str| {
+        let key = match f.strip_prefix(own.as_str()) {
+            Some(rest) if bits_ty != own && rest.starts_with('.') => format!("{bits_ty}{rest}"),
+            _ => f.to_string(),
+        };
+        bits_seg.is_some_and(|s| s.by_block.iter().any(|(_, m)| m.contains_key(&key)))
+    };
     let always = |f: &str| seg.is_some_and(|s| s.ppips_always.contains(f));
     let pseudo_other = |f: &str| seg.is_some_and(|s| s.ppips.contains(f) && !s.ppips_always.contains(f));
     let default = |f: &str| seg.is_some_and(|s| s.ppips_default.contains(f));
@@ -1959,6 +2026,9 @@ fn load_type(db: &Database, ty: &str) -> R<TypeData> {
             }
         }
         let key = format!("{ty}.{dst}.{src}");
+        if unconfigurable_alternate(src, dst) && !has_bits(&key) {
+            return;
+        }
         let io = io_pseudo(ty, src, dst).filter(|_| !has_bits(&key));
         let (feature, relay, is_default) = if has_bits(&key) {
             (Some(key), None, false)
@@ -2127,5 +2197,18 @@ impl UnionFind {
             out.push(id[r]);
         }
         (out, count as usize)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unconfigurable_alternate;
+
+    #[test]
+    fn ologic_clkb_only_from_oclkm() {
+        assert!(unconfigurable_alternate("IOI_OCLK_0", "IOI_OLOGIC0_CLKB"));
+        assert!(unconfigurable_alternate("IOI_OCLK_1", "IOI_OLOGIC1_CLKB"));
+        assert!(!unconfigurable_alternate("IOI_OCLKM_0", "IOI_OLOGIC0_CLKB"));
+        assert!(!unconfigurable_alternate("IOI_OCLK_0", "IOI_OLOGIC0_CLK"));
     }
 }

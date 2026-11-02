@@ -24,6 +24,7 @@ pub mod constants;
 pub mod dram;
 pub mod dsp;
 pub mod ffs;
+pub mod fold;
 pub mod io;
 pub mod luts;
 pub mod muxf;
@@ -257,6 +258,12 @@ impl Packer {
 /// Run the passes implemented so far, in nextpnr's order. Not yet: other
 /// IOLOGIC (IDDR, SERDES, ODELAY), PLL/MMCM, user MUXF trees, SRL cascades.
 pub fn pack(nl: Netlist, dev: &crate::device::Device, props: &crate::xdc::PortProps) -> Result<Packer, String> {
+    pack_with(nl, dev, props, true)
+}
+
+/// `pack`; `fold` adds the constant folding nextpnr-xilinx does not do
+/// (`fold`), off for a like-for-like comparison with nextpnr.
+pub fn pack_with(nl: Netlist, dev: &crate::device::Device, props: &crate::xdc::PortProps, fold: bool) -> Result<Packer, String> {
     let mut p = Packer::new(nl);
     constants::pack_constants(&mut p);
     luts::pack_inverters(&mut p);
@@ -266,8 +273,14 @@ pub fn pack(nl: Netlist, dev: &crate::device::Device, props: &crate::xdc::PortPr
     io::pack_iologic(&mut p, dev)?;
     io::pack_idelayctrl(&mut p, dev)?;
     clocking::pack_gbs(&mut p);
+    if fold {
+        fold::dram_addr_high(&mut p);
+    }
     carry::pack_carries(&mut p);
     srl::pack_srls(&mut p);
+    if fold {
+        fold::fold_luts(&mut p);
+    }
     luts::pack_luts(&mut p);
     dram::pack_dram(&mut p);
     bram::pack_bram(&mut p);

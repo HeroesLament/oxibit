@@ -23,7 +23,7 @@
 //! of cells no writer here covers yet, and a cell-less LUT that does logic.
 //! The report counts it.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use oxibit_fasm::db::Database;
 use oxibit_fasm::parse::parse_line;
@@ -99,6 +99,31 @@ pub fn standalone_with(db: &Database, g: &Graph, placed: &Value, imp: &Import, b
         "constant_sinks_no_tie": missed.len(), "no_tie_by_tile": no_tie_by_tile,
         "no_tie_examples": missed.iter().take(6).map(|&n| g.node_name(n)).collect::<Vec<_>>(),
     }}));
+    // Site pins two sinks need at once: a constant of both values, or a
+    // constant and a signal. The router cannot clear these.
+    {
+        let mut val_of: HashMap<u32, (bool, bool)> = HashMap::new();
+        for &(v, n) in &imp.const_sinks {
+            let e = val_of.entry(n).or_default();
+            if v { e.1 = true } else { e.0 = true }
+        }
+        let both: Vec<u32> = val_of.iter().filter(|(_, e)| e.0 && e.1).map(|(&n, _)| n).collect();
+        let sig: HashSet<u32> = imp.nets.iter().flat_map(|n| n.sinks.iter().copied()).collect();
+        let mixed: Vec<u32> = val_of.keys().filter(|n| sig.contains(n)).copied().collect();
+        let mut sig_count: HashMap<u32, usize> = HashMap::new();
+        for n in &imp.nets {
+            for &s in &n.sinks {
+                *sig_count.entry(s).or_default() += 1;
+            }
+        }
+        let sig2: Vec<u32> = sig_count.iter().filter(|(_, c)| **c > 1).map(|(&n, _)| n).collect();
+        let names = |v: &[u32]| v.iter().take(8).map(|&n| g.node_name(n)).collect::<Vec<_>>();
+        report.push(json!({"pin_conflicts": {"const_both_values": both.len(), "const_and_signal": mixed.len(), "signal_twice": sig2.len(),
+            "both_examples": names(&both), "mixed_examples": names(&mixed), "signal_twice_examples": names(&sig2)}}));
+    }
+    if std::env::var("OXIBIT_IMPORT_ONLY").is_ok() {
+        return Err(format!("import only: {}", serde_json::to_string(&report).unwrap_or_default()));
+    }
     let mut nets = imp.nets.clone();
     nets.extend(cnets);
 

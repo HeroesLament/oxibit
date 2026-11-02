@@ -115,8 +115,8 @@ fn main() -> Result<(), String> {
                 class[s as usize] = 1;
             }
         }
-        if class[n.source as usize] == u8::MAX {
-            class[n.source as usize] = 2;
+        if class[n.driver.anchor() as usize] == u8::MAX {
+            class[n.driver.anchor() as usize] = 2;
         }
     }
     for (name, parts) in CLASSES {
@@ -170,10 +170,10 @@ fn main() -> Result<(), String> {
     // Sinks the routing does not reach, by name (a few).
     let mut missed = Vec::new();
     for (i, (n, hops)) in imp.nets.iter().zip(&routes).enumerate() {
-        let reached: HashSet<u32> = hops.iter().map(|h| h.dst).chain([n.source]).collect();
+        let reached: HashSet<u32> = hops.iter().map(|h| h.dst).chain(n.driver.nodes().iter().copied()).collect();
         for s in n.sinks.iter().filter(|s| !reached.contains(s)) {
             if missed.len() < 30 {
-                missed.push(json!([imp.names[i], g.node_name(n.source), g.node_name(*s)]));
+                missed.push(json!([imp.names[i], g.node_name(n.driver.anchor()), g.node_name(*s)]));
             }
         }
     }
@@ -181,7 +181,7 @@ fn main() -> Result<(), String> {
     for (i, (n, hops)) in imp.nets.iter().zip(&routes).enumerate() {
         for (grp, pin) in n.pin_groups.iter().zip(router::chosen_pins(n, hops)) {
             if pin.is_none() && missed.len() < 40 {
-                missed.push(json!([imp.names[i], g.node_name(n.source), format!("group {}", g.node_name(grp[0]))]));
+                missed.push(json!([imp.names[i], g.node_name(n.driver.anchor()), format!("group {}", g.node_name(grp[0]))]));
             }
         }
     }

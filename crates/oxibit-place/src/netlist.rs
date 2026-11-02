@@ -309,6 +309,12 @@ impl Netlist {
         n.users.retain(|(uc, up)| !(*uc == c && up == port));
     }
 
+    /// Remove a port and its connection.
+    pub fn remove_port(&mut self, c: CellId, port: &str) {
+        self.disconnect(c, port);
+        self.cell_mut(c).ports.remove(port);
+    }
+
     /// Rename a port, keeping its net.
     pub fn rename_port(&mut self, c: CellId, old: &str, new: &str) {
         if old == new {

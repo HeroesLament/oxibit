@@ -38,7 +38,7 @@ use oxibit_fasm::db::Database;
 use oxibit_fasm::route::{EdgeKind, Graph};
 use serde_json::Value;
 
-use crate::nets::{Edge, Net, NetClass};
+use crate::nets::{Driver, Edge, Logic, Net, NetClass, Ties};
 use crate::router::Hop;
 
 type R<T> = Result<T, String>;
@@ -405,6 +405,13 @@ fn find_bel(vars: &HashMap<String, Variant>, primary: &str, spec: &str) -> Optio
     order.into_iter().find(|v| vars[*v].bels.contains_key(bel)).map(|v| (v.to_string(), bel.to_string()))
 }
 
+/// The second clock pin of an OLOGIC register entered through `pin`: CLKB
+/// for an OUTFF or TFF clocked through CLK.
+fn ologic_clkb(bel_type: &str, port: &str, pin: &str) -> Option<&'static str> {
+    let reg = matches!(bel_type, "OLOGICE2_OUTFF" | "OLOGICE3_OUTFF" | "OLOGICE2_TFF" | "OLOGICE3_TFF");
+    (reg && port == "CK" && pin == "CLK").then_some("CLKB")
+}
+
 fn is_lut_bel(ty: &str) -> bool {
     ty.starts_with("LUT")
 }
@@ -422,7 +429,12 @@ fn is_mem_cell(c: &Cell) -> bool {
 pub fn pin_conflicts(nets: &[Net]) -> Vec<(u32, Vec<usize>)> {
     let mut on: HashMap<u32, Vec<usize>> = HashMap::new();
     for (i, n) in nets.iter().enumerate() {
-        for &t in std::iter::once(&n.source).chain(&n.sinks) {
+        // Tie-driven constants share their ties by design.
+        let src = match &n.driver {
+            Driver::Node(s) => Some(s),
+            Driver::Ties(_) => None,
+        };
+        for &t in src.into_iter().chain(&n.sinks) {
             let v = on.entry(t).or_default();
             if v.last() != Some(&i) {
                 v.push(i);
@@ -676,6 +688,11 @@ pub fn import(g: &Graph, sites: &HashMap<String, (String, String)>, meta: &mut M
                         imp.unresolved.add("no_input_pin", format!("{}/{} {}.{} (constant)", s.tile, s.site, s.bel, s.port));
                         continue;
                     };
+                    if !free(&pin) {
+                        let k = (s.tile.clone(), s.site.clone(), pin.clone());
+                        let o = forced.get(&k).or(claimed.get(&k)).copied().unwrap_or(-1);
+                        imp.unresolved.add("pin_shared_const", format!("{}/{} {}.{} via {pin} (const {val}) held by bit {o}", s.tile, s.site, s.bel, s.port));
+                    }
                     claimed.entry((s.tile.clone(), s.site.clone(), pin.clone())).or_insert(b);
                     let Some(n) = site_pin(g, s, &pin, &mut imp.unresolved) else { continue };
                     let entry_wire = sv.pins.get(&pin).map(|x| x.0.clone()).unwrap_or_else(|| pin.clone());
@@ -766,6 +783,11 @@ pub fn import(g: &Graph, sites: &HashMap<String, (String, String)>, meta: &mut M
                 imp.unresolved.add("no_input_pin", format!("{}/{} {}.{}", s.tile, s.site, s.bel, s.port));
                 continue;
             };
+            if !free(&pin) {
+                let k = (s.tile.clone(), s.site.clone(), pin.clone());
+                let o = forced.get(&k).or(claimed.get(&k)).copied().unwrap_or(-1);
+                imp.unresolved.add("pin_shared", format!("{}/{} {}.{} via {pin} (bit {b}) held by bit {o}", s.tile, s.site, s.bel, s.port));
+            }
             claimed.entry((s.tile.clone(), s.site.clone(), pin.clone())).or_insert(b);
             let Some(n) = site_pin(g, s, &pin, &mut imp.unresolved) else { continue };
             let sv = &variants[&s.var];
@@ -778,6 +800,22 @@ pub fn import(g: &Graph, sites: &HashMap<String, (String, String)>, meta: &mut M
             let kind = if pin == "CIN" { "COUT" } else { "general" };
             fixed.push((kind.into(), n));
             imp.fixed_sinks += 1;
+            // An OLOGIC register is the OSERDES in DDR mode: its clock enters
+            // twice, CLK and CLKB (IOI_OCLK and IOI_OCLKM), both from the same
+            // net. The site model gives the OUTFF/TFF bels only CK, but with
+            // CLKB unrouted the output never toggles (dr-b, 2026-10-31: AD9363
+            // TX loopback constant 0xFFF until OCLKM was driven; Vivado routes
+            // both).
+            if let Some(clkb) = ologic_clkb(&sv.bel_type[&s.bel], &s.port, &pin) {
+                claimed.entry((s.tile.clone(), s.site.clone(), clkb.to_string())).or_insert(b);
+                if let Some(n) = site_pin(g, s, clkb, &mut imp.unresolved) {
+                    if let Some(tw) = g.site_pin_wire(&s.tile, &s.site, clkb) {
+                        paths.push((n, SinkPath { tile: s.tile.clone(), np_site: s.np_site.clone(), tile_wire: tw, site_wires: vec![clkb.to_string()] }));
+                    }
+                    fixed.push(("general".into(), n));
+                    imp.fixed_sinks += 1;
+                }
+            }
         }
         if fixed.is_empty() && groups.is_empty() {
             continue;
@@ -825,7 +863,7 @@ pub fn import(g: &Graph, sites: &HashMap<String, (String, String)>, meta: &mut M
             note_muxes(&mut imp.site_muxes, &mut imp.unresolved, &drv.tile, &drv.site, dv, &source.site_wires);
             fixed.sort_unstable();
             fixed.dedup();
-            imp.nets.push(Net { source: src, sinks: fixed, pin_groups: groups, edges: Vec::new(), class });
+            imp.nets.push(Net { driver: Driver::Node(src), sinks: fixed, pin_groups: groups, edges: Vec::new(), class });
             imp.names.push(format!("{name}@{exit}"));
             imp.bits.push(b);
             imp.sources.push(source);
@@ -841,12 +879,13 @@ pub fn import(g: &Graph, sites: &HashMap<String, (String, String)>, meta: &mut M
 /// An input whose interconnect mux reads VCC when unset (a `default`
 /// pseudo-pip from the tile's VCC_WIRE, then hard wires) needs no pip: it
 /// goes on a `NetClass::Default` net per tie, which the router keeps clear
-/// and writes nothing for. Every other input is given to a VCC_WIRE or
-/// GND_WIRE tie of its value that reaches it within three pips, hard wires
-/// not counted (GND_WIRE, GFAN, IMUX; or a VCC default into an interconnect
-/// input, then the pip of a clock tile's control mux), and each tie drives
-/// one `NetClass::Constant` net the router routes. Returns the nets and the
-/// inputs no tie reaches.
+/// and writes nothing for. Every other input gets a `NetClass::Constant`
+/// net of its own, driven by `Driver::Ties`: every VCC_WIRE or GND_WIRE tie
+/// of its value that reaches it within three pips, hard wires not counted
+/// (GND_WIRE, GFAN, IMUX; or a VCC default into an interconnect input, then
+/// the pip of a clock tile's control mux). The router starts from whichever
+/// tie is cheapest, and constants of one value may share wires. Returns the
+/// nets and the inputs no tie reaches.
 #[oxibit_prof::hot]
 pub fn constant_nets(g: &Graph, imp: &Import) -> (Vec<Net>, Vec<u32>) {
     let mut want: HashMap<u32, bool> = imp.const_sinks.iter().map(|&(v, n)| (n, v)).collect();
@@ -888,10 +927,13 @@ pub fn constant_nets(g: &Graph, imp: &Import) -> (Vec<Net>, Vec<u32>) {
         }
         if !sinks.is_empty() {
             sinks.sort_unstable();
-            nets.push(Net { source: tie, sinks, pin_groups: Vec::new(), edges, class: NetClass::Default });
+            nets.push(Net { driver: Driver::Node(tie), sinks, pin_groups: Vec::new(), edges, class: NetClass::Default });
         }
     }
-    let mut by_tie: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+    // Every tie of the input's value that reaches it within the depth is a
+    // candidate; the router picks among them per input, and inputs of one
+    // value share wires freely (`Identity::Const`).
+    let mut cands: BTreeMap<u32, (bool, Vec<u32>)> = BTreeMap::new();
     // Three pips reach nearly every input; the rest (an MMCM's CLKIN2 from
     // GND through GFAN, FAN_ALT, FAN_BOUNCE and a CLK input) search deeper
     // from the ties near them.
@@ -936,8 +978,7 @@ pub fn constant_nets(g: &Graph, imp: &Import) -> (Vec<Net>, Vec<u32>) {
                             }
                             for h in hard {
                                 if want.get(&h) == Some(&val) {
-                                    want.remove(&h);
-                                    by_tie.entry(tie).or_default().push(h);
+                                    cands.entry(h).or_insert_with(|| (val, Vec::new())).1.push(tie);
                                 }
                                 next.push(h);
                             }
@@ -947,11 +988,11 @@ pub fn constant_nets(g: &Graph, imp: &Import) -> (Vec<Net>, Vec<u32>) {
                 }
             }
         }
+        want.retain(|n, _| !cands.contains_key(n));
     }
-    nets.extend(by_tie.into_iter().map(|(tie, mut sinks)| {
-        sinks.sort_unstable();
-        sinks.dedup();
-        Net { source: tie, sinks, pin_groups: Vec::new(), edges: Vec::new(), class: NetClass::Constant }
+    nets.extend(cands.into_iter().filter_map(|(sink, (val, ties))| {
+        let ties = Ties::new(Logic::of(val), ties)?;
+        Some(Net { driver: Driver::Ties(ties), sinks: vec![sink], pin_groups: Vec::new(), edges: Vec::new(), class: NetClass::Constant })
     }));
     let mut missed: Vec<u32> = want.into_keys().collect();
     missed.sort_unstable();
@@ -1009,6 +1050,15 @@ fn mux_line(bel: &str, pin: &str) -> Option<Option<String>> {
             }
         ))),
         "WEMUX" => Some((pin == "CE").then(|| "WEMUX.CE".to_string())),
+        // A SLICEM LUT's write data (RAM) or shift input (SRL): its own
+        // bypass pin (`ALUT.DI1MUX.AI`, `BI`, `CI`, one bit each) or, by
+        // default with no bit, the next LUT up's (DI chain / MC31 cascade).
+        // Unwritten, every A/B/C LUT took D's data: RAM32M/RAM64M lanes and
+        // SRLs fed through AX/BX/CX stored the wrong bit (dr-b, 2026-11-01).
+        "DI1MUX" if letter && matches!(&bel[..1], "A" | "B" | "C") => {
+            let own = format!("{}I", &bel[..1]);
+            Some((pin == own).then(|| format!("{}LUT.DI1MUX.{own}", &bel[..1])))
+        }
         _ => None,
     }
 }
@@ -1065,12 +1115,8 @@ impl SiteMuxLines {
     pub fn owns(&self, line: &str) -> bool {
         let f = line.split('#').next().unwrap_or("").trim();
         let parts: Vec<&str> = f.split('.').collect();
-        let bel = match parts[..] {
-            [_, _, "CARRY4", b] => b,
-            [_, _, b, ..] => b,
-            _ => return false,
-        };
-        mux_line(bel, "").is_some() && self.owned.contains(&(parts[0].to_string(), parts[1].to_string(), bel.to_string()))
+        let Some(bel) = line_bel(&parts) else { return false };
+        mux_line(&bel, "").is_some() && self.owned.contains(&(parts[0].to_string(), parts[1].to_string(), bel))
     }
 }
 
@@ -1082,12 +1128,18 @@ pub fn is_site_mux_line(line: &str) -> bool {
     if parts.len() < 4 || !parts[0].starts_with("CLBL") || !parts[1].starts_with("SLICE") {
         return false;
     }
-    let bel = match parts[..] {
-        [_, _, "CARRY4", b] => b,
-        [_, _, b, ..] => b,
-        _ => return false,
-    };
-    mux_line(bel, "").is_some()
+    line_bel(&parts).is_some_and(|bel| mux_line(&bel, "").is_some())
+}
+
+/// The routing bel a slice FASM line (split on '.') sets: `CARRY4.ACY0`
+/// is `ACY0`, `ALUT.DI1MUX.AI` is `ADI1MUX`, otherwise the third field.
+fn line_bel(parts: &[&str]) -> Option<String> {
+    match parts {
+        [_, _, "CARRY4", b] => Some(b.to_string()),
+        [_, _, lut, "DI1MUX", ..] if lut.len() == 4 && lut.ends_with("LUT") => Some(format!("{}DI1MUX", &lut[..1])),
+        [_, _, b, ..] => Some(b.to_string()),
+        _ => None,
+    }
 }
 
 #[oxibit_prof::hot]
@@ -1227,6 +1279,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ologic_registers_take_clkb() {
+        assert_eq!(ologic_clkb("OLOGICE3_OUTFF", "CK", "CLK"), Some("CLKB"));
+        assert_eq!(ologic_clkb("OLOGICE3_TFF", "CK", "CLK"), Some("CLKB"));
+        assert_eq!(ologic_clkb("OLOGICE3_OUTFF", "D1", "D1"), None);
+        assert_eq!(ologic_clkb("ILOGICE3_IFF", "CK", "CLK"), None);
+    }
+
+    #[test]
+    fn di1mux_lines() {
+        assert_eq!(mux_line("ADI1MUX", "AI"), Some(Some("ALUT.DI1MUX.AI".into())));
+        assert_eq!(mux_line("BDI1MUX", "BI"), Some(Some("BLUT.DI1MUX.BI".into())));
+        assert_eq!(mux_line("CDI1MUX", "CI"), Some(Some("CLUT.DI1MUX.CI".into())));
+        assert_eq!(mux_line("CDI1MUX", "DMC31"), Some(None));
+        assert_eq!(mux_line("BDI1MUX", "DI"), Some(None));
+        assert!(is_site_mux_line("CLBLM_L_X34Y68.SLICEM_X0.CLUT.DI1MUX.CI"));
+        assert!(!is_site_mux_line("CLBLM_L_X34Y68.SLICEM_X0.CLUT.RAM"));
+    }
+
+    #[test]
     fn site_mux_lines() {
         assert_eq!(mux_line("BFFMUX", "BX"), Some(Some("BFFMUX.BX".into())));
         assert_eq!(mux_line("CFFMUX", "CARRY4_XOR"), Some(Some("CFFMUX.XOR".into())));
@@ -1238,7 +1309,7 @@ mod tests {
         assert_eq!(mux_line("WEMUX", "WE"), Some(None));
         assert_eq!(mux_line("WEMUX", "CE"), Some(Some("WEMUX.CE".into())));
         assert_eq!(mux_line("CEUSEDMUX", "IN"), None);
-        assert_eq!(mux_line("ADI1MUX", "AI"), None);
+        assert_eq!(mux_line("ADI1MUX", "BMC31"), Some(None));
     }
 
     #[test]

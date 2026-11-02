@@ -238,10 +238,17 @@ pub fn pack_iologic(p: &mut Packer, dev: &Device) -> Result<(), String> {
                 let io_site = p.io_site.get(&ob).cloned().ok_or("output buffer site")?;
                 let site = dev.io_logic_site(&io_site, "OLOGIC").ok_or_else(|| format!("no OLOGIC for {io_site}"))?;
                 let tri = users.first().is_some_and(|(_, port)| port == "TRI");
-                let rule = Rule::to(if tri { "OLOGICE3_TFF" } else { "OLOGICE3_OUTFF" })
-                    .port("C", "CK")
-                    .port("S", "SR")
-                    .port("R", "SR");
+                // The OLOGIC has one SR pin: ODDR's S or its R, whichever the
+                // design drives (R when neither is). The other comes off, and
+                // X_ORIG_PORT_SR names the one kept, which sets SRVAL.
+                let live = |port: &str| p.nl.cell(c).net(port).is_some_and(|n| n != p.nl.gnd);
+                let (sr, other) = match (live("S"), live("R")) {
+                    (true, true) => return Err(format!("{name}: S and R both driven")),
+                    (true, false) => ("S", "R"),
+                    (false, _) => ("R", "S"),
+                };
+                p.nl.remove_port(c, other);
+                let rule = Rule::to(if tri { "OLOGICE3_TFF" } else { "OLOGICE3_OUTFF" }).port("C", "CK").port(sr, "SR");
                 p.xform(c, &rule);
                 p.nl.cell_mut(c).bel = dev.grid_loc(&site, if tri { "TFF" } else { "OUTFF" });
             }

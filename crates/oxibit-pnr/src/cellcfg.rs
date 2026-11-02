@@ -9,7 +9,7 @@
 //!
 //! The routing-bel settings that follow from site paths (FF data muxes,
 //! output muxes, `CY0`, `WEMUX`) are `placed::apply_site_muxes`; LUT INITs
-//! are `lutinit`. `DI1MUX` (a SLICEM LUT RAM's data input) is not written.
+//! are `lutinit`. `DI1MUX` (a SLICEM LUT's data input) is a site mux (`placed`).
 //!
 //! nextpnr writes `NOCLKINV` for both halves of every CLB tile that holds a
 //! logic cell, also a half with no FF; so does this.
@@ -140,7 +140,10 @@ pub fn slice_config(placed: &Value, locate: &dyn Fn(&str) -> Option<Located>) ->
             if zrst {
                 lines.insert(format!("{tile}.{site}.{bel}.ZRST"));
             }
-            let inv = params.get("IS_CLK_INVERTED").and_then(int_param).unwrap_or(0) == 1;
+            // The clock inversion: FDRE/FDSE/FDCE/FDPE carry it as
+            // IS_C_INVERTED, latches as IS_G_INVERTED (yosys writes the
+            // _1 types instead, `negedge` above).
+            let inv = ["IS_C_INVERTED", "IS_G_INVERTED", "IS_CLK_INVERTED"].iter().any(|k| params.get(*k).and_then(int_param).unwrap_or(0) == 1);
             // A 7-series latch is transparent while its clock is low: the
             // gate is inverted by default so G high is transparent.
             let clkinv = if negedge { true } else if latch { !inv } else { inv };
