@@ -117,8 +117,60 @@ fn pack_policy() -> Result<PackPolicy, String> {
     Ok(pol)
 }
 
+use oxibit_report::Progress;
+
+static CANCEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Progress through oxibit-report (docs/events.md): human lines on stderr
+/// (a live status line on a terminal), the JSON Lines stream to the file
+/// OXIBIT_EVENTS names. stdout keeps its one JSON object per line.
+fn reporter() -> oxibit_report::Reporter {
+    use oxibit_report::{Human, HumanStyle, JsonLines, Reporter, Sink};
+    use std::io::IsTerminal;
+    let tty = std::io::stderr().is_terminal() && std::env::var_os("CI").is_none();
+    let style = if tty {
+        HumanStyle::Live
+    } else {
+        HumanStyle::Plain
+    };
+    let mut sinks: Vec<Box<dyn Sink>> = vec![Box::new(Human::new(std::io::stderr(), style))];
+    if let Some(p) = std::env::var_os("OXIBIT_EVENTS") {
+        match std::fs::File::create(&p) {
+            Ok(f) => sinks.push(Box::new(JsonLines(std::io::BufWriter::new(f)))),
+            Err(e) => eprintln!("{}: {e}", p.to_string_lossy()),
+        }
+    }
+    Reporter::new(sinks, &CANCEL)
+}
+
 fn run() -> Result<bool, String> {
     let args: Vec<String> = std::env::args().collect();
+    let r = reporter();
+    r.emit(oxibit_report::Event::Start {
+        cmd: "pack".into(),
+        version: env!("CARGO_PKG_VERSION").into(),
+        args: args[1..].to_vec(),
+    });
+    let ok = run_with(&args, &r);
+    r.emit(oxibit_report::Event::Done {
+        ok: matches!(ok, Ok(true)),
+        exit: match ok {
+            Ok(true) => 0,
+            Ok(false) => 1,
+            Err(_) => 3,
+        },
+        cancelled: r.cancelled(),
+        phases: r.phases(),
+        peak_rss_mb: None,
+        stats: json!({}),
+        check: json!({}),
+        outputs: vec![],
+    });
+    r.finish();
+    ok
+}
+
+fn run_with(args: &[String], r: &oxibit_report::Reporter) -> Result<bool, String> {
     let [_, db, part, xdc, meta, synth, out, rest @ ..] = &args[..] else {
         return Err("usage: pack DB_FAMILY_DIR PART XDC META_DIR SYNTH.json OUT.json [REFERENCE_PLACED.json]".into());
     };
@@ -129,7 +181,9 @@ fn run() -> Result<bool, String> {
     let nl = Netlist::from_json(&read(synth)?)?;
     let plan = pack_policy()?.plan(&oxibit_place::policy::xc7z020())?;
     println!("{}", json!({"pack_policy": plan.json()}));
+    r.begin("pack");
     let mut p = pack::pack_with(nl, &dev, &props, &plan)?;
+    r.end("pack");
     let mut types: std::collections::BTreeMap<String, usize> = Default::default();
     for c in p.nl.cell_ids() {
         *types.entry(p.nl.cell(c).ty.clone()).or_default() += 1;
@@ -198,7 +252,9 @@ fn run() -> Result<bool, String> {
         opts.bypass = plan.objective().bypass;
         opts.density = plan.objective().density;
         opts.floorplan = plan.floorplan().clone();
-        let ps = oxibit_place::placer::place(&mut p, &dev, &sites, macros, &opts)?;
+        r.begin("place");
+        let ps = oxibit_place::placer::place_with(&mut p, &dev, &sites, macros, &opts, r)?;
+        r.end("place");
         println!(
             "{}",
             json!({"hpwl_measured": oxibit_place::placer::hpwl(&p, 200)})
@@ -211,7 +267,15 @@ fn run() -> Result<bool, String> {
                 .map(|c| p.nl.cell(c).name.clone())
                 .collect();
         let clashes = oxibit_place::slice::check(&p);
-        ok = unplaced.is_empty() && lg.over_five.is_empty() && clashes.is_empty();
+        let outmux = oxibit_place::slice::outmux_check(&p);
+        println!(
+            "{}",
+            json!({"outmux_check": {"clashes": outmux.len(), "examples": outmux.iter().take(6).collect::<Vec<_>>()}})
+        );
+        ok = unplaced.is_empty()
+            && lg.over_five.is_empty()
+            && clashes.is_empty()
+            && outmux.is_empty();
         let shown: Vec<String> = clashes
             .iter()
             .take(6)

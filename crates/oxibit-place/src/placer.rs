@@ -265,6 +265,9 @@ pub struct FillStats {
     pub paired_luts: usize,
     /// Lone LUTs on the 5LUT of a letter whose 6LUT feeds its flop.
     pub ff_letter_5luts: usize,
+    /// Lone flops no slot of their slice could take (each in a slice of its
+    /// own).
+    pub ff_spilled: usize,
     pub ff2_used: usize,
     pub control_sets: usize,
     pub leftovers: Vec<String>,
@@ -590,6 +593,22 @@ pub fn fill(p: &Packer, opts: &FillOptions) -> (Vec<Macro>, FillStats) {
     // LUTs read at most five nets. `ff5`: host unit -> the LUT on its 5LUT.
     let mut ff5: HashMap<usize, CellId> = HashMap::new();
     let mut hosts_of: Vec<Vec<usize>> = vec![Vec::new(); logic.len()];
+    // A letter's 5LUT and 5FF share its output mux (AMUX..DMUX): the 5LUT's
+    // O5 and the 5FF's Q cannot both leave the slice. Each slice's lone
+    // flops that the empty letters' main FFs cannot take need a 5FF on a
+    // letter with no 5LUT; the rest of its plain LUT letters may host one.
+    let mut lut5_budget: Vec<usize> = logic
+        .iter()
+        .map(|slice| {
+            let luts = slice.iter().filter(|&&i| units[i].lut.is_some()).count();
+            let lones = slice.len() - luts;
+            let plain = slice
+                .iter()
+                .filter(|&&i| units[i].lut.is_some() && units[i].lut5.is_none())
+                .count();
+            plain.saturating_sub(lones.saturating_sub(4 - luts))
+        })
+        .collect();
     for (si, slice) in logic.iter().enumerate() {
         for &h in slice {
             let u = &units[h];
@@ -621,18 +640,26 @@ pub fn fill(p: &Packer, opts: &FillOptions) -> (Vec<Macro>, FillStats) {
         }
         let mut ranked: Vec<(usize, usize)> = score.into_iter().collect();
         ranked.sort_by_key(|&(si, sc)| (std::cmp::Reverse(sc), si));
-        let fits = |h: usize, ff5: &HashMap<usize, CellId>| {
+        let fits = |h: usize, ff5: &HashMap<usize, CellId>, budget: &[usize]| {
             !ff5.contains_key(&h)
+                && budget[slice_of[&h]] > 0
                 && lut_nets(p, units[h].lut.expect("lut")).union(&mine).count() <= 5
         };
-        let mut pick = ranked
-            .iter()
-            .find_map(|&(si, _)| hosts_of[si].iter().copied().find(|&h| fits(h, &ff5)));
+        let mut pick = ranked.iter().find_map(|&(si, _)| {
+            hosts_of[si]
+                .iter()
+                .copied()
+                .find(|&h| fits(h, &ff5, &lut5_budget))
+        });
         // no neighbour slice has room: scan on from where the last scan stopped
         if pick.is_none() {
             for k in 0..logic.len() {
                 let si = (any_slice + k) % logic.len();
-                if let Some(h) = hosts_of[si].iter().copied().find(|&h| fits(h, &ff5)) {
+                if let Some(h) = hosts_of[si]
+                    .iter()
+                    .copied()
+                    .find(|&h| fits(h, &ff5, &lut5_budget))
+                {
                     pick = Some(h);
                     any_slice = si;
                     break;
@@ -642,6 +669,7 @@ pub fn fill(p: &Packer, opts: &FillOptions) -> (Vec<Macro>, FillStats) {
         match pick {
             Some(h) => {
                 ff5.insert(h, l);
+                lut5_budget[slice_of[&h]] -= 1;
                 st.ff_letter_5luts += 1;
             }
             None => still.push(i),
@@ -683,6 +711,8 @@ pub fn fill(p: &Packer, opts: &FillOptions) -> (Vec<Macro>, FillStats) {
     }
 
     let mut fills: Vec<Fill> = Vec::new();
+    // Lone flops no slot of their own slice could take.
+    let mut spilled: Vec<CellId> = Vec::new();
     for (si, slice) in logic.iter().enumerate() {
         let mut f = Fill {
             logic: true,
@@ -699,29 +729,33 @@ pub fn fill(p: &Packer, opts: &FillOptions) -> (Vec<Macro>, FillStats) {
             .filter(|&i| units[i].lut.is_none())
             .collect();
         let mut letter_i = 0;
+        let mut has5 = [false; 4];
         for &i in &lut_units {
             let l = letter(letter_i);
             f.cells
                 .push((units[i].lut.expect("lut"), format!("{l}6LUT")));
             if let Some(l5) = units[i].lut5.or(ff5.get(&i).copied()) {
                 f.cells.push((l5, format!("{l}5LUT")));
+                has5[letter_i as usize] = true;
             }
             f.cells.push((units[i].ff.expect("ff"), format!("{l}FF")));
             letter_i += 1;
         }
-        // Lone flops: on the 5FF of a LUT-fed letter (bypass pin free), else
-        // on the main FF of an empty letter (bypass pin carries its D).
-        let mut ff2_letter = 0;
+        // Lone flops: on the 5FF of a LUT-fed letter with no 5LUT (bypass
+        // pin free, output mux free), else on the main FF of an empty
+        // letter (bypass pin carries its D), else spilled.
+        let mut ff2_slots = (0..letter_i).filter(|&k| !has5[k as usize]);
         let mut empty_letter = letter_i;
         for &i in &lone_ffs {
             let ff = units[i].ff.expect("ff");
-            if ff2_letter < letter_i {
-                f.cells.push((ff, format!("{}5FF", letter(ff2_letter))));
-                ff2_letter += 1;
+            if let Some(k) = ff2_slots.next() {
+                f.cells.push((ff, format!("{}5FF", letter(k))));
                 st.ff2_used += 1;
             } else if empty_letter < 4 {
                 f.cells.push((ff, format!("{}FF", letter(empty_letter))));
                 empty_letter += 1;
+            } else {
+                spilled.push(ff);
             }
         }
         // Lone LUTs on the letters with no LUT.
@@ -754,6 +788,16 @@ pub fn fill(p: &Packer, opts: &FillOptions) -> (Vec<Macro>, FillStats) {
             st.lone_lut_letters += 1;
         }
         fills.push(f);
+    }
+    // A spilled flop gets a slice of its own: flops of different slices may
+    // be on different control sets.
+    for ff in spilled {
+        st.ff_spilled += 1;
+        fills.push(Fill {
+            logic: true,
+            cells: vec![(ff, "AFF".to_string())],
+            ..Fill::default()
+        });
     }
     st.logic_slices = fills.len();
     macros.extend(fills.into_iter().map(|f| Macro { slices: vec![f] }));
@@ -1281,6 +1325,19 @@ pub fn place(
     sites: &Sites,
     macros: Vec<Macro>,
     opts: &Options,
+) -> Result<PlaceStats, String> {
+    place_with(p, dev, sites, macros, opts, &oxibit_report::Silent)
+}
+
+/// `place`, reporting a `progress` event (phase `place`) per temperature
+/// step: step, temperature, move window, acceptance rate, cost, moves.
+pub fn place_with(
+    p: &mut Packer,
+    dev: &Device,
+    sites: &Sites,
+    macros: Vec<Macro>,
+    opts: &Options,
+    progress: &dyn oxibit_report::Progress,
 ) -> Result<PlaceStats, String> {
     let t0 = std::time::Instant::now();
     let mut st = PlaceStats::default();
@@ -2021,13 +2078,50 @@ pub fn place(
                 continue;
             }
 
-            // Object move.
+            // Object move. `others`: objects displaced, each with the site
+            // it moves to.
             let len = objs[oi].sites.len();
-            let (new_run, other): (Vec<usize>, Option<usize>) = if len > 1 {
-                match run_from(ts, len) {
-                    Some(r) if fits(&objs[oi], &fills[oi], &r, &owner, oi) => (r, None),
-                    _ => continue,
+            let (new_run, others): (Vec<usize>, Vec<(usize, usize)>) = if len > 1 {
+                // A chain may land on single slices: each moves, in order,
+                // into a site the chain leaves. Without this a chain only
+                // moves into a run of free sites, which a full device
+                // hardly has: chains stayed where the initial placement
+                // put them and their sum outputs ran 50 tiles on average.
+                let Some(r) = run_from(ts, len) else { continue };
+                if k != Kind::Slice {
+                    continue;
                 }
+                let vacated: Vec<usize> = objs[oi]
+                    .sites
+                    .iter()
+                    .copied()
+                    .filter(|s| !r.contains(s))
+                    .collect();
+                let mut others = Vec::new();
+                let mut ok = true;
+                for (j, &s) in r.iter().enumerate() {
+                    if fills[oi][j].need_m && !sites.slices[s].m {
+                        ok = false;
+                        break;
+                    }
+                    match owner[0][s] {
+                        None => {}
+                        Some(o) if o == oi => {}
+                        Some(oj) => {
+                            let v = vacated[others.len()];
+                            if objs[oj].sites.len() != 1 || (objs[oj].need_m && !sites.slices[v].m)
+                            {
+                                ok = false;
+                                break;
+                            }
+                            others.push((oj, v));
+                        }
+                    }
+                }
+                if !ok {
+                    continue;
+                }
+                (r, others)
             } else {
                 let other = owner[ki][ts];
                 if let Some(oj) = other {
@@ -2055,24 +2149,28 @@ pub fn place(
                         continue;
                     }
                 }
-                (vec![ts], other)
+                (
+                    vec![ts],
+                    other
+                        .map(|oj| (oj, objs[oi].sites[0]))
+                        .into_iter()
+                        .collect(),
+                )
             };
-            if !in_reg(oi, k, &new_run)
-                || other.is_some_and(|oj| !in_reg(oj, k, &objs[oi].sites[..1]))
-            {
+            if !in_reg(oi, k, &new_run) || others.iter().any(|&(oj, v)| !in_reg(oj, k, &[v])) {
                 continue;
             }
             let old_run = objs[oi].sites.clone();
             let old_pos_i = pos[oi].clone();
             pos[oi] = new_run.iter().map(|&s| site_xy(k, s)).collect();
-            if let Some(oj) = other {
-                pos[oj] = vec![site_xy(k, old_run[0])];
+            for &(oj, v) in &others {
+                pos[oj] = vec![site_xy(k, v)];
             }
             epoch = epoch.wrapping_add(1);
             touched.clear();
             for &c in obj_cells[oi]
                 .iter()
-                .chain(other.map(|oj| &obj_cells[oj]).into_iter().flatten())
+                .chain(others.iter().flat_map(|&(oj, _)| obj_cells[oj].iter()))
             {
                 for &ni in &cell_nets[c as usize] {
                     if stamp[ni as usize] != epoch {
@@ -2091,7 +2189,7 @@ pub fn place(
                 net_cost[ni as usize] = c;
             }
             // Tile pins: this object's slices leave their tiles for the new
-            // run's; a swapped slice goes the other way.
+            // run's; each displaced slice goes to its new site.
             let mut changes: Vec<(u32, Delta)> = Vec::new();
             if k == Kind::Slice {
                 for (&s, &pins) in old_run.iter().zip(&slice_pins[oi]) {
@@ -2100,14 +2198,14 @@ pub fn place(
                 for (&s, &pins) in new_run.iter().zip(&slice_pins[oi]) {
                     changes.push((site_tile[s], Delta::from(pins)));
                 }
-                if let Some(oj) = other {
+                for &(oj, v) in &others {
                     let pins = Delta::from(slice_pins[oj][0]);
-                    changes.push((site_tile[new_run[0]], -pins));
-                    changes.push((site_tile[old_run[0]], pins));
+                    changes.push((site_tile[objs[oj].sites[0]], -pins));
+                    changes.push((site_tile[v], pins));
                 }
             }
             // Bin loads: this object's slices leave their bins for the new
-            // run's; a swapped slice goes the other way.
+            // run's; each displaced slice goes to its new site.
             let mut dchg: Vec<(u32, i32)> = Vec::new();
             if k == Kind::Slice && dens.on() {
                 for &s in &old_run {
@@ -2116,9 +2214,9 @@ pub fn place(
                 for &s in &new_run {
                     dchg.push((site_bin[s], 1));
                 }
-                if other.is_some() {
-                    dchg.push((site_bin[new_run[0]], -1));
-                    dchg.push((site_bin[old_run[0]], 1));
+                for &(oj, v) in &others {
+                    dchg.push((site_bin[objs[oj].sites[0]], -1));
+                    dchg.push((site_bin[v], 1));
                 }
             }
             let ddens = if dchg.is_empty() {
@@ -2153,10 +2251,11 @@ pub fn place(
                 for &s in &old_run {
                     owner[ki][s] = None;
                 }
-                if let Some(oj) = other {
-                    owner[ki][old_run[0]] = Some(oj);
-                    objs[oj].sites = vec![old_run[0]];
-                } else {
+                for &(oj, v) in &others {
+                    owner[ki][v] = Some(oj);
+                    objs[oj].sites = vec![v];
+                }
+                if others.is_empty() {
                     match k {
                         Kind::Ramb36 => {
                             b36.insert(sites.ramb36[old_run[0]].tile, false);
@@ -2178,7 +2277,7 @@ pub fn place(
                     net_cost[ni as usize] = c;
                 }
                 pos[oi] = old_pos_i;
-                if let Some(oj) = other {
+                for &(oj, _) in &others {
                     pos[oj] = vec![site_xy(k, objs[oj].sites[0])];
                 }
             }
@@ -2187,6 +2286,11 @@ pub fn place(
         st.accepted += accepted;
         let rate = accepted as f64 / evaluated.max(1) as f64;
         st.trace.push((temp, window, rate, total));
+        progress.emit(oxibit_report::Event::progress(
+            "place",
+            serde_json::json!({"step": st.trace.len(), "temp": (temp * 100.0).round() / 100.0, "window": window.round(),
+                               "accept": (rate * 1000.0).round() / 1000.0, "cost": total.round(), "moves": st.moves}),
+        ));
         let alpha = if rate > 0.96 {
             0.5
         } else if rate > 0.8 {

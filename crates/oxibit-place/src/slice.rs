@@ -140,6 +140,103 @@ pub fn bypass_claims(p: &Packer, cells: &[(CellId, String)]) -> (BypassPins, Vec
     (x, clashes)
 }
 
+/// What a letter sends out of the slice through its output mux
+/// (AMUX..DMUX, OUTMUX): one of them per letter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MuxUse {
+    /// The 5LUT's O5, read by anything but the letter's own flops or the
+    /// carry (those take it inside the slice).
+    Lut5,
+    /// The 5FF's Q: it has no other way out.
+    Ff5,
+    /// A carry output (O or CO) read outside the slice or by another
+    /// letter's flop.
+    Carry,
+}
+
+/// Letters of one slice whose output mux more than one cell needs.
+pub fn outmux_clashes(p: &Packer, cells: &[(CellId, String)]) -> Vec<(u8, Vec<MuxUse>)> {
+    let letter_of: HashMap<CellId, u8> = cells.iter().map(|(c, b)| (*c, b.as_bytes()[0])).collect();
+    // Does net `n` leave letter `l` other than into its own flops or the carry?
+    let leaves = |n: NetId, l: u8| {
+        p.nl.net(n)
+            .users
+            .iter()
+            .any(|(u, _)| match letter_of.get(u) {
+                Some(&ul) => {
+                    let ty = p.nl.cell(*u).ty.as_str();
+                    !(ty == "CARRY4" || (ty == "SLICE_FFX" && ul == l))
+                }
+                None => true,
+            })
+    };
+    let output = |c: CellId| {
+        p.nl.cell(c)
+            .ports
+            .values()
+            .filter_map(|port| port.net)
+            .find(|&n| !p.nl.is_const(n) && p.nl.driver(n).is_some_and(|(d, _)| d == c))
+    };
+    let mut uses: BTreeMap<u8, Vec<MuxUse>> = BTreeMap::new();
+    for (c, b) in cells {
+        let l = b.as_bytes()[0];
+        match (p.nl.cell(*c).ty.as_str(), &b[1..]) {
+            ("SLICE_LUTX", "5LUT") => {
+                if output(*c).is_some_and(|n| leaves(n, l)) {
+                    uses.entry(l).or_default().push(MuxUse::Lut5);
+                }
+            }
+            ("SLICE_FFX", "5FF") => uses.entry(l).or_default().push(MuxUse::Ff5),
+            ("CARRY4", _) => {
+                for k in 0..4u8 {
+                    let ll = b'A' + k;
+                    let names = [
+                        format!("O{k}"),
+                        format!("O[{k}]"),
+                        format!("CO{k}"),
+                        format!("CO[{k}]"),
+                    ];
+                    let busy = names.iter().any(|port| {
+                        p.nl.cell(*c)
+                            .net(port)
+                            .is_some_and(|n| !p.nl.is_const(n) && leaves(n, ll))
+                    });
+                    if busy {
+                        uses.entry(ll).or_default().push(MuxUse::Carry);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    uses.into_iter().filter(|(_, u)| u.len() > 1).collect()
+}
+
+/// Every slice letter in a placed design whose output mux two cells need,
+/// as `X{x}Y{y}/{site} {letter}: uses`.
+pub fn outmux_check(p: &Packer) -> Vec<String> {
+    let mut by_site: BTreeMap<(i32, i32, String), Vec<(CellId, String)>> = BTreeMap::new();
+    for c in p.nl.cell_ids() {
+        if let Some(Loc::Grid { x, y, site, bel }) = &p.nl.cell(c).bel
+            && site.starts_with("SLICE")
+        {
+            by_site
+                .entry((*x, *y, site.clone()))
+                .or_default()
+                .push((c, bel.clone()));
+        }
+    }
+    by_site
+        .into_iter()
+        .flat_map(|((x, y, site), cells)| {
+            outmux_clashes(p, &cells)
+                .into_iter()
+                .map(move |(l, u)| format!("X{x}Y{y}/{site} {}MUX: {u:?}", l as char))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 /// Every slice in a placed design whose cells ask two nets of one bypass
 /// pin, by site (`X{x}Y{y}/{site}`).
 pub fn check(p: &Packer) -> Vec<(String, Clash)> {

@@ -9,4 +9,5 @@ publish.workspace = true
 [dependencies]
 oxibit-pnr.workspace = true
 oxibit-policy.workspace = true
+oxibit-report.workspace = true
 serde_json.workspace = true
