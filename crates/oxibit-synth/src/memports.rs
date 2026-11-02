@@ -1,6 +1,13 @@
 //! Memories with port shapes the RAM mappers cannot take, reshaped before
 //! lowering (after `memdff`, so read-data flops are already in the ports).
 //!
+//! - **Merge.** Consecutive write ports on one clock merge into one port
+//!   when they write the same address (the later port wins each bit it
+//!   enables) or when SAT proves their enables are never on together
+//!   (`exclusive`, as yosys's `memory_share` does): address and data
+//!   then come from the second port when its enable is on. Only adjacent
+//!   ports merge, so the priority order between ports that stay separate
+//!   is unchanged.
 //! - **Split.** At most one write port and several read ports: one copy
 //!   per read port. Every copy sees the same writes from the same initial
 //!   contents, so at every cycle each holds the original's contents and
@@ -21,7 +28,9 @@
 //! equivalence check sees them, against a gold side whose memories are
 //! mapped to flops (`memory_map`).
 
-use oxibit_hdl::netlist::{Bit, Cell, MemRead, Memory, Module, Op, SigSpec};
+use oxibit_hdl::netlist::{Bit, Cell, MemRead, MemWrite, Memory, Module, Op, SigSpec};
+
+use crate::exclusive::{Exclusive, ExclusiveStats};
 use oxibit_prof::hot;
 
 /// Flop-mapped memories are capped at this many bits.
@@ -29,6 +38,9 @@ pub const FF_BITS: u64 = 4096;
 
 #[derive(Debug, Default, Clone)]
 pub struct MemPortsStats {
+    /// Write ports removed by merging, and the SAT calls behind them.
+    pub merged_ports: usize,
+    pub sat: ExclusiveStats,
     /// Memories split per read port, and the copies made.
     pub split: usize,
     pub copies: usize,
@@ -201,16 +213,137 @@ fn split(mem: &Memory) -> Vec<Memory> {
         .collect()
 }
 
+/// Groups of consecutive write ports that merge: same clock, and either
+/// the same address as every port so far in the group, or enables proven
+/// exclusive with the group's.
+fn plan_groups(ex: &mut Exclusive, mem: &Memory) -> Vec<Vec<usize>> {
+    let mut groups: Vec<Vec<usize>> = vec![vec![0]];
+    let mut shared_addr: Option<SigSpec> = Some(mem.writes[0].addr.clone());
+    for j in 1..mem.writes.len() {
+        let w = &mem.writes[j];
+        let g = groups.last().unwrap();
+        let mergeable = w.clk == mem.writes[g[0]].clk
+            && (shared_addr.as_ref() == Some(&w.addr) || {
+                let en: Vec<Bit> = g.iter().flat_map(|&i| mem.writes[i].en.0.iter().copied()).collect();
+                ex.exclusive(&en, &w.en.0)
+            });
+        if mergeable {
+            if shared_addr.as_ref() != Some(&w.addr) {
+                shared_addr = None;
+            }
+            groups.last_mut().unwrap().push(j);
+        } else {
+            groups.push(vec![j]);
+            shared_addr = Some(w.addr.clone());
+        }
+    }
+    groups
+}
+
+/// One write port standing for a planned group (see `plan_groups`).
+fn merge_group(m: &mut Module, out: &mut Vec<Cell>, mem: &Memory, g: &[usize]) -> MemWrite {
+    let mut cur = mem.writes[g[0]].clone();
+    let mut shared = true;
+    for &j in &g[1..] {
+        let w = &mem.writes[j];
+        let width = cur.data.width();
+        let en = binary(m, out, Op::Or, cur.en.clone(), w.en.clone(), width);
+        if shared && w.addr == cur.addr {
+            // same address: per bit, the later port's data where it writes
+            let mut data = Vec::with_capacity(width as usize);
+            let mut i = 0usize;
+            while i < width as usize {
+                let e = w.en.0[i];
+                let mut k = i + 1;
+                while k < width as usize && w.en.0[k] == e {
+                    k += 1;
+                }
+                let (lo, n) = (i as u32, (k - i) as u32);
+                let seg = match e {
+                    Bit::Zero => cur.data.slice(lo, n),
+                    Bit::One => w.data.slice(lo, n),
+                    _ => mux(m, out, cur.data.slice(lo, n), w.data.slice(lo, n), e),
+                };
+                data.extend(seg.0);
+                i = k;
+            }
+            cur = MemWrite {
+                clk: cur.clk,
+                addr: cur.addr,
+                data: SigSpec(data),
+                en,
+            };
+        } else {
+            // exclusive enables: the second port's address and data when it writes
+            shared = false;
+            let sel = if w.en.0.iter().all(|b| *b == w.en.0[0]) {
+                w.en.0[0]
+            } else {
+                let y = m.wire(1);
+                out.push(Cell::Unary {
+                    op: Op::ReduceOr,
+                    a: w.en.clone(),
+                    a_signed: false,
+                    y: y.clone(),
+                });
+                y.0[0]
+            };
+            let aw = cur.addr.width().max(w.addr.width());
+            let addr = mux(m, out, cur.addr.extend(aw, false), w.addr.extend(aw, false), sel);
+            let data = mux(m, out, cur.data.clone(), w.data.clone(), sel);
+            cur = MemWrite {
+                clk: cur.clk,
+                addr,
+                data,
+                en,
+            };
+        }
+    }
+    cur
+}
+
 #[hot]
 pub fn reshape(m: &mut Module) -> MemPortsStats {
     let mut st = MemPortsStats::default();
+    // Phase 1, read-only: which write ports merge.
+    let plans: Vec<Option<Vec<Vec<usize>>>> = {
+        let mut ex = Exclusive::new(m);
+        let plans = m
+            .cells
+            .iter()
+            .map(|c| match c {
+                Cell::Mem(mem) if mem.writes.len() > 1 => Some(plan_groups(&mut ex, mem)),
+                _ => None,
+            })
+            .collect();
+        st.sat = ex.stats;
+        plans
+    };
+    // Phase 2: rewrite.
     let cells = std::mem::take(&mut m.cells);
     let mut out = Vec::with_capacity(cells.len());
-    for cell in cells {
-        let Cell::Mem(mem) = &cell else {
+    for (ci, cell) in cells.into_iter().enumerate() {
+        let Cell::Mem(orig) = &cell else {
             out.push(cell);
             continue;
         };
+        let merged;
+        let mem = match &plans[ci] {
+            Some(groups) if groups.len() < orig.writes.len() => {
+                st.merged_ports += orig.writes.len() - groups.len();
+                let writes = groups.iter().map(|g| merge_group(m, &mut out, orig, g)).collect();
+                merged = Memory {
+                    writes,
+                    ..orig.clone()
+                };
+                &merged
+            }
+            _ => orig,
+        };
+        if mem.writes.len() <= 1 && mem.reads.len() <= 1 {
+            out.push(Cell::Mem(mem.clone()));
+            continue;
+        }
         if mem.writes.len() <= 1 && mem.reads.len() > 1 {
             let copies = split(mem);
             st.split += 1;
@@ -227,12 +360,12 @@ pub fn reshape(m: &mut Module) -> MemPortsStats {
                 }
                 Err(why) => {
                     st.left.push((mem.name.clone(), why));
-                    out.push(cell);
+                    out.push(Cell::Mem(mem.clone()));
                 }
             }
             continue;
         }
-        out.push(cell);
+        out.push(Cell::Mem(mem.clone()));
     }
     m.cells = out;
     st
@@ -255,6 +388,12 @@ impl crate::stage::Pass for MemPorts {
             "copies": s.copies,
             "flops": s.flops,
             "flop_bits": s.flop_bits,
+            "merged_ports": s.merged_ports,
+            "sat_calls": s.sat.calls,
+            "sat_proven": s.sat.proven,
+            "sat_refuted": s.sat.refuted,
+            "sat_unknown": s.sat.unknown,
+            "sat_cone_bits": s.sat.cone_bits,
             "left": s.left,
         })
     }
@@ -362,6 +501,51 @@ mod tests {
         };
         assert_eq!(init(qs[2]), Some(vec![Some(true), Some(false), Some(true)]));
         assert_eq!(init(qs[0]), None);
+    }
+
+    #[test]
+    fn exclusive_writers_merge_into_one_port() {
+        let mut m = Module::new("t");
+        let mut x = mem(&mut m, 32, 4, 2, 1, false);
+        // enables: state == 1 and state == 2
+        let state = m.wire(3);
+        for (k, w) in x.writes.iter_mut().enumerate() {
+            let y = m.wire(1);
+            m.cells.push(Cell::Binary {
+                op: Op::Eq,
+                a: state.clone(),
+                b: SigSpec::constant(k as u64 + 1, 3),
+                signed: false,
+                y: y.clone(),
+            });
+            w.en = SigSpec(vec![y.0[0]; 4]);
+        }
+        m.cells.push(Cell::Mem(x));
+        let st = reshape(&mut m);
+        assert_eq!((st.merged_ports, st.flops), (1, 0));
+        let mems: Vec<&Memory> = m.cells.iter().filter_map(|c| if let Cell::Mem(x) = c { Some(x) } else { None }).collect();
+        assert_eq!(mems.len(), 1);
+        assert_eq!(mems[0].writes.len(), 1);
+    }
+
+    #[test]
+    fn same_address_writers_merge() {
+        let mut m = Module::new("t");
+        let mut x = mem(&mut m, 32, 4, 2, 1, false);
+        x.writes[1].addr = x.writes[0].addr.clone();
+        m.cells.push(Cell::Mem(x));
+        let st = reshape(&mut m);
+        assert_eq!((st.merged_ports, st.flops, st.sat.calls), (1, 0, 0));
+    }
+
+    #[test]
+    fn independent_writers_stay_flops() {
+        let mut m = Module::new("t");
+        let x = mem(&mut m, 32, 4, 2, 1, false);
+        m.cells.push(Cell::Mem(x));
+        let st = reshape(&mut m);
+        assert_eq!((st.merged_ports, st.flops), (0, 1));
+        assert_eq!(st.sat.refuted, 1);
     }
 
     #[test]

@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 oxibit-hdl = { path = "../oxibit-hdl" }
+batsat = "0.6"
 serde_json.workspace = true
 oxibit-prof.workspace = true
 oxibit-report.workspace = true

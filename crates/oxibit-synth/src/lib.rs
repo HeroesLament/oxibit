@@ -20,6 +20,7 @@ pub mod bram;
 pub mod caps;
 pub mod dsp;
 pub mod emit;
+pub mod exclusive;
 pub mod ffmerge;
 pub mod iopad;
 pub mod lib_ports;
