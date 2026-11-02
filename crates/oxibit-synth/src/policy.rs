@@ -55,6 +55,7 @@ impl PostCheckEvidence {
 /// Optional passes. The core (lower, map, emit) always runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PassSet {
+    pub memports: bool,
     pub muxpack: bool,
     pub dsp: bool,
     pub balance: bool,
@@ -66,6 +67,7 @@ pub struct PassSet {
 
 impl PassSet {
     pub const ALL: PassSet = PassSet {
+        memports: true,
         muxpack: true,
         dsp: true,
         balance: true,

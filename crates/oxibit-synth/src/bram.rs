@@ -13,8 +13,8 @@
 //!   tied high, WRITE_MODE READ_FIRST on both ports (the read port is
 //!   non-transparent).
 //!
-//! Asynchronous-read memories up to 128 deep become distributed RAM
-//! (`lutram`).
+//! Asynchronous-read memories up to 512 deep become distributed RAM
+//! (`lutram`; banked RAM128X1D above 128).
 //!
 //! No depth cascading yet: a memory deeper than the deepest fitting shape
 //! stays a `$mem_v2`. Nothing here is checked by the equivalence oracle (the
@@ -251,10 +251,23 @@ pub fn map(m: &mut Module) -> BramStats {
     st
 }
 
-/// An asynchronous-read memory with at most one write port, up to 128
-/// deep, as distributed RAM (models: yosys's xilinx cells_sim.v):
-/// RAM32M (6 bits each: ports A/B/C read at the read address, port D
-/// carries the write address), RAM64M (3 bits each), RAM128X1D (1 bit).
+/// An asynchronous-read memory with at most one write port as distributed
+/// RAM (models: yosys's xilinx cells_sim.v): RAM32M (6 bits each: ports
+/// A/B/C read at the read address, port D carries the write address),
+/// RAM64M (3 bits each), RAM128X1D (1 bit). Deeper than 128, up to 512:
+/// two or four banks of RAM128X1D per bit, each bank's WE a LUT of the
+/// enable and the high write-address bits, the read a LUT mux of the
+/// banks' DPO on the high read-address bits.
+///
+/// Bits are grouped into lanes by write-enable bit (per-bit enables, as
+/// EHDL emits for a partial-word write); each lane gets its own columns
+/// with its enable on WE.
+///
+/// The RAM is sized by `size`, not by the address width: a read past
+/// `size` is X in `$mem_v2`, so its high address bits are ignored. A
+/// write past `size` must write nothing, so when the write address has
+/// bits above the word index (other than literal zeros) WE is gated by a
+/// NOR of them.
 fn lutram(m: &mut Module, mem: &Memory, mi: usize, st: &mut BramStats) -> Result<Vec<Cell>, &'static str> {
     if mem.writes.len() > 1 {
         return Err("write ports > 1");
@@ -263,89 +276,212 @@ fn lutram(m: &mut Module, mem: &Memory, mi: usize, st: &mut BramStats) -> Result
         return Err("nonzero offset");
     }
     let wr = mem.writes.first();
-    if let Some(w) = wr {
-        if w.en.0.iter().any(|b| *b != w.en.0[0]) {
-            return Err("per-bit write enables");
+    let rd = &mem.reads[0];
+    let need = (mem.size as usize).max(1).next_power_of_two();
+    let (ty, bits, abits, banks) = match need {
+        0..=32 => ("RAM32M", 6, 5, 1usize),
+        33..=64 => ("RAM64M", 3, 6, 1),
+        65..=128 => ("RAM128X1D", 1, 7, 1),
+        129..=256 => ("RAM128X1D", 1, 7, 2),
+        257..=512 => ("RAM128X1D", 1, 7, 4),
+        _ => return Err("asynchronous read deeper than 512"),
+    };
+    let bank_bits = banks.trailing_zeros() as usize;
+    // Address bits lo..lo+n, zero past the port's width.
+    let ext = |a: &SigSpec, lo: usize, n: usize| -> SigSpec {
+        SigSpec((lo..lo + n).map(|i| a.0.get(i).copied().unwrap_or(Bit::Zero)).collect())
+    };
+    let raddr = ext(&rd.addr, 0, abits);
+    let rsel = ext(&rd.addr, abits, bank_bits);
+    let waddr = wr.map(|w| ext(&w.addr, 0, abits)).unwrap_or(konst(0, abits));
+    let wsel = wr.map(|w| ext(&w.addr, abits, bank_bits)).unwrap_or(konst(0, bank_bits));
+    let (wclk, wpos) = wr.map(|w| w.clk.clone()).unwrap_or((konst(0, 1), true));
+    let width = mem.width as usize;
+    let mut cells = Vec::new();
+
+    // Write address bits above the word index: the write lands only when
+    // all are zero.
+    let span = abits + bank_bits;
+    let whigh: Vec<Bit> = wr
+        .map(|w| w.addr.0.iter().skip(span).copied().filter(|b| *b != Bit::Zero).collect())
+        .unwrap_or_default();
+    let w_ok: Option<Bit> = if whigh.is_empty() {
+        None
+    } else {
+        Some(nor_tree(m, &mut cells, &whigh, &format!("oxsyn_lutram{mi}_wok")))
+    };
+
+    // Lanes: bit indices sharing one write-enable bit, in first-seen order.
+    let mut lanes: Vec<(Bit, Vec<usize>)> = Vec::new();
+    for i in 0..width {
+        let en = wr.map(|w| w.en.0[i]).unwrap_or(Bit::Zero);
+        match lanes.iter_mut().find(|(e, _)| *e == en) {
+            Some((_, v)) => v.push(i),
+            None => lanes.push((en, vec![i])),
         }
     }
-    let rd = &mem.reads[0];
-    let aw = rd.addr.width().max(wr.map_or(0, |w| w.addr.width()));
-    let need = (mem.size as usize).max(1usize << aw.min(20));
-    let (ty, bits, abits) = match need {
-        0..=32 => ("RAM32M", 6, 5),
-        33..=64 => ("RAM64M", 3, 6),
-        65..=128 => ("RAM128X1D", 1, 7),
-        _ => return Err("asynchronous read deeper than 128"),
-    };
-    let ext = |a: &SigSpec| -> SigSpec {
-        let mut v: Vec<Bit> = a.0.iter().take(abits).copied().collect();
-        v.resize(abits, Bit::Zero);
-        SigSpec(v)
-    };
-    let raddr = ext(&rd.addr);
-    let waddr = wr.map(|w| ext(&w.addr)).unwrap_or(konst(0, abits));
-    let (wclk, wpos) = wr.map(|w| w.clk.clone()).unwrap_or((konst(0, 1), true));
-    let we = SigSpec(vec![wr.map(|w| w.en.0[0]).unwrap_or(Bit::Zero)]);
-    let width = mem.width as usize;
-    let wbit = |i: usize| -> Bit {
-        if i < width {
-            wr.map(|w| w.data.0[i]).unwrap_or(Bit::Zero)
-        } else {
-            Bit::Zero
+    let wbit = |i: Option<usize>| -> Bit {
+        match i {
+            Some(i) => wr.map(|w| w.data.0[i]).unwrap_or(Bit::Zero),
+            None => Bit::Zero,
         }
     };
-    let init_bit = |a: usize, i: usize| -> bool { i < width && mem.init.get(&(a as u32)).and_then(|w| w.get(i).copied().flatten()) == Some(true) };
-    let mut cells = Vec::new();
-    for t in 0..width.div_ceil(bits) {
-        let lo = t * bits;
-        let rbit = |i: usize, m: &mut Module| -> Bit { if i < width { rd.data.0[i] } else { m.wire(1).0[0] } };
-        let mut conns = BTreeMap::new();
-        let mut params = BTreeMap::new();
-        conns.insert("WCLK".to_string(), wclk.clone());
-        conns.insert("WE".to_string(), we.clone());
-        if !wpos {
-            params.insert("IS_WCLK_INVERTED".to_string(), Param::Bits(vec![Some(true)]));
-        }
-        match ty {
-            "RAM32M" | "RAM64M" => {
-                let per = bits / 3;
-                for (p, port) in ["A", "B", "C"].iter().enumerate() {
-                    let b0 = lo + p * per;
-                    conns.insert(format!("ADDR{port}"), raddr.clone());
-                    conns.insert(format!("DI{port}"), SigSpec((0..per).map(|k| wbit(b0 + k)).collect()));
-                    let o: Vec<Bit> = (0..per).map(|k| rbit(b0 + k, m)).collect();
-                    conns.insert(format!("DO{port}"), SigSpec(o));
-                    let init: Vec<Option<bool>> = (0..64).map(|i| Some(init_bit(i / per, b0 + i % per))).collect();
-                    params.insert(format!("INIT_{port}"), Param::Bits(init));
+    let init_bit = |a: usize, i: Option<usize>| -> bool {
+        i.is_some_and(|i| mem.init.get(&(a as u32)).and_then(|w| w.get(i).copied().flatten()) == Some(true))
+    };
+
+    let mut col = 0usize;
+    for (en, idxs) in &lanes {
+        // Per lane and bank, the write enable: the lane's enable when the
+        // high write-address bits select the bank.
+        let bank_we: Vec<SigSpec> = (0..banks)
+            .map(|b| {
+                if banks == 1 && w_ok.is_none() {
+                    return SigSpec(vec![*en]);
                 }
-                conns.insert("ADDRD".to_string(), waddr.clone());
-                conns.insert("DID".to_string(), konst(0, per));
-                conns.insert("DOD".to_string(), m.wire(per as u32));
-                params.insert("INIT_D".to_string(), Param::Bits(vec![Some(false); 64]));
-                if ty == "RAM32M" {
-                    st.ram32m += 1;
-                } else {
-                    st.ram64m += 1;
+                let o = m.wire(1);
+                // inputs: enable, [in range], bank select bits
+                let mut ins = vec![*en];
+                ins.extend(w_ok);
+                let sel_at = ins.len();
+                ins.extend(wsel.0.iter().copied());
+                let tt: Vec<Option<bool>> = (0..1usize << ins.len())
+                    .map(|p| Some(p & ((1 << sel_at) - 1) == (1 << sel_at) - 1 && (p >> sel_at) == b))
+                    .collect();
+                cells.push(lut_cell(format!("oxsyn_lutram{mi}_we{col}_{b}"), &ins, tt, o.0[0]));
+                o
+            })
+            .collect();
+        for chunk in idxs.chunks(bits) {
+            let at = |k: usize| chunk.get(k).copied();
+            let mut rbit = |k: usize, m: &mut Module| -> Bit {
+                match at(k) {
+                    Some(i) => rd.data.0[i],
+                    None => m.wire(1).0[0],
+                }
+            };
+            match ty {
+                "RAM32M" | "RAM64M" => {
+                    let mut conns = BTreeMap::new();
+                    let mut params = BTreeMap::new();
+                    conns.insert("WCLK".to_string(), wclk.clone());
+                    conns.insert("WE".to_string(), bank_we[0].clone());
+                    if !wpos {
+                        params.insert("IS_WCLK_INVERTED".to_string(), Param::Bits(vec![Some(true)]));
+                    }
+                    let per = bits / 3;
+                    for (p, port) in ["A", "B", "C"].iter().enumerate() {
+                        let k0 = p * per;
+                        conns.insert(format!("ADDR{port}"), raddr.clone());
+                        conns.insert(format!("DI{port}"), SigSpec((0..per).map(|k| wbit(at(k0 + k))).collect()));
+                        let o: Vec<Bit> = (0..per).map(|k| rbit(k0 + k, m)).collect();
+                        conns.insert(format!("DO{port}"), SigSpec(o));
+                        let init: Vec<Option<bool>> = (0..64).map(|i| Some(init_bit(i / per, at(k0 + i % per)))).collect();
+                        params.insert(format!("INIT_{port}"), Param::Bits(init));
+                    }
+                    conns.insert("ADDRD".to_string(), waddr.clone());
+                    conns.insert("DID".to_string(), konst(0, per));
+                    conns.insert("DOD".to_string(), m.wire(per as u32));
+                    params.insert("INIT_D".to_string(), Param::Bits(vec![Some(false); 64]));
+                    if ty == "RAM32M" {
+                        st.ram32m += 1;
+                    } else {
+                        st.ram64m += 1;
+                    }
+                    cells.push(Cell::Instance {
+                        ty: ty.into(),
+                        name: format!("oxsyn_lutram{mi}_{col}"),
+                        params,
+                        conns,
+                    });
+                }
+                _ => {
+                    // One bit, one RAM128X1D per bank, then the bank mux.
+                    let dpo: Vec<Bit> = (0..banks).map(|_| m.wire(1).0[0]).collect();
+                    for (b, we) in bank_we.iter().enumerate() {
+                        let mut conns = BTreeMap::new();
+                        let mut params = BTreeMap::new();
+                        conns.insert("WCLK".to_string(), wclk.clone());
+                        conns.insert("WE".to_string(), we.clone());
+                        if !wpos {
+                            params.insert("IS_WCLK_INVERTED".to_string(), Param::Bits(vec![Some(true)]));
+                        }
+                        conns.insert("A".to_string(), waddr.clone());
+                        conns.insert("DPRA".to_string(), raddr.clone());
+                        conns.insert("D".to_string(), SigSpec(vec![wbit(at(0))]));
+                        conns.insert("DPO".to_string(), SigSpec(vec![dpo[b]]));
+                        conns.insert("SPO".to_string(), m.wire(1));
+                        params.insert(
+                            "INIT".to_string(),
+                            Param::Bits((0..128).map(|a| Some(init_bit(b * 128 + a, at(0)))).collect()),
+                        );
+                        st.ram128x1d += 1;
+                        cells.push(Cell::Instance {
+                            ty: ty.into(),
+                            name: format!("oxsyn_lutram{mi}_{col}_{b}"),
+                            params,
+                            conns,
+                        });
+                    }
+                    let out = rbit(0, m);
+                    if banks == 1 {
+                        m.connects.push((SigSpec(vec![out]), SigSpec(vec![dpo[0]])));
+                    } else {
+                        // inputs: the banks' DPO, then the select bits
+                        let mut ins = dpo.clone();
+                        ins.extend(rsel.0.iter().copied());
+                        let tt: Vec<Option<bool>> = (0..1usize << ins.len())
+                            .map(|p| Some((p >> (p >> banks)) & 1 == 1))
+                            .collect();
+                        cells.push(lut_cell(format!("oxsyn_lutram{mi}_rd{col}"), &ins, tt, out));
+                    }
                 }
             }
-            _ => {
-                conns.insert("A".to_string(), waddr.clone());
-                conns.insert("DPRA".to_string(), raddr.clone());
-                conns.insert("D".to_string(), SigSpec(vec![wbit(lo)]));
-                conns.insert("DPO".to_string(), SigSpec(vec![rbit(lo, m)]));
-                conns.insert("SPO".to_string(), m.wire(1));
-                params.insert("INIT".to_string(), Param::Bits((0..128).map(|a| Some(init_bit(a, lo))).collect()));
-                st.ram128x1d += 1;
-            }
+            col += 1;
         }
-        cells.push(Cell::Instance {
-            ty: ty.into(),
-            name: format!("oxsyn_lutram{mi}_{t}"),
-            params,
-            conns,
-        });
     }
     Ok(cells)
+}
+
+/// One bit that is 1 when every bit of `v` is 0: NOR LUTs over groups of
+/// six, then AND LUTs over the group results until one is left.
+fn nor_tree(m: &mut Module, cells: &mut Vec<Cell>, v: &[Bit], name: &str) -> Bit {
+    let mut level: Vec<Bit> = Vec::new();
+    for (g, grp) in v.chunks(6).enumerate() {
+        let o = m.wire(1).0[0];
+        let tt = (0..1usize << grp.len()).map(|p| Some(p == 0)).collect();
+        cells.push(lut_cell(format!("{name}_n{g}"), grp, tt, o));
+        level.push(o);
+    }
+    let mut round = 0;
+    while level.len() > 1 {
+        let mut up = Vec::new();
+        for (g, grp) in level.chunks(6).enumerate() {
+            let o = m.wire(1).0[0];
+            let all = (1usize << grp.len()) - 1;
+            let tt = (0..1usize << grp.len()).map(|p| Some(p == all)).collect();
+            cells.push(lut_cell(format!("{name}_a{round}_{g}"), grp, tt, o));
+            up.push(o);
+        }
+        level = up;
+        round += 1;
+    }
+    level[0]
+}
+
+/// A LUTk instance (`k` = inputs) with an LSB-first truth table.
+fn lut_cell(name: String, ins: &[Bit], tt: Vec<Option<bool>>, o: Bit) -> Cell {
+    let mut conns = BTreeMap::new();
+    for (i, b) in ins.iter().enumerate() {
+        conns.insert(format!("I{i}"), SigSpec(vec![*b]));
+    }
+    conns.insert("O".to_string(), SigSpec(vec![o]));
+    Cell::Instance {
+        ty: format!("LUT{}", ins.len()),
+        name,
+        params: BTreeMap::from([("INIT".to_string(), Param::Bits(tt))]),
+        conns,
+    }
 }
 
 /// One column of `mem`: bits `t * width ..` of every word.
@@ -565,5 +701,109 @@ mod tests {
         assert_eq!(s.place(8), (None, Some(0)));
         assert_eq!(s.place(9), (Some(8), None));
         assert!(pick(1, 65536).is_none());
+    }
+}
+
+#[cfg(test)]
+mod pb_lutram_tests {
+    use super::*;
+    use oxibit_hdl::netlist::{MemRead, MemWrite};
+
+    fn amem(m: &mut Module, size: u32, aw: u32, en: Vec<Bit>) -> Memory {
+        let width = en.len() as u32;
+        let clk = m.wire(1);
+        Memory {
+            name: "m".into(),
+            width,
+            size,
+            offset: 0,
+            init: Default::default(),
+            attrs: Default::default(),
+            writes: vec![MemWrite {
+                clk: (clk, true),
+                addr: m.wire(aw),
+                data: m.wire(width),
+                en: SigSpec(en),
+            }],
+            reads: vec![MemRead {
+                clk: None,
+                addr: m.wire(aw),
+                data: m.wire(width),
+            }],
+        }
+    }
+
+    fn count(cells: &[Cell], ty: &str) -> usize {
+        cells.iter().filter(|c| matches!(c, Cell::Instance { ty: t, .. } if t == ty)).count()
+    }
+
+    #[test]
+    fn deep_async_read_is_banked() {
+        let mut m = Module::new("t");
+        let e = m.wire(1).0[0];
+        let x = amem(&mut m, 512, 9, vec![e, e]);
+        let mut st = BramStats::default();
+        let cells = lutram(&mut m, &x, 0, &mut st).unwrap();
+        // 2 bits x 4 banks; one WE decode per bank (one lane); one read mux per bit
+        assert_eq!(count(&cells, "RAM128X1D"), 8);
+        assert_eq!(count(&cells, "LUT3"), 4);
+        assert_eq!(count(&cells, "LUT6"), 2);
+    }
+
+    #[test]
+    fn eight_bit_address_on_128_words_is_one_bank_with_a_gate() {
+        let mut m = Module::new("t");
+        let e = m.wire(1).0[0];
+        let x = amem(&mut m, 128, 8, vec![e]);
+        let mut st = BramStats::default();
+        let cells = lutram(&mut m, &x, 0, &mut st).unwrap();
+        // sized by the 128 words; address bit 7 set means no write
+        assert_eq!(count(&cells, "RAM128X1D"), 1);
+        assert_eq!(count(&cells, "LUT1"), 1);
+        assert_eq!(count(&cells, "LUT2"), 1);
+        assert_eq!(count(&cells, "LUT3"), 0);
+    }
+
+    #[test]
+    fn per_bit_enables_get_their_own_columns() {
+        let mut m = Module::new("t");
+        let (e0, e1) = (m.wire(1).0[0], m.wire(1).0[0]);
+        let x = amem(&mut m, 32, 5, vec![e0, e0, e1, e1]);
+        let mut st = BramStats::default();
+        let cells = lutram(&mut m, &x, 0, &mut st).unwrap();
+        let wes: Vec<SigSpec> = cells
+            .iter()
+            .filter_map(|c| match c {
+                Cell::Instance { ty, conns, .. } if ty == "RAM32M" => Some(conns["WE"].clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(wes, vec![SigSpec(vec![e0]), SigSpec(vec![e1])]);
+    }
+
+    #[test]
+    fn wide_write_address_gates_we() {
+        let mut m = Module::new("t");
+        let e = m.wire(1).0[0];
+        // 64 words, 16-bit address ports: bits 6..15 must be zero to write
+        let x = amem(&mut m, 64, 16, vec![e, e, e]);
+        let mut st = BramStats::default();
+        let cells = lutram(&mut m, &x, 0, &mut st).unwrap();
+        assert_eq!(count(&cells, "RAM64M"), 1);
+        // NOR of 10 bits: two NOR LUTs (6 + 4), one AND, then en & ok
+        assert_eq!(count(&cells, "LUT6"), 1);
+        assert_eq!(count(&cells, "LUT4"), 1);
+        assert_eq!(count(&cells, "LUT2"), 2);
+    }
+
+    #[test]
+    fn bank_mux_truth_table() {
+        // inputs d0..d3, s0, s1: out = d[s]
+        let tt: Vec<bool> = (0..64usize).map(|p| (p >> (p >> 4)) & 1 == 1).collect();
+        for p in 0..64usize {
+            let sel = p >> 4;
+            assert_eq!(tt[p], (p >> sel) & 1 == 1);
+            assert_eq!(tt[p], [p & 1, (p >> 1) & 1, (p >> 2) & 1, (p >> 3) & 1][sel] == 1);
+        }
     }
 }

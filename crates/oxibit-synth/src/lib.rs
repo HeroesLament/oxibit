@@ -26,6 +26,7 @@ pub mod lib_ports;
 pub mod lower;
 pub mod map;
 pub mod memdff;
+pub mod memports;
 pub mod muxchain;
 pub mod policy;
 pub mod srl;
@@ -59,6 +60,7 @@ pub struct Report {
     pub iopad: iopad::IoPadStats,
     pub balance: balance::BalanceStats,
     pub muxpack: muxchain::MuxChainStats,
+    pub memports: memports::MemPortsStats,
     /// Every optional pass: ran, disabled or refused, with its evidence.
     pub passes: Vec<PassRecord>,
     pub lower_ms: u64,
@@ -101,6 +103,7 @@ pub fn synth(m: &Module, dirs: &lib_ports::PrimPorts, caps: &DeviceCaps, policy:
     rep.emit(phase("prepare", true));
     let mut rtl = Rtl::new(m.clone());
     let mem_rd_ff = flow.rtl(&memdff::MemDff, &mut rtl);
+    let memp = flow.rtl(&memports::MemPorts, &mut rtl);
     let mc = flow.rtl(&muxchain::MuxPack, &mut rtl);
     let ds = flow.rtl(
         &dsp::Dsp {
@@ -191,6 +194,7 @@ pub fn synth(m: &Module, dirs: &lib_ports::PrimPorts, caps: &DeviceCaps, policy:
         iopad: io,
         balance: bal,
         muxpack: mc,
+        memports: memp,
         passes: flow.records,
         lower_ms: (t1 - t0).as_millis() as u64,
         map_ms: (t2 - t1).as_millis() as u64,
