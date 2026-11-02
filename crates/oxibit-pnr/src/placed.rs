@@ -285,10 +285,42 @@ pub struct LutSlot {
     pub from: Vec<u8>,
 }
 
+/// A cell of the placed design, as timing needs it.
+#[derive(Debug, Clone, Default)]
+pub struct CellInfo {
+    pub name: String,
+    pub ty: String,
+    pub tile: String,
+    /// The site as nextpnr names it, tile-relative (`SLICE_X0Y0`).
+    pub site: String,
+    /// The bel (`A6LUT`, `AFF`, `CARRY4`); empty when no routed net
+    /// touches the cell.
+    pub bel: String,
+}
+
+/// One sink of a routed net's logical net: the cell, its bel pin, and the
+/// routing nodes any one of which completes it (a LUT input's whole pin
+/// group). `internal`: reached inside the driver's site, no routing.
+#[derive(Debug, Clone)]
+pub struct SinkPin {
+    pub cell: usize,
+    pub port: String,
+    pub nodes: Vec<u32>,
+    pub internal: bool,
+}
+
 /// Result of `import`.
 #[derive(Debug, Default)]
 pub struct Import {
     pub nets: Vec<Net>,
+    /// Every cell of the placed design, by index.
+    pub cells: Vec<CellInfo>,
+    /// Per routed net: the driver's (cell, bel pin).
+    pub driver_pins: Vec<(usize, String)>,
+    /// Per routed net: every sink of its logical net (a net split by exit
+    /// lists them all under each part; a sink belongs to the part whose
+    /// tree reaches one of its nodes, or to every part when internal).
+    pub sink_pins: Vec<Vec<SinkPin>>,
     /// Logical net name of each routed net.
     pub names: Vec<String>,
     /// The JSON net bit of each routed net.
@@ -480,6 +512,11 @@ pub fn import(g: &Graph, sites: &HashMap<String, (String, String)>, meta: &mut M
         let ci = cells.len();
         cells.push(Cell { attrs: attrs.clone() });
         cell_names.push(name.clone());
+        imp.cells.push(CellInfo {
+            name: name.clone(),
+            ty: ty.clone(),
+            ..CellInfo::default()
+        });
         let conns = c["connections"].as_object().cloned().unwrap_or_default();
         let dirs = c["port_directions"].as_object().cloned().unwrap_or_default();
         let bits = |p: &str| -> Vec<i64> { conns.get(p).and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_i64).collect() };
@@ -549,6 +586,11 @@ pub fn import(g: &Graph, sites: &HashMap<String, (String, String)>, meta: &mut M
                 missing_pins.extend(bs.iter().map(|&b| (b, format!("{primary}.{var}.{bel}.{p}"))));
                 continue;
             };
+            if imp.cells[ci].bel.is_empty() {
+                imp.cells[ci].tile = tile.clone();
+                imp.cells[ci].site = np_site.clone();
+                imp.cells[ci].bel = bel.clone();
+            }
             for b in bs {
                 let pin = Pin { tile: tile.clone(), site: site.clone(), np_site: np_site.clone(), var: key.clone(), bel: bel.clone(), port: p.clone(), wire: wire.clone(), cell: ci };
                 match d.as_str() {
@@ -723,10 +765,17 @@ pub fn import(g: &Graph, sites: &HashMap<String, (String, String)>, meta: &mut M
         let mut fixed: Vec<(String, u32)> = Vec::new(); // (exit kind, node)
         let mut groups: HashMap<(String, String, char), LutGroup> = HashMap::new();
         let mut paths: Vec<(u32, SinkPath)> = Vec::new();
+        let mut pins_here: Vec<SinkPin> = Vec::new();
         for s in &sinks[&b] {
             let sv = &variants[&s.var];
             if internal(s, drv) {
                 imp.internal_sinks += 1;
+                pins_here.push(SinkPin {
+                    cell: s.cell,
+                    port: s.port.clone(),
+                    nodes: Vec::new(),
+                    internal: true,
+                });
                 if let Some(w) = site_path(&drv.wire, &s.wire, &sv.fwd) {
                     note_muxes(&mut imp.site_muxes, &mut imp.unresolved, &s.tile, &s.site, sv, &w);
                 }
@@ -749,6 +798,14 @@ pub fn import(g: &Graph, sites: &HashMap<String, (String, String)>, meta: &mut M
                             paths.push((n, SinkPath { tile: s.tile.clone(), np_site: s.np_site.clone(), tile_wire: tw, site_wires: vec![s.wire.clone()] }));
                         }
                     }
+                    pins_here.push(SinkPin {
+                        cell: s.cell,
+                        port: s.port.clone(),
+                        nodes: (1..=top)
+                            .filter_map(|j| g.site_pin(&s.tile, &s.site, &format!("{letter}{j}")))
+                            .collect(),
+                        internal: false,
+                    });
                     let grp = match groups.entry((s.tile.clone(), s.site.clone(), letter)) {
                         Entry::Occupied(e) => e.into_mut(),
                         Entry::Vacant(e) => {
@@ -799,6 +856,12 @@ pub fn import(g: &Graph, sites: &HashMap<String, (String, String)>, meta: &mut M
             }
             let kind = if pin == "CIN" { "COUT" } else { "general" };
             fixed.push((kind.into(), n));
+            pins_here.push(SinkPin {
+                cell: s.cell,
+                port: s.port.clone(),
+                nodes: vec![n],
+                internal: false,
+            });
             imp.fixed_sinks += 1;
             // An OLOGIC register is the OSERDES in DDR mode: its clock enters
             // twice, CLK and CLKB (IOI_OCLK and IOI_OCLKM), both from the same
@@ -868,6 +931,8 @@ pub fn import(g: &Graph, sites: &HashMap<String, (String, String)>, meta: &mut M
             imp.bits.push(b);
             imp.sources.push(source);
             imp.sink_paths.push(paths.clone());
+            imp.driver_pins.push((drv.cell, drv.port.clone()));
+            imp.sink_pins.push(pins_here.clone());
             imp.group_slots.push(slots);
         }
     }
@@ -1323,6 +1388,9 @@ mod tests {
         let fasm = "T.SLICEL_X0.BFFMUX.O6\nT.SLICEL_X0.CARRY4.ACY0\nT.SLICEL_X0.CARRY4.BCY0\nT.SLICEL_X0.SRUSEDMUX\nT.SLICEL_X0.AFFMUX.XOR\nT.SLICEL_X1.BFFMUX.O6\n";
         let (out, st) = apply_site_muxes(fasm, &imp);
         assert_eq!((st.set, st.written, st.dropped), (2, 1, 2));
-        assert_eq!(out, "T.SLICEL_X0.CARRY4.BCY0\nT.SLICEL_X0.SRUSEDMUX\nT.SLICEL_X0.AFFMUX.XOR\nT.SLICEL_X1.BFFMUX.O6\nT.SLICEL_X0.BFFMUX.BX\n");
+        assert_eq!(
+            out,
+            "T.SLICEL_X0.CARRY4.BCY0\nT.SLICEL_X0.SRUSEDMUX\nT.SLICEL_X0.AFFMUX.XOR\nT.SLICEL_X1.BFFMUX.O6\nT.SLICEL_X0.BFFMUX.BX\n"
+        );
     }
 }

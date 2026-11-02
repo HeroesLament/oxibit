@@ -454,6 +454,12 @@ dependencies = [
 [[package]]
 name = "oxibit-sta"
 version = "0.1.0"
+dependencies = [
+ "oxibit-fasm",
+ "oxibit-pnr",
+ "oxibit-report",
+ "serde_json",
+]
 
 [[package]]
 name = "oxibit-synth"
