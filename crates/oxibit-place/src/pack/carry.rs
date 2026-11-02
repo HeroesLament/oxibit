@@ -23,6 +23,7 @@ use super::constants::prop32;
 use super::{Offset, Packer, Rule, slot};
 use crate::netlist::{CellId, Dir, NetId};
 use crate::policy::CarryDi;
+use crate::slice::{BypassPins, XUse};
 
 fn create(p: &mut Packer, ty: &str, name: &str) -> CellId {
     let c = p.nl.add_cell(name, ty);
@@ -200,11 +201,14 @@ pub fn pack_carries(p: &mut Packer, di: CarryDi) {
     for g in &groups {
         chains += 1;
         let mut c4s: Vec<CellId> = Vec::new();
+        // The current CARRY4's slice: who holds each letter's bypass pin.
+        let mut xpins = BypassPins::default();
         for i in 0..g.muxcys.len() {
             let z = (i % 4) as i32;
             let (muxcy, xorcy) = (g.muxcys[i], g.xorcys[i]);
             let dy = -((i / 4 + i / (4 * 25)) as i32);
             if z == 0 {
+                xpins = BypassPins::default();
                 let name = format!("{}$PACKED_CARRY4$", p.nl.cell(muxcy).name);
                 let c4 = create(p, "CARRY4", &name);
                 if i == 0 {
@@ -280,15 +284,21 @@ pub fn pack_carries(p: &mut Packer, di: CarryDi) {
             };
             let anchor = (s_all.len() <= 5).then(|| s_all.iter().copied().find(|&n| !p.nl.is_const(n))).flatten();
             let di_const = di_net.filter(|&n| di_lut.is_none() && anchor.is_some() && p.nl.is_const(n)).map(|n| n == p.nl.vcc);
-            // CYINIT enters on the bottom letter's AX: a live one holds the
-            // pin DI[0] would come in on.
-            let x_held = i == 0 && p.nl.cell(c4).net("CYINIT").is_some_and(|n| !p.nl.is_const(n));
-            let di_live = di_net.is_some_and(|n| !p.nl.is_const(n));
-            if bypass && x_held && di_live {
+            // A live CYINIT holds the bottom letter's AX.
+            if i == 0
+                && let Some(n) = p.nl.cell(c4).net("CYINIT").filter(|&n| !p.nl.is_const(n))
+            {
+                let fresh = xpins.claim(0, XUse::CyInit, n);
+                debug_assert!(fresh.is_ok(), "CYINIT is the first claim on its slice");
+            }
+            // DI may use the letter's bypass pin only if no one else holds it.
+            let di_live = di_net.filter(|&n| !p.nl.is_const(n));
+            let x_free = di_live.is_some_and(|n| xpins.free_for(z as u8, n));
+            if bypass && di_live.is_some() && !x_free {
                 cyinit_held += 1;
             }
             let mut di_bypass = false;
-            if bypass && !x_held && di_live {
+            if bypass && x_free {
                 let ins = |p: &Packer, l: CellId| -> BTreeSet<NetId> { (0..6).filter_map(|j| p.nl.cell(l).net(&format!("I{j}"))).collect() };
                 let s_ins = s_lut.map(|l| ins(p, l)).unwrap_or_default();
                 // S: its own LUT (any width) or a feed on the S net.
@@ -330,6 +340,10 @@ pub fn pack_carries(p: &mut Packer, di: CarryDi) {
                 di_lut = Some(l);
                 const_luts += 1;
             } else if di_bypass {
+                if let Some(n) = di_live {
+                    let took = xpins.claim(z as u8, XUse::CarryDi, n);
+                    debug_assert!(took.is_ok(), "checked free above");
+                }
                 bypassed += 1;
             } else if di_lut.is_none()
                 && let Some(n) = di_net

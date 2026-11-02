@@ -22,6 +22,8 @@ fn read(path: &str) -> Result<Value, String> {
 ///   OXIBIT_LUT5_FILL    none, or a comma list of chain, ff_letter, pairs
 ///   OXIBIT_PACK_FOLD    0 | 1
 ///   OXIBIT_FILL_BYPASS  flops on bypass pins per slice, 1..4
+///   OXIBIT_PLACE_PIN_CAP / _PIN_WEIGHT  input pins per CLB tile over which each costs WEIGHT
+///   OXIBIT_PLACE_BYP_CAP / _BYP_WEIGHT  the same for bypass pins (8 per tile)
 fn pack_policy() -> Result<PackPolicy, String> {
     let var = |k: &str| std::env::var(k).ok();
     let mut pol = match var("OXIBIT_PACK_POLICY").as_deref() {
@@ -52,6 +54,19 @@ fn pack_policy() -> Result<PackPolicy, String> {
     }
     if let Some(v) = var("OXIBIT_FILL_BYPASS") {
         pol.bypass_ffs_per_slice = v.parse().map_err(|_| format!("OXIBIT_FILL_BYPASS={v}: expected 1..4"))?;
+    }
+    let num = |k: &str| -> Result<Option<f64>, String> { var(k).map(|v| v.parse::<f64>().map_err(|_| format!("{k}={v}: expected a number"))).transpose() };
+    if let Some(c) = num("OXIBIT_PLACE_PIN_CAP")? {
+        pol.objective.pins.cap = c as u32;
+    }
+    if let Some(w) = num("OXIBIT_PLACE_PIN_WEIGHT")? {
+        pol.objective.pins.weight = w;
+    }
+    if let Some(c) = num("OXIBIT_PLACE_BYP_CAP")? {
+        pol.objective.bypass.cap = c as u32;
+    }
+    if let Some(w) = num("OXIBIT_PLACE_BYP_WEIGHT")? {
+        pol.objective.bypass.weight = w;
     }
     Ok(pol)
 }
@@ -111,23 +126,28 @@ fn run() -> Result<bool, String> {
         if let Some(m) = std::env::var("OXIBIT_PLACE_POLISH").ok().and_then(|v| v.parse().ok()) {
             opts.polish = m;
         }
-        if let Some(m) = std::env::var("OXIBIT_PLACE_PIN_CAP").ok().and_then(|v| v.parse().ok()) {
-            opts.tile_pin_cap = m;
-        }
-        if let Some(m) = std::env::var("OXIBIT_PLACE_PIN_WEIGHT").ok().and_then(|v| v.parse().ok()) {
-            opts.pin_weight = m;
-        }
+        opts.pins = plan.objective().pins;
+        opts.bypass = plan.objective().bypass;
         let ps = oxibit_place::placer::place(&mut p, &dev, &sites, macros, &opts)?;
         println!("{}", json!({"hpwl_measured": oxibit_place::placer::hpwl(&p, 200)}));
         let lg = place::legalise(&mut p, &place::ps7_inputs(std::path::Path::new(meta))?);
         let unplaced: Vec<String> = p.nl.cell_ids().into_iter().filter(|&c| p.nl.cell(c).bel.is_none()).map(|c| p.nl.cell(c).name.clone()).collect();
-        ok = unplaced.is_empty() && lg.over_five.is_empty();
+        let clashes = oxibit_place::slice::check(&p);
+        ok = unplaced.is_empty() && lg.over_five.is_empty() && clashes.is_empty();
+        let shown: Vec<String> = clashes
+            .iter()
+            .take(6)
+            .map(|(s, c)| format!("{s} {}X: {:?} holds, {:?} wanted", (b'A' + c.letter) as char, c.held.by, c.wanted.by))
+            .collect();
+        println!("{}", json!({"bypass_check": {"clashes": clashes.len(), "examples": shown}}));
         println!(
             "{}",
             json!({"placer": {"objects": ps.objects, "chains": ps.chains_placed, "hpwl_start": ps.hpwl_start, "hpwl_end": ps.hpwl_end,
                               "moves": ps.moves, "accepted": ps.accepted, "seconds": ps.seconds,
-                              "pins": {"cap": opts.tile_pin_cap, "weight": opts.pin_weight, "excess_start": ps.pin_excess_start, "excess_end": ps.pin_excess_end,
+                              "pins": {"cap": opts.pins.cap, "weight": opts.pins.weight, "excess_start": ps.pin_excess_start, "excess_end": ps.pin_excess_end,
                                        "tiles_over_cap": ps.tiles_over_cap, "tile_max": ps.tile_pins_max, "bypass_ffs_per_slice": fopts.bypass_ffs_per_slice},
+                              "bypass": {"cap": opts.bypass.cap, "weight": opts.bypass.weight, "excess_start": ps.bypass_excess_start, "excess_end": ps.bypass_excess_end,
+                                         "tiles_over_cap": ps.bypass_tiles_over_cap, "tile_max": ps.bypass_tile_max, "fill_clashes": ps.bypass_clashes},
                               "steps": ps.trace.len(), "trace": ps.trace.iter().step_by((ps.trace.len() / 25).max(1)).map(|t| json!([(t.0 * 100.0).round() / 100.0, t.1.round(), (t.2 * 1000.0).round() / 1000.0, t.3])).collect::<Vec<_>>(), "unplaced": unplaced.len(),
                               "unplaced_examples": unplaced.iter().take(6).collect::<Vec<_>>(), "fractured": lg.fractured, "over_five": lg.over_five.len()}})
         );

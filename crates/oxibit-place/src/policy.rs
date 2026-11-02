@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 pub use oxibit_policy::{Caps, Level, Outcome, PassRecord, Status};
 use serde_json::{Value, json};
 
-use crate::placer::FillOptions;
+use crate::placer::{FillOptions, PinCost};
 
 /// A slice configuration packing can produce.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -111,7 +111,7 @@ impl Lut5Fill {
     };
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PackPolicy {
     /// Every mode a strategy produces must be at least this well established.
     pub floor: Level,
@@ -122,6 +122,26 @@ pub struct PackPolicy {
     pub fold: bool,
     /// See `FillOptions::bypass_ffs_per_slice`.
     pub bypass_ffs_per_slice: usize,
+    /// What the annealer pays for besides wirelength.
+    pub objective: PlaceObjective,
+}
+
+/// Placement cost terms beside wirelength. They change where cells go,
+/// never what a slice holds, so they need no capability level.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PlaceObjective {
+    /// All input pins per CLB tile (56).
+    pub pins: PinCost,
+    /// Bypass pins per CLB tile (AX..DX of both slices, 8).
+    pub bypass: PinCost,
+}
+
+impl PlaceObjective {
+    /// Wirelength only.
+    pub const WIRELENGTH: PlaceObjective = PlaceObjective {
+        pins: PinCost::OFF_PINS,
+        bypass: PinCost::OFF_BYPASS,
+    };
 }
 
 impl PackPolicy {
@@ -133,6 +153,7 @@ impl PackPolicy {
             lut5: Lut5Fill::ALL,
             fold: true,
             bypass_ffs_per_slice: FillOptions::default().bypass_ffs_per_slice,
+            objective: PlaceObjective::WIRELENGTH,
         }
     }
 
@@ -193,6 +214,7 @@ impl PackPolicy {
                 bypass_ffs_per_slice: self.bypass_ffs_per_slice,
                 lut5,
             },
+            objective: self.objective,
             records,
         })
     }
@@ -210,6 +232,7 @@ pub struct PackPlan {
     carry_di: CarryDi,
     fold: bool,
     fill: FillOptions,
+    objective: PlaceObjective,
     records: Vec<PassRecord>,
 }
 
@@ -223,13 +246,18 @@ impl PackPlan {
     pub fn fill(&self) -> &FillOptions {
         &self.fill
     }
+    pub fn objective(&self) -> PlaceObjective {
+        self.objective
+    }
     pub fn records(&self) -> &[PassRecord] {
         &self.records
     }
     pub fn json(&self) -> Value {
         let by_name: BTreeMap<&str, Value> = self.records.iter().map(|r| (r.name, r.json())).collect();
         json!({"carry_di": format!("{:?}", self.carry_di), "fold": self.fold,
-               "bypass_ffs_per_slice": self.fill.bypass_ffs_per_slice, "strategies": by_name})
+               "bypass_ffs_per_slice": self.fill.bypass_ffs_per_slice, "strategies": by_name,
+               "objective": {"pins": [self.objective.pins.cap, self.objective.pins.weight],
+                             "bypass": [self.objective.bypass.cap, self.objective.bypass.weight]}})
     }
 }
 

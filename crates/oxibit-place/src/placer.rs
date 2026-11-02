@@ -12,7 +12,8 @@
 //! 2. Placement: chains into free column runs first, then every single-slice
 //!    content and hard block (DSP, block RAM) by simulated annealing on
 //!    half-perimeter wirelength, moves within a shrinking window, plus a
-//!    cost on each CLB tile's input pins over `Options::tile_pin_cap`.
+//!    cost on each CLB tile's input pins over `Options::pins` and on its
+//!    bypass pins over `Options::bypass`.
 //! 3. Bels written to the netlist (`Cell::bel`), ready for `place::legalise`.
 //!
 //!    A lone LUT (no flop of its own) shares a letter with another LUT when
@@ -895,12 +896,19 @@ pub struct PlaceStats {
     pub seconds: f64,
     /// (temperature, window, acceptance rate, cost) per outer step.
     pub trace: Vec<(f64, f64, f64, f64)>,
-    /// Input pins over `tile_pin_cap`, summed over CLB tiles, before and
+    /// Input pins over `Options::pins`, summed over CLB tiles, before and
     /// after; tiles over the cap after; the fullest tile after.
     pub pin_excess_start: u64,
     pub pin_excess_end: u64,
     pub tiles_over_cap: usize,
     pub tile_pins_max: u32,
+    /// The same for bypass pins (`Options::bypass`).
+    pub bypass_excess_start: u64,
+    pub bypass_excess_end: u64,
+    pub bypass_tiles_over_cap: usize,
+    pub bypass_tile_max: u32,
+    /// Fills that ask two nets of one bypass pin (a packing bug if not 0).
+    pub bypass_clashes: usize,
 }
 
 /// A small, fast, seeded PRNG (xorshift64*).
@@ -939,19 +947,83 @@ pub struct Options {
     pub unit_window: f64,
     /// Temperature steps of greedy unit moves after the anneal.
     pub polish: usize,
-    /// Input pins (LUT inputs and bypass pins, of 56) a CLB tile may use
-    /// before each further pin costs `pin_weight`.
-    pub tile_pin_cap: u32,
-    /// Cost of one input pin over `tile_pin_cap`, in tiles of wirelength.
-    /// Off by default: on the PHY (cap 48, weight 4) it cleared every tile
-    /// over 48 but moved the pins into the neighbours, the 3x5-tile peak
-    /// rose (695 to 704 of 840) and the route did worse.
-    pub pin_weight: f64,
+    /// Input pins (LUT inputs and bypass pins, of 56) per CLB tile. Off by
+    /// default: on the PHY (cap 48, weight 4) it cleared every tile over 48
+    /// but moved the pins into the neighbours, the 3x5-tile peak rose (695
+    /// to 704 of 840) and the route did worse.
+    pub pins: PinCost,
+    /// Bypass pins (AX..DX of both slices, 8) per CLB tile: the pin class
+    /// the router's plateau is made of (BYP, BYP_ALT, BYP_BOUNCE).
+    pub bypass: PinCost,
+}
+
+/// One class of a tile's input pins: each pin over `cap` costs `weight`
+/// tiles of wirelength; `weight` 0 is off.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PinCost {
+    pub cap: u32,
+    pub weight: f64,
+}
+
+impl PinCost {
+    pub const OFF_PINS: PinCost = PinCost { cap: 48, weight: 0.0 };
+    pub const OFF_BYPASS: PinCost = PinCost { cap: 8, weight: 0.0 };
+
+    pub fn excess(&self, load: u32) -> u32 {
+        load.saturating_sub(self.cap)
+    }
+
+    pub fn on(&self) -> bool {
+        self.weight != 0.0
+    }
+}
+
+/// A slice's or tile's input pins: all of them, and the bypass pins among them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Load {
+    all: u32,
+    x: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Delta {
+    all: i64,
+    x: i64,
+}
+
+impl std::ops::Add for Load {
+    type Output = Load;
+    fn add(self, o: Load) -> Load {
+        Load { all: self.all + o.all, x: self.x + o.x }
+    }
+}
+
+impl Load {
+    fn delta(new: Load, old: Load) -> Delta {
+        Delta { all: i64::from(new.all) - i64::from(old.all), x: i64::from(new.x) - i64::from(old.x) }
+    }
+
+    fn apply(self, d: Delta) -> Load {
+        Load { all: (i64::from(self.all) + d.all).max(0) as u32, x: (i64::from(self.x) + d.x).max(0) as u32 }
+    }
+}
+
+impl From<Load> for Delta {
+    fn from(l: Load) -> Delta {
+        Delta { all: l.all.into(), x: l.x.into() }
+    }
+}
+
+impl std::ops::Neg for Delta {
+    type Output = Delta;
+    fn neg(self) -> Delta {
+        Delta { all: -self.all, x: -self.x }
+    }
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { seed: 1, inner: 20, max_fanout: 200, max_moves_per_obj: 3000, t0_scale: 24.0, unit_frac: 0.5, unit_window: 4.0, polish: 0, tile_pin_cap: 48, pin_weight: 0.0 }
+        Options { seed: 1, inner: 20, max_fanout: 200, max_moves_per_obj: 3000, t0_scale: 24.0, unit_frac: 0.5, unit_window: 4.0, polish: 0, pins: PinCost::OFF_PINS, bypass: PinCost::OFF_BYPASS }
     }
 }
 
@@ -1176,7 +1248,7 @@ pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, op
         .iter()
         .map(|&c| if p.nl.cell(c).ty == "SLICE_LUTX" { (1..=6).filter(|i| live(c, &format!("A{i}"))).count() as u32 } else { 0 })
         .collect();
-    let logic_pins = |lt: &[[u32; 4]; 4]| -> u32 {
+    let logic_pins = |lt: &[[u32; 4]; 4]| -> Load {
         lt.iter()
             .map(|&[lut, ff, ff2, l5]| {
                 // two LUTs on one letter share A1..A5
@@ -1186,62 +1258,28 @@ pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, op
                     (false, true) => lut_pins[l5 as usize],
                     (false, false) => 0,
                 };
-                luts + u32::from(ff != NONE && !fed_by(lut, ff)) + u32::from(ff2 != NONE)
+                // One bypass pin per letter: the flop's D from outside, or the
+                // 5FF's. The fill puts a 5FF only beside a LUT-fed flop and
+                // unit moves keep that, so the two never meet.
+                let x = u32::from(ff != NONE && !fed_by(lut, ff)) + u32::from(ff2 != NONE);
+                debug_assert!(x <= 1, "two bypass users on one letter");
+                Load { all: luts + x, x }
             })
-            .sum()
+            .fold(Load::default(), |a, b| a + b)
     };
-    let fill_pins = |f: &Fill| -> u32 {
-        let members: HashMap<CellId, u8> = f.cells.iter().map(|(c, b)| (*c, b.as_bytes()[0])).collect();
-        // A net driven inside the slice: by a LUT of letter `l`, or by a
-        // carry or wide mux (any letter).
-        let inside = |n: NetId, l: u8| match p.nl.driver(n) {
-            Some((d, _)) => match members.get(&d) {
-                Some(&dl) => p.nl.cell(d).ty != "SLICE_LUTX" || dl == l,
-                None => false,
-            },
-            None => false,
-        };
-        let mut pins: BTreeSet<(u8, String)> = BTreeSet::new();
+    let fill_pins = |f: &Fill| -> Load {
+        let mut pins: BTreeSet<(u8, &str)> = BTreeSet::new();
         for (c, b) in &f.cells {
-            let l = b.as_bytes()[0];
-            let cell = p.nl.cell(*c);
-            match cell.ty.as_str() {
-                "SLICE_LUTX" => {
-                    for port in ["A1", "A2", "A3", "A4", "A5", "A6", "DI2", "WA7", "WA8"] {
-                        if live(*c, port) {
-                            pins.insert((l, port.into()));
-                        }
-                    }
-                    if live(*c, "DI1") {
-                        pins.insert((l, "X".into()));
+            if p.nl.cell(*c).ty == "SLICE_LUTX" {
+                for port in ["A1", "A2", "A3", "A4", "A5", "A6", "DI2", "WA7", "WA8"] {
+                    if live(*c, port) {
+                        pins.insert((b.as_bytes()[0], port));
                     }
                 }
-                "SLICE_FFX" => {
-                    if let Some(d) = cell.net("D")
-                        && !p.nl.is_const(d)
-                        && !inside(d, l)
-                    {
-                        pins.insert((l, "X".into()));
-                    }
-                }
-                "CARRY4" => {
-                    if live(*c, "CYINIT") {
-                        pins.insert((b'A', "X".into()));
-                    }
-                    for i in 0..4u8 {
-                        let li = b'A' + i;
-                        if let Some(d) = cell.net(&format!("DI{i}"))
-                            && !p.nl.is_const(d)
-                            && !inside(d, li)
-                        {
-                            pins.insert((li, "X".into()));
-                        }
-                    }
-                }
-                _ => {}
             }
         }
-        pins.len() as u32
+        let x = crate::slice::bypass_claims(p, &f.cells).0.used();
+        Load { all: pins.len() as u32 + x, x }
     };
     let mut tile_ids: HashMap<(i32, i32), u32> = HashMap::new();
     let site_tile: Vec<u32> = sites
@@ -1252,31 +1290,42 @@ pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, op
             *tile_ids.entry((s.x, s.y)).or_insert(next)
         })
         .collect();
-    let mut slice_pins: Vec<Vec<u32>> = (0..n)
+    let mut slice_pins: Vec<Vec<Load>> = (0..n)
         .map(|o| match objs[o].kind {
             Kind::Slice if is_logic[o] => vec![logic_pins(&letters[o])],
             Kind::Slice => fills[o].iter().map(fill_pins).collect(),
             _ => Vec::new(),
         })
         .collect();
-    let mut tile_load: Vec<u32> = vec![0; tile_ids.len()];
+    let mut tile_load: Vec<Load> = vec![Load::default(); tile_ids.len()];
     for o in 0..n {
         for (&s, &pins) in objs[o].sites.iter().zip(&slice_pins[o]) {
-            tile_load[site_tile[s] as usize] += pins;
+            let t = site_tile[s] as usize;
+            tile_load[t] = tile_load[t] + pins;
         }
     }
-    let (pin_cap, pin_weight) = (opts.tile_pin_cap, opts.pin_weight);
-    let excess = |load: u32| load.saturating_sub(pin_cap);
-    st.pin_excess_start = tile_load.iter().map(|&l| u64::from(excess(l))).sum();
+    st.bypass_clashes = (0..n)
+        .filter(|&o| objs[o].kind == Kind::Slice && !is_logic[o])
+        .flat_map(|o| fills[o].iter())
+        .map(|f| crate::slice::bypass_claims(p, &f.cells).1.len())
+        .sum();
+    let (pin_cost, byp_cost) = (opts.pins, opts.bypass);
+    let total_excess = |tl: &[Load]| -> (u64, u64) {
+        tl.iter().fold((0, 0), |(a, b), l| (a + u64::from(pin_cost.excess(l.all)), b + u64::from(byp_cost.excess(l.x))))
+    };
+    (st.pin_excess_start, st.bypass_excess_start) = total_excess(&tile_load);
     // The cost change of `changes` (tile, pins added) to the tile loads.
-    let pin_delta = |tile_load: &[u32], changes: &[(u32, i64)]| -> f64 {
-        if pin_weight == 0.0 {
+    let pin_delta = |tile_load: &[Load], changes: &[(u32, Delta)]| -> f64 {
+        if !pin_cost.on() && !byp_cost.on() {
             return 0.0;
         }
-        let mut merged: Vec<(u32, i64)> = Vec::with_capacity(changes.len());
+        let mut merged: Vec<(u32, Delta)> = Vec::with_capacity(changes.len());
         for &(t, d) in changes {
             match merged.iter_mut().find(|m| m.0 == t) {
-                Some(m) => m.1 += d,
+                Some(m) => {
+                    m.1.all += d.all;
+                    m.1.x += d.x;
+                }
                 None => merged.push((t, d)),
             }
         }
@@ -1284,15 +1333,15 @@ pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, op
             .iter()
             .map(|&(t, d)| {
                 let old = tile_load[t as usize];
-                let new = (i64::from(old) + d).max(0) as u32;
-                f64::from(excess(new)) - f64::from(excess(old))
+                let new = old.apply(d);
+                (f64::from(pin_cost.excess(new.all)) - f64::from(pin_cost.excess(old.all))) * pin_cost.weight
+                    + (f64::from(byp_cost.excess(new.x)) - f64::from(byp_cost.excess(old.x))) * byp_cost.weight
             })
             .sum::<f64>()
-            * pin_weight
     };
-    let apply = |tile_load: &mut [u32], changes: &[(u32, i64)]| {
+    let apply = |tile_load: &mut [Load], changes: &[(u32, Delta)]| {
         for &(t, d) in changes {
-            tile_load[t as usize] = (i64::from(tile_load[t as usize]) + d).max(0) as u32;
+            tile_load[t as usize] = tile_load[t as usize].apply(d);
         }
     };
 
@@ -1475,8 +1524,8 @@ pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, op
                 }
                 let (pins_a, pins_b) = (logic_pins(&na), logic_pins(&nb));
                 let changes = [
-                    (site_tile[objs[oi].sites[0]], i64::from(pins_a) - i64::from(slice_pins[oi][0])),
-                    (site_tile[objs[oj].sites[0]], i64::from(pins_b) - i64::from(slice_pins[oj][0])),
+                    (site_tile[objs[oi].sites[0]], Load::delta(pins_a, slice_pins[oi][0])),
+                    (site_tile[objs[oj].sites[0]], Load::delta(pins_b, slice_pins[oj][0])),
                 ];
                 let dpin = pin_delta(&tile_load, &changes);
                 if delta + dpin <= 0.0 || rng.unit() < (-(delta + dpin) / temp).exp() {
@@ -1576,16 +1625,16 @@ pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, op
             }
             // Tile pins: this object's slices leave their tiles for the new
             // run's; a swapped slice goes the other way.
-            let mut changes: Vec<(u32, i64)> = Vec::new();
+            let mut changes: Vec<(u32, Delta)> = Vec::new();
             if k == Kind::Slice {
                 for (&s, &pins) in old_run.iter().zip(&slice_pins[oi]) {
-                    changes.push((site_tile[s], -i64::from(pins)));
+                    changes.push((site_tile[s], -Delta::from(pins)));
                 }
                 for (&s, &pins) in new_run.iter().zip(&slice_pins[oi]) {
-                    changes.push((site_tile[s], i64::from(pins)));
+                    changes.push((site_tile[s], Delta::from(pins)));
                 }
                 if let Some(oj) = other {
-                    let pins = i64::from(slice_pins[oj][0]);
+                    let pins = Delta::from(slice_pins[oj][0]);
                     changes.push((site_tile[new_run[0]], -pins));
                     changes.push((site_tile[old_run[0]], pins));
                 }
@@ -1661,9 +1710,11 @@ pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, op
         }
     }
     st.hpwl_end = total;
-    st.pin_excess_end = tile_load.iter().map(|&l| u64::from(excess(l))).sum();
-    st.tiles_over_cap = tile_load.iter().filter(|&&l| l > pin_cap).count();
-    st.tile_pins_max = tile_load.iter().copied().max().unwrap_or(0);
+    (st.pin_excess_end, st.bypass_excess_end) = total_excess(&tile_load);
+    st.tiles_over_cap = tile_load.iter().filter(|l| l.all > pin_cost.cap).count();
+    st.tile_pins_max = tile_load.iter().map(|l| l.all).max().unwrap_or(0);
+    st.bypass_tiles_over_cap = tile_load.iter().filter(|l| l.x > byp_cost.cap).count();
+    st.bypass_tile_max = tile_load.iter().map(|l| l.x).max().unwrap_or(0);
 
     // Bels: logic slices from their letters, the rest from their fills.
     for (o, ob) in objs.iter().enumerate() {
