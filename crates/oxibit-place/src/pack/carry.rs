@@ -6,6 +6,11 @@
 //! the tiles with no CARRY4). Each position's S and DI must come from a LUT
 //! that can sit at that position (S on the 6LUT, DI on the 5LUT, five inputs
 //! between them); otherwise a feed-through LUT1 carries the signal there.
+//!
+//! With `OXIBIT_DI_BYPASS=1` (experimental: not yet routed or run on
+//! silicon) a DI no LUT can carry stays on its net, for the router to bring
+//! in on the letter's bypass pin (AX..DX through the DI mux, its default
+//! input), and the S LUT may then use all six inputs.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
@@ -177,9 +182,15 @@ pub fn pack_carries(p: &mut Packer) {
         groups.push(g);
     }
 
-    let lut_types: HashSet<&str> = ["LUT1", "LUT2", "LUT3", "LUT4", "LUT5"].into_iter().collect();
+    let bypass = std::env::var("OXIBIT_DI_BYPASS").is_ok_and(|v| v == "1");
+    // With DI on the bypass pin the S LUT may read six inputs (A6 free).
+    let lut_types: HashSet<&str> = if bypass {
+        ["LUT1", "LUT2", "LUT3", "LUT4", "LUT5", "LUT6"].into_iter().collect()
+    } else {
+        ["LUT1", "LUT2", "LUT3", "LUT4", "LUT5"].into_iter().collect()
+    };
     let mut packed: BTreeSet<CellId> = BTreeSet::new();
-    let (mut feeds, mut chains) = (0usize, 0usize);
+    let (mut feeds, mut chains, mut bypassed) = (0usize, 0usize, 0usize);
     for g in &groups {
         chains += 1;
         let mut c4s: Vec<CellId> = Vec::new();
@@ -255,17 +266,33 @@ pub fn pack_carries(p: &mut Packer) {
                     }
                 }
             }
-            let mut count = inputs.len();
-            if s_lut.is_none() {
-                count += 1;
-            }
-            if di_lut.is_none() {
-                count += 1;
-            }
-            if count > 5 {
-                di_lut = None;
-                if s_inputs > 4 {
-                    s_lut = None;
+            let mut di_bypass = false;
+            if bypass {
+                let ins = |p: &Packer, l: CellId| -> BTreeSet<NetId> { (0..6).filter_map(|j| p.nl.cell(l).net(&format!("I{j}"))).collect() };
+                let s_ins = s_lut.map(|l| ins(p, l)).unwrap_or_default();
+                // S: its own LUT (any width) or a feed on the S net.
+                let s_pins: BTreeSet<NetId> = if s_lut.is_some() { s_ins.clone() } else { s_net.into_iter().collect() };
+                // DI: a LUT on the 5LUT only if the two share at most five pins,
+                // else the bypass pin.
+                if let Some(l) = di_lut
+                    && ins(p, l).union(&s_pins).count() > 5
+                {
+                    di_lut = None;
+                }
+                di_bypass = di_lut.is_none() && di_net.is_some();
+            } else {
+                let mut count = inputs.len();
+                if s_lut.is_none() {
+                    count += 1;
+                }
+                if di_lut.is_none() {
+                    count += 1;
+                }
+                if count > 5 {
+                    di_lut = None;
+                    if s_inputs > 4 {
+                        s_lut = None;
+                    }
                 }
             }
             if s_lut.is_none()
@@ -274,7 +301,9 @@ pub fn pack_carries(p: &mut Packer) {
                 s_lut = Some(p.feed_through_lut(n, &[(c4, format!("S[{z}]"))]));
                 feeds += 1;
             }
-            if di_lut.is_none()
+            if di_bypass {
+                bypassed += 1;
+            } else if di_lut.is_none()
                 && let Some(n) = di_net
             {
                 di_lut = Some(p.feed_through_lut(n, &[(c4, format!("DI[{z}]"))]));
@@ -332,5 +361,6 @@ pub fn pack_carries(p: &mut Packer) {
     }
     p.count("carry.chains", chains);
     p.count("carry.feed_luts", feeds);
+    p.count("carry.di_bypass", bypassed);
     p.count("carry.blasted", blasted);
 }
