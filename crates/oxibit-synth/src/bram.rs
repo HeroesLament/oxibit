@@ -354,7 +354,7 @@ fn lutram(m: &mut Module, mem: &Memory, mi: usize, st: &mut BramStats) -> Result
             .collect();
         for chunk in idxs.chunks(bits) {
             let at = |k: usize| chunk.get(k).copied();
-            let mut rbit = |k: usize, m: &mut Module| -> Bit {
+            let rbit = |k: usize, m: &mut Module| -> Bit {
                 match at(k) {
                     Some(i) => rd.data.0[i],
                     None => m.wire(1).0[0],
