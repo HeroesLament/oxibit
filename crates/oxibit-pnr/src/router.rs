@@ -176,6 +176,20 @@ pub enum EntryAim {
     All,
 }
 
+/// `Search::entry_bound` for one target set: the least congestion cost
+/// still to pay from each node near the set (`near`, sorted by node), and
+/// `far` from every other node.
+struct EntryBound {
+    near: Vec<(u32, f32)>,
+    far: f32,
+}
+
+impl EntryBound {
+    fn at(&self, n: u32) -> f32 {
+        self.near.binary_search_by_key(&n, |e| e.0).map_or(self.far, |k| self.near[k].1)
+    }
+}
+
 /// One routed edge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Hop {
@@ -419,12 +433,34 @@ const NONE: u32 = u32::MAX;
 /// same node, so a route bouncing through `FAN_BOUNCE7` shorts the CE pin
 /// it passes. Negotiation finds this only by failing on it; the claim
 /// keeps other nets off from the start.
+///
+/// Four bytes per node, read on every edge a search relaxes: free, one
+/// net's (`Claim::net`), or contested (two nets' sinks behind one node:
+/// left to negotiation). The enum it replaces held an `Identity` and cost a
+/// cache line every few nodes (9% of the router's time).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Claim {
-    Free,
-    Net(Identity),
-    /// Two nets' sinks behind one node: left to negotiation.
-    Contested,
+struct Claim(u32);
+
+impl Claim {
+    const FREE: Claim = Claim(u32::MAX);
+    const CONTESTED: Claim = Claim(u32::MAX - 1);
+    /// The constants' codes (one per `Logic` value) sit below CONTESTED.
+    const CONST_BASE: u32 = u32::MAX - 2;
+
+    /// The claim of a net of identity `id`. A net index too large for the
+    /// code (never on a real device) claims nothing: CONTESTED leaves the
+    /// node to negotiation, which is always correct.
+    fn net(id: Identity) -> Claim {
+        match id {
+            Identity::Own(i) => u32::try_from(i).ok().filter(|&c| c < Claim::CONST_BASE - 1).map_or(Claim::CONTESTED, Claim),
+            Identity::Const(v) => Claim(Claim::CONST_BASE - v.index() as u32),
+        }
+    }
+
+    /// Another net than the one whose claim is `mine` owns the node.
+    fn blocks(self, mine: Claim) -> bool {
+        self != Claim::FREE && self != Claim::CONTESTED && self != mine
+    }
 }
 
 impl<'g> Core<'g> {
@@ -454,7 +490,7 @@ impl<'g> Core<'g> {
             const_on: (0..n).map(|_| [AtomicU16::new(0), AtomicU16::new(0)]).collect(),
             hist: vec![0.0; n],
             reserved: vec![false; n],
-            claim: vec![Claim::Free; n],
+            claim: vec![Claim::FREE; n],
             dump_net: std::env::var("OXIBIT_DUMP_NET").map(|v| v.split(',').filter_map(|x| x.parse().ok()).collect()).unwrap_or_default(),
             grid,
             threads,
@@ -748,23 +784,21 @@ impl<'a, 'g> Search<'a, 'g> {
     /// 0 on the set, the target's own excess on its drivers, two hops'
     /// worth on theirs; every other node pays at least three hops' worth
     /// (`far`). Delay terms are ignored (a lower bound).
-    fn entry_bound(&self, set: &[u32], pres: f32, tag: u32) -> (HashMap<u32, f32>, f32) {
-        let mut near: HashMap<u32, f32> = HashMap::new();
+    fn entry_bound(&self, set: &[u32], pres: f32, tag: u32) -> EntryBound {
+        // Every contribution, then the least per node: a sorted list
+        // searched by binary search on each push. It replaced a SipHash map
+        // (5% of the router's time); the values are the same minima.
+        let mut near: Vec<(u32, f32)> = set.iter().map(|&t| (t, 0.0)).collect();
         let mut far = f32::INFINITY;
-        for &t in set {
-            near.insert(t, 0.0);
-        }
         for &t in set {
             let ct = self.enter_excess(t, pres, tag);
             for (p1, _, _) in self.core.g.in_edges(t) {
                 let c1 = self.enter_excess(p1, pres, tag);
-                let e1 = near.entry(p1).or_insert(f32::INFINITY);
-                *e1 = e1.min(ct);
+                near.push((p1, ct));
                 let mut any = false;
                 for (p2, _, _) in self.core.g.in_edges(p1) {
                     any = true;
-                    let e2 = near.entry(p2).or_insert(f32::INFINITY);
-                    *e2 = e2.min(ct + c1);
+                    near.push((p2, ct + c1));
                     far = far.min(ct + c1 + self.enter_excess(p2, pres, tag));
                 }
                 if !any {
@@ -772,16 +806,25 @@ impl<'a, 'g> Search<'a, 'g> {
                 }
             }
         }
+        near.sort_unstable_by_key(|e| e.0);
+        near.dedup_by(|later, kept| {
+            let same = later.0 == kept.0;
+            if same {
+                kept.1 = kept.1.min(later.1);
+            }
+            same
+        });
         // Set members stay at 0 even when they also drive each other.
         for &t in set {
-            near.insert(t, 0.0);
+            if let Ok(k) = near.binary_search_by_key(&t, |e| e.0) {
+                near[k].1 = 0.0;
+            }
         }
         if !far.is_finite() {
             far = 0.0;
         }
-        (near, far)
+        EntryBound { near, far }
     }
-
 
     fn reset_scratch(&mut self) {
         for &n in &self.b.touched {
@@ -844,6 +887,7 @@ impl<'a, 'g> Search<'a, 'g> {
     fn route_net(&mut self, net: &Net, id: Identity, pres: f32, pops: &mut u64, outside: &mut u64, keep: &[Hop], margin: i32) -> (Vec<Hop>, usize) {
         self.b.cur_tag += 1;
         self.b.diag = SearchDiag::default();
+        let mine = Claim::net(id);
         let tag = self.b.cur_tag;
         self.b.cur_const = match &net.driver {
             Driver::Ties(t) => Some(t.value()),
@@ -899,8 +943,8 @@ impl<'a, 'g> Search<'a, 'g> {
             // clock pin. It crosses general interconnect only to reach a
             // sink that is interconnect itself (a clock read as data).
             let dedicated = net.class == NetClass::GlobalClock && set.iter().all(|&t| self.core.g.node_fabric(t) == Fabric::Dedicated);
-            let (near, far) = if self.core.opts.estimate.entry { self.entry_bound(set, pres, tag) } else { (HashMap::new(), 0.0) };
-            let eb = |n: u32| near.get(&n).copied().unwrap_or(far);
+            let bound = if self.core.opts.estimate.entry { self.entry_bound(set, pres, tag) } else { EntryBound { near: Vec::new(), far: 0.0 } };
+            let eb = |n: u32| bound.at(n);
             let w = self.core.opts.delay_weight;
             let astar = (1.0 - w) * self.core.opts.estimate.per_tile + w * self.core.opts.astar_delay;
             let mut reached = None;
@@ -957,8 +1001,9 @@ impl<'a, 'g> Search<'a, 'g> {
                         break;
                     }
                     let base = self.b.cost[node as usize];
-                    for &(d, tile, pi) in self.core.g.out_edges(node) {
-                        match self.core.g.edge_kind(tile, pi) {
+                    let g = self.core.g;
+                    for (&(d, tile, pi), &kind) in g.out_edges(node).iter().zip(g.out_edge_kinds(node)) {
+                        match kind {
                             EdgeKind::Feature | EdgeKind::Fixed => {}
                             EdgeKind::Relay if self.core.g.edge_site_through(tile, pi) => {}
                             EdgeKind::Relay if net.class == NetClass::GlobalClock && self.core.g.edge_pip(tile, pi).tile.starts_with("CLK_") => {}
@@ -973,7 +1018,7 @@ impl<'a, 'g> Search<'a, 'g> {
                         if dedicated && self.core.g.node_fabric(d) == Fabric::Interconnect {
                             continue;
                         }
-                        if matches!(self.core.claim[d as usize], Claim::Net(owner) if owner != id) {
+                        if self.core.claim[d as usize].blocks(mine) {
                             continue;
                         }
                         if !set.contains(&d) && !inside(d) {
@@ -1170,13 +1215,14 @@ impl<'g> Router<'g> {
                     }
                     if q != s {
                         let c = &mut self.core.claim[q as usize];
-                        *c = match *c {
-                            Claim::Free => {
-                                claimed += 1;
-                                Claim::Net(id)
-                            }
-                            Claim::Net(o) if o == id => Claim::Net(o),
-                            _ => Claim::Contested,
+                        let mine = Claim::net(id);
+                        *c = if *c == Claim::FREE {
+                            claimed += 1;
+                            mine
+                        } else if *c == mine {
+                            mine
+                        } else {
+                            Claim::CONTESTED
                         };
                     }
                     // `closure` crosses a fixed edge only into an unmuxed node.

@@ -234,6 +234,8 @@ pub struct Graph {
     node_rc: Vec<Option<NodeRc>>,
     /// Reverse adjacency, built on first use.
     rev: OnceLock<Rev>,
+    /// `edge_kind` of every edge, in `edges` order (`out_edge_kinds`).
+    kinds: OnceLock<Vec<EdgeKind>>,
     /// node -> its first global wire id, for `node_name`; built on first use.
     first_wire: OnceLock<Vec<u32>>,
     /// node -> whether it is general interconnect; built on first use.
@@ -468,6 +470,7 @@ impl Graph {
             node_xy,
             node_rc,
             rev: OnceLock::new(),
+            kinds: OnceLock::new(),
             first_wire: OnceLock::new(),
             interconnect: OnceLock::new(),
             rev_fixed: OnceLock::new(),
@@ -630,6 +633,15 @@ impl Graph {
     /// Out-edges of a node: `(dst node, tile, type pip index)`.
     pub fn out_edges(&self, n: u32) -> &[(u32, u32, u32)] {
         &self.edges[n as usize]
+    }
+
+    /// `edge_kind` of each of `out_edges(n)`, in the same order. One byte
+    /// per edge in one array beside the adjacency (built on first use), so
+    /// a search reads an edge's kind with the edge instead of through its
+    /// tile type's pip table: that lookup was ~17% of the router's time.
+    pub fn out_edge_kinds(&self, n: u32) -> &[EdgeKind] {
+        let kinds = self.kinds.get_or_init(|| self.edges.e.iter().map(|&(_, tile, pi)| self.edge_kind(tile, pi)).collect());
+        &kinds[self.edges.off[n as usize] as usize..self.edges.off[n as usize + 1] as usize]
     }
 
     /// How an edge conducts, without building its names.
