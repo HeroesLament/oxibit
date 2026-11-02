@@ -1,0 +1,9 @@
+[package]
+name = "oxibit-sta"
+description = "Static timing analysis of a routed 7-series design: cell arcs from prjxray's SDF, interconnect from oxibit's routing graph"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]

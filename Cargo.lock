@@ -399,6 +399,8 @@ name = "oxibit-place"
 version = "0.1.0"
 dependencies = [
  "oxibit-pnr",
+ "oxibit-policy",
+ "oxibit-report",
  "serde_json",
 ]
 
@@ -411,6 +413,13 @@ dependencies = [
  "oxibit-report",
  "serde_json",
  "tracing",
+]
+
+[[package]]
+name = "oxibit-policy"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]
@@ -443,10 +452,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxibit-sta"
+version = "0.1.0"
+
+[[package]]
 name = "oxibit-synth"
 version = "0.1.0"
 dependencies = [
+ "batsat",
  "oxibit-hdl",
+ "oxibit-policy",
  "oxibit-prof",
  "oxibit-report",
  "serde_json",
