@@ -14,7 +14,8 @@
 //! * Edges are pips. A pip is usable when it can actually be made to
 //!   conduct: its `TILE.DST.SRC` feature has segbits (and is emitted), or it
 //!   is an `always` pseudo-pip, or it is a hard connection (`->`, not
-//!   pseudo, no segbits: fixed wiring such as CLB BYP -> AX). `hint` and
+//!   pseudo, no segbits: fixed wiring such as CLB BYP -> AX), or it is
+//!   one of the I/O site route-throughs in `io_pseudo`. Other `hint` and
 //!   `default` pseudo-pips are never used. `<<->>` pass pips are two edges,
 //!   one per direction, each usable only if its own feature has segbits.
 //!
@@ -39,6 +40,65 @@ type Found = (u32, Vec<(u32, u32, u32)>);
 type NetEnds = (u32, Vec<(u32, HashSet<u32>)>);
 /// tileconn: (tile type, wire) -> [(dx, dy, other tile type, other wire)].
 type Potential = HashMap<(String, String), Vec<(i32, i32, String, String)>>;
+
+/// Forward adjacency in compressed rows: node `n`'s out-edges
+/// `(dst, tile, pip)` are `e[off[n]..off[n + 1]]`. Indexes like the
+/// `Vec<Vec<_>>` it replaced.
+pub struct Adj {
+    off: Vec<u32>,
+    e: Vec<(u32, u32, u32)>,
+}
+
+impl Adj {
+    fn len(&self) -> usize {
+        self.off.len() - 1
+    }
+    fn iter(&self) -> impl Iterator<Item = &[(u32, u32, u32)]> {
+        (0..self.len()).map(|n| &self[n])
+    }
+}
+
+impl std::ops::Index<usize> for Adj {
+    type Output = [(u32, u32, u32)];
+    fn index(&self, n: usize) -> &Self::Output {
+        &self.e[self.off[n] as usize..self.off[n + 1] as usize]
+    }
+}
+
+/// Reverse adjacency in compressed rows: the sources of edges into node
+/// `n` are `src[off[n]..off[n + 1]]`.
+pub struct Rev {
+    off: Vec<u32>,
+    src: Vec<u32>,
+}
+
+impl Rev {
+    fn build(edges: &Adj) -> Self {
+        let n = edges.len();
+        let mut off = vec![0u32; n + 1];
+        for es in edges.iter() {
+            for &(d, _, _) in es {
+                off[d as usize + 1] += 1;
+            }
+        }
+        for i in 0..n {
+            off[i + 1] += off[i];
+        }
+        let mut fill = off.clone();
+        let mut src = vec![0u32; off[n] as usize];
+        for (s, es) in edges.iter().enumerate() {
+            for &(d, _, _) in es {
+                src[fill[d as usize] as usize] = s as u32;
+                fill[d as usize] += 1;
+            }
+        }
+        Rev { off, src }
+    }
+
+    fn of(&self, n: u32) -> &[u32] {
+        &self.src[self.off[n as usize] as usize..self.off[n as usize + 1] as usize]
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Window {
@@ -82,12 +142,44 @@ struct TypePip {
     relay: Option<(String, Vec<String>)>,
     /// A `default` pseudo-pip (see `Enable::Default`).
     default: bool,
+    /// An I/O site route-through (`io_pseudo`): a relay a design router may
+    /// take, since only the I/O pin it serves can reach it.
+    through: bool,
+    timing: PipTiming,
+}
+
+/// A pip's timing, from the tile type's `src_to_dst` data, in the units and
+/// truncations nextpnr-himbaechel's xilinx chipdb uses: intrinsic delay
+/// (slow corner, the larger of the two slow values) in ps, input
+/// capacitance in fF, output resistance in the database's resistance unit.
+/// Zero where the database has none (and for relays, which are not
+/// interconnect pips).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PipTiming {
+    pub delay: u32,
+    pub in_cap: u32,
+    pub out_res: u32,
+    /// Not a pass transistor: the pip rebuffers, so what drives its input
+    /// does not add to the resistance driving its output.
+    pub buffered: bool,
+}
+
+/// A node's lumped wire resistance and capacitance (fF), summed over its
+/// wires as nextpnr-himbaechel's chipdb does.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NodeRc {
+    pub res: u32,
+    pub cap: u32,
 }
 
 struct TypeData {
     wires: Vec<String>,
     index: HashMap<String, u32>,
     pips: Vec<TypePip>,
+    /// Per wire: resistance and capacitance (fF) from the tile type.
+    wire_rc: Vec<NodeRc>,
+    /// Per wire: a pip end or a site pin's wire (nextpnr's used wires).
+    used: Vec<bool>,
     /// CLB site pins: (site, pin, wire index).
     site_pins: Vec<(String, String, u32)>,
 }
@@ -130,13 +222,22 @@ pub struct Graph {
     wire_base: Vec<u32>, // global wire id of each tile's wire 0
     node_of: Vec<u32>,   // global wire -> node
     /// node -> [(dst node, tile, type pip index)]
-    edges: Vec<Vec<(u32, u32, u32)>>,
-    types: HashMap<String, TypeData>,
+    edges: Adj,
+    types: HashMap<String, Arc<TypeData>>,
+    /// Each tile's type data (as `types[tiles[t].1]`, without the hash).
+    tile_td: Vec<Arc<TypeData>>,
     coords: Vec<(i32, i32)>,
     /// node -> grid coordinates of one of its tiles (A* heuristic).
     node_xy: Vec<(i16, i16)>,
+    /// node -> its wires' lumped RC, for a node of more than one used wire
+    /// (the nodes nextpnr gives a timing class).
+    node_rc: Vec<Option<NodeRc>>,
     /// Reverse adjacency, built on first use.
-    rev: OnceLock<Vec<Vec<u32>>>,
+    rev: OnceLock<Rev>,
+    /// node -> its first global wire id, for `node_name`; built on first use.
+    first_wire: OnceLock<Vec<u32>>,
+    /// node -> whether it is general interconnect; built on first use.
+    interconnect: OnceLock<Vec<bool>>,
     /// Reverse adjacency over fixed edges only, built on first use.
     rev_fixed: OnceLock<HashMap<u32, Vec<u32>>>,
     /// sink node -> bitset of nodes that can reach it.
@@ -204,9 +305,11 @@ impl Graph {
         Self::build_with(db, window, GraphOpts::default())
     }
 
+    #[oxibit_prof::hot(name = "Graph::build")]
     pub fn build_with(db: &Database, window: Option<Window>, opts: GraphOpts) -> R<Self> {
-        let grid: Value = read_json(&db.root.join(&db.fabric).join("tilegrid.json"))?;
-        let tileconn: Value = read_json(&db.root.join(&db.fabric).join("tileconn.json"))?;
+        let (grid, tileconn): (Value, Value) = oxibit_prof::hot_block!("graph.read_json", {
+            (read_json(&db.root.join(&db.fabric).join("tilegrid.json"))?, read_json(&db.root.join(&db.fabric).join("tileconn.json"))?)
+        });
         let grid = grid.as_object().ok_or("tilegrid is not an object")?;
 
         // Tiles in the window, with coordinates.
@@ -223,11 +326,13 @@ impl Graph {
 
         // Tile types in use.
         let mut types: HashMap<String, TypeData> = HashMap::new();
-        for (_, ty, _, _) in &tiles {
-            if !types.contains_key(ty) {
-                types.insert(ty.clone(), load_type(db, ty)?);
+        oxibit_prof::hot_block!("graph.load_types", {
+            for (_, ty, _, _) in &tiles {
+                if !types.contains_key(ty) {
+                    types.insert(ty.clone(), load_type(db, ty)?);
+                }
             }
-        }
+        });
 
         // Global wire ids.
         let mut wire_base = Vec::with_capacity(tiles.len());
@@ -240,6 +345,7 @@ impl Graph {
         // Nodes: union-find over tileconn.
         let mut uf = UnionFind::new(total as usize);
         let mut potential: Potential = HashMap::new();
+        oxibit_prof::hot_block!("graph.potential", {
         for conn in tileconn.as_array().ok_or("tileconn is not a list")? {
             let d = &conn["grid_deltas"];
             let (dx, dy) = (d[0].as_i64().unwrap_or(0) as i32, d[1].as_i64().unwrap_or(0) as i32);
@@ -250,38 +356,100 @@ impl Graph {
                 potential.entry((t0.to_string(), w0.to_string())).or_default().push((dx, dy, t1.to_string(), w1.to_string()));
             }
         }
-        for (ti, (_, ty, x, y)) in tiles.iter().enumerate() {
-            let td = &types[ty];
+        });
+        oxibit_prof::hot_block!("graph.union", {
+        // Each tile type's connections resolved once: (wire, dx, dy, type
+        // id, wire in that type), in wire order and tileconn order, so the
+        // unions happen in the same sequence as a per-tile lookup would.
+        let type_names: Vec<&String> = types.keys().collect();
+        let type_id: HashMap<&str, u32> = type_names.iter().enumerate().map(|(i, t)| (t.as_str(), i as u32)).collect();
+        let mut conns: Vec<Vec<(u32, i32, i32, u32, u32)>> = vec![Vec::new(); type_names.len()];
+        for (ty_i, ty) in type_names.iter().enumerate() {
+            let td = &types[*ty];
             for (wi, w) in td.wires.iter().enumerate() {
-                let Some(targets) = potential.get(&(ty.clone(), w.clone())) else { continue };
+                let Some(targets) = potential.get(&((*ty).clone(), w.clone())) else { continue };
                 for (dx, dy, tty, tw) in targets {
-                    let Some(&tj) = at.get(&(x + dx, y + dy)) else { continue };
-                    let (_, jty, _, _) = &tiles[tj as usize];
-                    if jty != tty {
-                        continue;
-                    }
-                    if let Some(&wj) = types[jty].index.get(tw) {
-                        uf.union(wire_base[ti] + wi as u32, wire_base[tj as usize] + wj);
+                    let Some(&tid) = type_id.get(tty.as_str()) else { continue };
+                    if let Some(&wj) = types[tty].index.get(tw) {
+                        conns[ty_i].push((wi as u32, *dx, *dy, tid, wj));
                     }
                 }
             }
         }
-        let (node_of, nodes) = uf.dense();
-
-        // Edges.
-        let mut edges: Vec<Vec<(u32, u32, u32)>> = vec![Vec::new(); nodes];
-        for (ti, (_, ty, _, _)) in tiles.iter().enumerate() {
-            for (pi, p) in types[ty].pips.iter().enumerate() {
-                if p.default && !opts.defaults {
+        let tile_ty: Vec<u32> = tiles.iter().map(|(_, ty, _, _)| type_id[ty.as_str()]).collect();
+        // Tile index by grid position.
+        let (gw, gh) = tiles.iter().fold((0i32, 0i32), |(w, h), &(_, _, x, y)| (w.max(x + 1), h.max(y + 1)));
+        let mut grid_at = vec![u32::MAX; (gw.max(0) as usize) * (gh.max(0) as usize)];
+        for (&(x, y), &t) in &at {
+            if x >= 0 && y >= 0 {
+                grid_at[(y * gw + x) as usize] = t;
+            }
+        }
+        let tile_at = |x: i32, y: i32| -> Option<u32> {
+            (x >= 0 && y >= 0 && x < gw && y < gh).then(|| grid_at[(y * gw + x) as usize]).filter(|&t| t != u32::MAX)
+        };
+        for (ti, &(_, _, x, y)) in tiles.iter().enumerate() {
+            for &(wi, dx, dy, tid, wj) in &conns[tile_ty[ti] as usize] {
+                let Some(tj) = tile_at(x + dx, y + dy) else { continue };
+                if tile_ty[tj as usize] != tid {
                     continue;
                 }
-                let s = node_of[(wire_base[ti] + p.src) as usize];
-                let d = node_of[(wire_base[ti] + p.dst) as usize];
-                if s != d {
-                    edges[s as usize].push((d, ti as u32, pi as u32));
-                }
+                uf.union(wire_base[ti] + wi, wire_base[tj as usize] + wj);
             }
         }
+        });
+        let (node_of, nodes) = oxibit_prof::hot_block!("graph.dense", { uf.dense() });
+
+        // Edges.
+        let edges = oxibit_prof::hot_block!("graph.edges", {
+        // Two passes over the same pips (count, then fill), so each node's
+        // edges keep tile, then pip, order.
+        let tds: Vec<&TypeData> = tiles.iter().map(|(_, ty, _, _)| &types[ty]).collect();
+        let each = |f: &mut dyn FnMut(u32, (u32, u32, u32))| {
+            for (ti, td) in tds.iter().enumerate() {
+                for (pi, p) in td.pips.iter().enumerate() {
+                    if p.default && !opts.defaults {
+                        continue;
+                    }
+                    let s = node_of[(wire_base[ti] + p.src) as usize];
+                    let d = node_of[(wire_base[ti] + p.dst) as usize];
+                    if s != d {
+                        f(s, (d, ti as u32, pi as u32));
+                    }
+                }
+            }
+        };
+        let mut off = vec![0u32; nodes + 1];
+        each(&mut |s, _| off[s as usize + 1] += 1);
+        for i in 0..nodes {
+            off[i + 1] += off[i];
+        }
+        let mut fill = off.clone();
+        let mut e = vec![(0u32, 0u32, 0u32); off[nodes] as usize];
+        each(&mut |s, x| {
+            e[fill[s as usize] as usize] = x;
+            fill[s as usize] += 1;
+        });
+        Adj { off, e }
+        });
+
+        // Node RC: every wire's RC, for nodes with more than one used wire.
+        let node_rc: Vec<Option<NodeRc>> = oxibit_prof::hot_block!("graph.rc", {
+        let mut rc_sum = vec![NodeRc::default(); nodes];
+        let mut used_wires = vec![0u32; nodes];
+        let mut wires_in = vec![0u32; nodes];
+        for (ti, (_, ty, _, _)) in tiles.iter().enumerate() {
+            let td = &types[ty];
+            for wi in 0..td.wires.len() {
+                let n = node_of[(wire_base[ti] + wi as u32) as usize] as usize;
+                rc_sum[n].res += td.wire_rc[wi].res;
+                rc_sum[n].cap += td.wire_rc[wi].cap;
+                used_wires[n] += td.used[wi] as u32;
+                wires_in[n] += 1;
+            }
+        }
+        (0..nodes).map(|n| (wires_in[n] > 1 && used_wires[n] > 1).then_some(rc_sum[n])).collect()
+        });
 
         let tile_index = tiles.iter().enumerate().map(|(i, (n, _, _, _))| (n.clone(), i as u32)).collect();
         let coords: Vec<(i32, i32)> = tiles.iter().map(|&(_, _, x, y)| (x, y)).collect();
@@ -293,10 +461,15 @@ impl Graph {
                 node_xy[n] = (coords[ti].0 as i16, coords[ti].1 as i16);
             }
         }
+        let types: HashMap<String, Arc<TypeData>> = types.into_iter().map(|(k, v)| (k, Arc::new(v))).collect();
+        let tile_td: Vec<Arc<TypeData>> = tiles.iter().map(|(_, ty, _, _)| types[ty].clone()).collect();
         Ok(Graph {
             coords,
             node_xy,
+            node_rc,
             rev: OnceLock::new(),
+            first_wire: OnceLock::new(),
+            interconnect: OnceLock::new(),
             rev_fixed: OnceLock::new(),
             reach: Mutex::new(HashMap::new()),
             opts,
@@ -306,6 +479,7 @@ impl Graph {
             node_of,
             edges,
             types,
+            tile_td,
         })
     }
 
@@ -319,7 +493,7 @@ impl Graph {
     }
 
     pub fn edges(&self) -> usize {
-        self.edges.iter().map(Vec::len).sum()
+        self.edges.e.len()
     }
 
     /// The node of `TILE/WIRE`.
@@ -440,7 +614,7 @@ impl Graph {
         let parts: Vec<&str> = line.split('.').collect();
         let [tile, dst, src] = parts[..] else { return PipLookup::Malformed };
         let Some(&ti) = self.tile_index.get(tile) else { return PipLookup::NoTile };
-        let td = &self.types[&self.tiles[ti as usize].1];
+        let td = &self.tile_td[ti as usize];
         let (Some(&ws), Some(&wd)) = (td.index.get(src), td.index.get(dst)) else { return PipLookup::NoWire };
         let usable = |p: &TypePip| !p.default || self.opts.defaults;
         let Some(pi) = td.pips.iter().position(|p| p.src == ws && p.dst == wd && usable(p)) else { return PipLookup::NoPip };
@@ -460,7 +634,7 @@ impl Graph {
 
     /// How an edge conducts, without building its names.
     pub fn edge_kind(&self, tile: u32, pi: u32) -> EdgeKind {
-        let p = &self.types[&self.tiles[tile as usize].1].pips[pi as usize];
+        let p = &self.tile_td[tile as usize].pips[pi as usize];
         match (&p.feature, &p.relay) {
             (Some(_), _) => EdgeKind::Feature,
             (None, Some(_)) => EdgeKind::Relay,
@@ -469,7 +643,23 @@ impl Graph {
         }
     }
 
+    /// Whether an edge is an I/O site route-through (see `io_pseudo`).
+    pub fn edge_site_through(&self, tile: u32, pi: u32) -> bool {
+        self.tile_td[tile as usize].pips[pi as usize].through
+    }
+
     /// The pip behind an edge.
+    /// The timing of an edge (zero for relays and pips with no data).
+    pub fn edge_timing(&self, tile: u32, pi: u32) -> PipTiming {
+        self.tile_td[tile as usize].pips[pi as usize].timing
+    }
+
+    /// A node's lumped wire RC, where nextpnr gives the node a timing
+    /// class.
+    pub fn node_rc(&self, n: u32) -> Option<NodeRc> {
+        self.node_rc[n as usize]
+    }
+
     pub fn edge_pip(&self, tile: u32, pi: u32) -> Pip {
         self.pip(tile, pi)
     }
@@ -480,18 +670,75 @@ impl Graph {
     }
 
     /// `TILE/WIRE` names of a node's first wire (for reports).
-    pub fn node_name(&self, n: u32) -> String {
-        // Linear scan; reports only.
+    /// Every (tile, wire) of each node in `nodes`, in one pass.
+    pub fn node_wires(&self, nodes: &HashSet<u32>) -> HashMap<u32, Vec<(String, String)>> {
+        let mut out: HashMap<u32, Vec<(String, String)>> = HashMap::new();
         for (ti, base) in self.wire_base.iter().enumerate() {
-            let td = &self.types[&self.tiles[ti].1];
+            let td = &self.tile_td[ti];
             for wi in 0..td.wires.len() as u32 {
-                if self.node_of[(base + wi) as usize] == n {
-                    return format!("{}/{}", self.tiles[ti].0, td.wires[wi as usize]);
+                let n = self.node_of[(base + wi) as usize];
+                if nodes.contains(&n) {
+                    out.entry(n).or_default().push((self.tiles[ti].0.clone(), td.wires[wi as usize].clone()));
                 }
             }
         }
-        format!("node{n}")
+        out
     }
+
+    /// What a node is built from (see `Fabric`).
+    pub fn node_fabric(&self, n: u32) -> Fabric {
+        let general = self.interconnect.get_or_init(|| {
+            let mut general = vec![false; self.nodes()];
+            for (ti, (_, ty)) in self.tiles.iter().enumerate() {
+                if ty != "INT_L" && ty != "INT_R" {
+                    continue;
+                }
+                let base = self.wire_base[ti];
+                for (wi, w) in self.tile_td[ti].wires.iter().enumerate() {
+                    if !is_int_clock_wire(w) {
+                        general[self.node_of[(base + wi as u32) as usize] as usize] = true;
+                    }
+                }
+            }
+            general
+        });
+        if general[n as usize] { Fabric::Interconnect } else { Fabric::Dedicated }
+    }
+
+    pub fn node_name(&self, n: u32) -> String {
+        // A node's first wire (in tile order), indexed on first use.
+        let first = self.first_wire.get_or_init(|| {
+            let mut first = vec![u32::MAX; self.nodes()];
+            for (w, &nd) in self.node_of.iter().enumerate() {
+                if first[nd as usize] == u32::MAX {
+                    first[nd as usize] = w as u32;
+                }
+            }
+            first
+        });
+        let Some(&w) = first.get(n as usize).filter(|&&w| w != u32::MAX) else { return format!("node{n}") };
+        let ti = self.wire_base.partition_point(|&b| b <= w) - 1;
+        format!("{}/{}", self.tiles[ti].0, self.tile_td[ti].wires[(w - self.wire_base[ti]) as usize])
+    }
+}
+
+/// The INT tile wires that belong to clock distribution: the GCLK leaves
+/// and the CLK pin inputs they drive. `GFAN` is not one: it is where a
+/// clock leaves the clock network for general interconnect.
+fn is_int_clock_wire(w: &str) -> bool {
+    w.starts_with("GCLK") || matches!(w, "CLK0" | "CLK1" | "CLK_L0" | "CLK_L1")
+}
+
+/// What a node is built from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Fabric {
+    /// Anything not general interconnect: the clock network (BUFG, HROW,
+    /// HCLK, the GCLK leaves, the CLK pins), site-local and I/O wiring.
+    Dedicated,
+    /// General interconnect: a node with an INT wire other than a GCLK
+    /// leaf or a CLK pin input. A clock routed through it reaches its pin
+    /// late by the fabric delay, off the skew the clock network balances.
+    Interconnect,
 }
 
 /// How an edge conducts (`Enable` without the names).
@@ -681,12 +928,17 @@ impl Graph {
     }
 
     fn is_fixed(&self, tile: u32, pi: u32) -> bool {
-        let p = &self.types[&self.tiles[tile as usize].1].pips[pi as usize];
+        let p = &self.tile_td[tile as usize].pips[pi as usize];
         p.feature.is_none() && p.relay.is_none() && !p.default
     }
 
     /// A relay edge the design has configured: every line that makes it
     /// (`BUFHCE.BUFHCE_X0Y0.IN_USE`, ...) is in `on`.
+    /// Whether a relay edge conducts: all its lines are in `on`.
+    pub fn relay_conducts(&self, tile: u32, pi: u32, on: &HashSet<String>) -> bool {
+        self.relay_on(tile, pi, on)
+    }
+
     fn relay_on(&self, tile: u32, pi: u32, on: &HashSet<String>) -> bool {
         let (name, ty) = &self.tiles[tile as usize];
         match &self.types[ty].pips[pi as usize].relay {
@@ -722,7 +974,8 @@ impl Graph {
                 if listed {
                     pips.push(name);
                 }
-                let take = listed || self.is_fixed(tile, pi) || (relays && self.relay_on(tile, pi, on));
+                let through = self.tile_td[tile as usize].pips[pi as usize].through;
+                let take = listed || self.is_fixed(tile, pi) || ((relays || through) && self.relay_on(tile, pi, on));
                 if take && nodes.insert(d) {
                     stack.push(d);
                 }
@@ -734,15 +987,23 @@ impl Graph {
     /// Node of a CLB site pin (`CLK`, `AX`, ...).
     pub fn site_pin(&self, tile: &str, site: &str, pin: &str) -> Option<u32> {
         let &ti = self.tile_index.get(tile)?;
-        let td = &self.types[&self.tiles[ti as usize].1];
+        let td = &self.tile_td[ti as usize];
         let &(_, _, w) = td.site_pins.iter().find(|(s, p, _)| s == site && p == pin)?;
         Some(self.node_of[(self.wire_base[ti as usize] + w) as usize])
+    }
+
+    /// Tile-local wire name of a site pin (`CLBLM_M_C`).
+    pub fn site_pin_wire(&self, tile: &str, site: &str, pin: &str) -> Option<String> {
+        let &ti = self.tile_index.get(tile)?;
+        let td = &self.tile_td[ti as usize];
+        let &(_, _, w) = td.site_pins.iter().find(|(s, p, _)| s == site && p == pin)?;
+        Some(td.wires[w as usize].clone())
     }
 
     /// CLB sites of a tile.
     pub fn sites(&self, tile: &str) -> Vec<String> {
         let Some(&ti) = self.tile_index.get(tile) else { return vec![] };
-        let mut s: Vec<String> = self.types[&self.tiles[ti as usize].1].site_pins.iter().map(|(s, _, _)| s.clone()).collect();
+        let mut s: Vec<String> = self.tile_td[ti as usize].site_pins.iter().map(|(s, _, _)| s.clone()).collect();
         s.dedup();
         s
     }
@@ -756,6 +1017,7 @@ impl Graph {
     /// Nodes holding a tile wire whose name contains any of `pats`
     /// (`CLK_HROW_CK_INT`), or, for a `TILE/PART` pattern, a wire of that
     /// tile containing PART: what a request asks the router to stay off.
+    #[oxibit_prof::hot(name = "Graph::nodes_with_wire")]
     pub fn nodes_with_wire(&self, pats: &[String]) -> Vec<u32> {
         let mut out = Vec::new();
         if pats.is_empty() {
@@ -766,11 +1028,20 @@ impl Graph {
                 Some((t, w)) => (Some(t), w),
                 None => (None, p.as_str()),
             }).collect();
+        // The wires each pattern matches, once per tile type.
+        let mut per_type: HashMap<&str, Vec<Vec<u32>>> = HashMap::new();
+        for (ty, td) in &self.types {
+            let m = pats
+                .iter()
+                .map(|(_, pw)| td.wires.iter().enumerate().filter(|(_, w)| w.contains(pw)).map(|(i, _)| i as u32).collect())
+                .collect();
+            per_type.insert(ty.as_str(), m);
+        }
         for (t, (name, ty)) in self.tiles.iter().enumerate() {
-            let Some(td) = self.types.get(ty) else { continue };
-            for (i, w) in td.wires.iter().enumerate() {
-                if pats.iter().any(|(pt, pw)| pt.is_none_or(|pt| pt == name) && w.contains(pw)) {
-                    out.push(self.node_of[self.wire_base[t] as usize + i]);
+            let Some(m) = per_type.get(ty.as_str()) else { continue };
+            for ((pt, _), wires) in pats.iter().zip(m) {
+                if pt.is_none_or(|pt| pt == name) {
+                    out.extend(wires.iter().map(|&i| self.node_of[(self.wire_base[t] + i) as usize]));
                 }
             }
         }
@@ -783,23 +1054,38 @@ impl Graph {
         self.tiles.iter().map(|(n, _)| n.as_str())
     }
 
+    /// In-edges of a node: `(src node, tile, type pip index)`.
+    pub fn in_edges(&self, n: u32) -> impl Iterator<Item = (u32, u32, u32)> + '_ {
+        self.rev().of(n).iter().flat_map(move |&s| self.edges[s as usize].iter().filter(move |e| e.0 == n).map(move |&(_, t, pi)| (s, t, pi)))
+    }
+
+    fn rev(&self) -> &Rev {
+        self.rev.get_or_init(|| oxibit_prof::hot_block!("graph.reverse_index", { Rev::build(&self.edges) }))
+    }
+
     /// Feature pips driving `n` from a node in `from`, through any chain of
     /// fixed edges into `n` (e.g. INT `GCLK -> CLK_L0` for a slice CLK pin).
-    pub fn feature_drivers(&self, n: u32, from: &HashSet<u32>) -> Vec<Pip> {
-        let rev = self.rev.get_or_init(|| {
-            let mut rev = vec![Vec::new(); self.edges.len()];
-            for (s, es) in self.edges.iter().enumerate() {
-                for &(d, _, _) in es {
-                    rev[d as usize].push(s as u32);
+    /// Every edge into `n`, whatever enables it.
+    pub fn drivers(&self, n: u32) -> Vec<Pip> {
+        let rev = self.rev();
+        let mut out = Vec::new();
+        for &s in rev.of(n) {
+            for &(d, tile, pi) in &self.edges[s as usize] {
+                if d == n {
+                    out.push(self.pip(tile, pi));
                 }
             }
-            rev
-        });
+        }
+        out
+    }
+
+    pub fn feature_drivers(&self, n: u32, from: &HashSet<u32>) -> Vec<Pip> {
+        let rev = self.rev();
         let mut out = Vec::new();
         let mut stack = vec![n];
         let mut seen = HashSet::from([n]);
         while let Some(c) = stack.pop() {
-            for &s in &rev[c as usize] {
+            for &s in rev.of(c) {
                 for &(d, tile, pi) in &self.edges[s as usize] {
                     if d != c {
                         continue;
@@ -808,7 +1094,7 @@ impl Graph {
                         if seen.insert(s) {
                             stack.push(s);
                         }
-                    } else if from.contains(&s) && self.types[&self.tiles[tile as usize].1].pips[pi as usize].feature.is_some() {
+                    } else if from.contains(&s) && self.tile_td[tile as usize].pips[pi as usize].feature.is_some() {
                         out.push(self.pip(tile, pi));
                     }
                 }
@@ -820,7 +1106,7 @@ impl Graph {
     /// Output nodes and lines of every relay in one site of one tile.
     pub fn site_relays(&self, tile: &str, site: &str) -> Vec<(u32, Vec<String>)> {
         let Some(&ti) = self.tile_index.get(tile) else { return vec![] };
-        let td = &self.types[&self.tiles[ti as usize].1];
+        let td = &self.tile_td[ti as usize];
         td.pips
             .iter()
             .filter_map(|p| match &p.relay {
@@ -834,7 +1120,7 @@ impl Graph {
     /// when a design already uses that site.
     pub fn relay_outputs(&self, tile: &str, site: &str) -> Vec<u32> {
         let Some(&ti) = self.tile_index.get(tile) else { return vec![] };
-        let td = &self.types[&self.tiles[ti as usize].1];
+        let td = &self.tile_td[ti as usize];
         td.pips
             .iter()
             .filter(|p| p.relay.as_ref().is_some_and(|(s, _)| s == site))
@@ -1111,15 +1397,7 @@ impl Graph {
     /// Bitset of the nodes from which any of `seeds` can be reached
     /// (ignoring blocking), seeds included.
     fn reverse_closure(&self, seeds: &[u32]) -> Vec<u64> {
-        let rev = self.rev.get_or_init(|| {
-            let mut rev = vec![Vec::new(); self.edges.len()];
-            for (s, es) in self.edges.iter().enumerate() {
-                for &(d, _, _) in es {
-                    rev[d as usize].push(s as u32);
-                }
-            }
-            rev
-        });
+        let rev = self.rev();
         let mut bits = vec![0u64; self.edges.len().div_ceil(64)];
         let set = |bits: &mut Vec<u64>, n: u32| {
             let (w, b) = ((n / 64) as usize, n % 64);
@@ -1134,7 +1412,7 @@ impl Graph {
             }
         }
         while let Some(n) = stack.pop() {
-            for &s in &rev[n as usize] {
+            for &s in rev.of(n) {
                 if set(&mut bits, s) {
                     stack.push(s);
                 }
@@ -1157,7 +1435,7 @@ impl Graph {
         back[(dst / 64) as usize] |= 1 << (dst % 64);
         let mut stack = vec![dst];
         while let Some(n) = stack.pop() {
-            for &p in &rev[n as usize] {
+            for &p in rev.of(n) {
                 let (w, b) = ((p / 64) as usize, p % 64);
                 if back[w] >> b & 1 == 0 && !blocked.contains(&p) {
                     back[w] |= 1 << b;
@@ -1231,10 +1509,17 @@ impl Graph {
         Err(format!("no configured path {from} -> {to}"))
     }
 
+    /// Every site pin of a tile: (site, pin, node).
+    pub fn tile_site_pins(&self, tile: &str) -> Vec<(String, String, u32)> {
+        let Some(&ti) = self.tile_index.get(tile) else { return vec![] };
+        let td = &self.tile_td[ti as usize];
+        td.site_pins.iter().map(|(s, p, w)| (s.clone(), p.clone(), self.node_of[(self.wire_base[ti as usize] + w) as usize])).collect()
+    }
+
     /// Every pin node of one CLB site.
     pub fn site_pin_nodes(&self, tile: &str, site: &str) -> Vec<u32> {
         let Some(&ti) = self.tile_index.get(tile) else { return vec![] };
-        let td = &self.types[&self.tiles[ti as usize].1];
+        let td = &self.tile_td[ti as usize];
         td.site_pins.iter().filter(|(s, _, _)| s == site).map(|&(_, _, w)| self.node_of[(self.wire_base[ti as usize] + w) as usize]).collect()
     }
 
@@ -1577,13 +1862,72 @@ fn read_json(p: &std::path::Path) -> R<Value> {
         .map_err(|e| format!("{}: {e}", p.display()))
 }
 
+/// Pips prjxray lists as hard (`->`) that are in fact the unselected input
+/// of a bitless mux, so a route through one writes nothing and leaves the
+/// destination undriven. An OLOGIC's CLKB takes IOI_OCLKM (the zero-bit
+/// default) or IOI_OCLK (unknown bits): routed through IOI_OCLK, an ODDR's
+/// CLKB was dead and the output never toggled (dr-b, 2026-10-31: AD9363 TX
+/// loopback constant 0xFFF; Vivado's own bitstream drives CLKB from OCLKM).
+fn unconfigurable_alternate(src: &str, dst: &str) -> bool {
+    matches!((src, dst), ("IOI_OCLK_0", "IOI_OLOGIC0_CLKB") | ("IOI_OCLK_1", "IOI_OLOGIC1_CLKB"))
+}
+
+/// The I/O tiles' site route-through pseudo-pips a design router may take,
+/// with the tile-relative lines that make each conduct (as nextpnr's
+/// xilinx pseudo-pip table configures them): the ILOGIC bypass from D or
+/// DDLY to O, the OLOGIC bypass from D1 to OQ, and the IOB pair's output and
+/// tristate pass-through. prjxray lists these as pseudo-pips with no segbits
+/// (or as hints), so without this table an input pin or IDELAY output has no
+/// way into the fabric and a differential output's slave no way to its
+/// master. Lines the tile type has no segbits for are dropped by the caller.
+fn io_pseudo(ty: &str, src: &str, dst: &str) -> Option<Vec<String>> {
+    let side = ty.chars().next().filter(|c| *c == 'L' || *c == 'R')?;
+    let fam = &ty[1..];
+    let fam = fam.split('_').next().unwrap_or(fam);
+    if fam == "IOI3" {
+        let idx = |w: &str, pre: &str, suf: &str| -> Option<String> {
+            let i = w.strip_prefix(pre)?.strip_suffix(suf)?;
+            (i.len() <= 1 && i.chars().all(|c| c.is_ascii_digit())).then(|| i.to_string())
+        };
+        let s = side.to_string();
+        if let Some(i) = idx(dst, "IOI_ILOGIC", "_O") {
+            let y = if i.is_empty() { "0".to_string() } else { i.clone() };
+            if src == format!("{s}IOI_ILOGIC{i}_D") {
+                return Some(vec![format!("IDELAY_Y{y}.IDELAY_TYPE_FIXED"), format!("ILOGIC_Y{y}.ZINV_D")]);
+            }
+            if src == format!("{s}IOI_ILOGIC{i}_DDLY") {
+                return Some(vec![format!("ILOGIC_Y{y}.IDELMUXE3.P0"), format!("ILOGIC_Y{y}.ZINV_D")]);
+            }
+        }
+        if let Some(i) = idx(dst, &format!("{s}IOI_OLOGIC"), "_OQ") {
+            let y = if i.is_empty() { "0".to_string() } else { i.clone() };
+            if src == format!("IOI_OLOGIC{i}_D1") {
+                return Some(vec![format!("OLOGIC_Y{y}.OMUX.D1"), format!("OLOGIC_Y{y}.OQUSED"), format!("OLOGIC_Y{y}.OSERDES.DATA_RATE_TQ.BUF")]);
+            }
+        }
+        // T1 -> TQ conducts inverted unless ZINV_T1 is set.
+        if let Some(i) = idx(dst, &format!("{s}IOI_OLOGIC"), "_TQ") {
+            let y = if i.is_empty() { "0".to_string() } else { i.clone() };
+            if src == format!("IOI_OLOGIC{i}_T1") {
+                return Some(vec![format!("OLOGIC_Y{y}.ZINV_T1")]);
+            }
+        }
+        return None;
+    }
+    if fam == "IOB33" || fam == "IOB18" {
+        let pass = [("IOB_O_OUT0", "IOB_O_IN1"), ("IOB_O0", "IOB_O_OUT0"), ("IOB_T_OUT0", "IOB_T_IN1"), ("IOB_T0", "IOB_T_OUT0"), ("IOB_PADOUT1", "IOB_DIFFI_IN0")];
+        return pass.iter().any(|&(a, b)| a == src && b == dst).then(Vec::new);
+    }
+    None
+}
+
 fn load_type(db: &Database, ty: &str) -> R<TypeData> {
     let path = db.root.join(format!("tile_type_{ty}.json"));
     let mut wires = Vec::new();
     let mut index = HashMap::new();
     let mut pips = Vec::new();
     if !path.is_file() {
-        return Ok(TypeData { wires, index, pips, site_pins: vec![] }); // tile types with no routing data
+        return Ok(TypeData { wires, index, pips, site_pins: vec![], wire_rc: vec![], used: vec![] }); // tile types with no routing data
     }
     let v = read_json(&path)?;
 
@@ -1596,6 +1940,22 @@ fn load_type(db: &Database, ty: &str) -> R<TypeData> {
         index.insert(w.clone(), wires.len() as u32);
         wires.push(w);
     }
+    // nextpnr's units: int(float(cap) * 1000) fF, int(float(res)).
+    let num = |v: &Value| -> f64 {
+        match v {
+            Value::String(s) => s.parse().unwrap_or(0.0),
+            Value::Number(n) => n.as_f64().unwrap_or(0.0),
+            _ => 0.0,
+        }
+    };
+    let wire_rc: Vec<NodeRc> = wires
+        .iter()
+        .map(|w| {
+            let d = &v["wires"][w.as_str()];
+            NodeRc { res: num(&d["res"]).trunc() as u32, cap: (num(&d["cap"]) * 1000.0).trunc() as u32 }
+        })
+        .collect();
+    let mut used = vec![false; wires.len()];
 
     // Site pins: wire -> (site, pin). CLB sites are named as in FASM
     // (SLICEL_X0); others TYPE_XxYy (RAMB18E1_X0Y1, DSP48E1_X0Y0).
@@ -1634,17 +1994,52 @@ fn load_type(db: &Database, ty: &str) -> R<TypeData> {
         None
     };
 
-    let seg = db.segbits.get(&ty.to_uppercase());
-    let has_bits = |f: &str| seg.is_some_and(|s| s.by_block.iter().any(|(_, m)| m.contains_key(f)));
+    let own = ty.to_uppercase();
+    let seg = db.segbits.get(&own);
+    // Bits come from the alias type for a tile type with none of its own
+    // (an I/O SING tile): a feature `RIOI3_SING.X` is looked up as
+    // `RIOI3.X`, and the assembler maps it back through the tile's alias.
+    // Without this every SING-tile feature reads as bitless, and an I/O
+    // route-through there (ILOGIC D -> O) becomes a fixed edge that writes
+    // no ZINV_D: the input conducts inverted.
+    let bits_ty = db.segbits_type(&own);
+    let bits_seg = db.segbits.get(&bits_ty);
+    let has_bits = |f: &str| {
+        let key = match f.strip_prefix(own.as_str()) {
+            Some(rest) if bits_ty != own && rest.starts_with('.') => format!("{bits_ty}{rest}"),
+            _ => f.to_string(),
+        };
+        bits_seg.is_some_and(|s| s.by_block.iter().any(|(_, m)| m.contains_key(&key)))
+    };
     let always = |f: &str| seg.is_some_and(|s| s.ppips_always.contains(f));
     let pseudo_other = |f: &str| seg.is_some_and(|s| s.ppips.contains(f) && !s.ppips_always.contains(f));
     let default = |f: &str| seg.is_some_and(|s| s.ppips_default.contains(f));
 
-    let mut add = |src: &str, dst: &str, hard: bool, index: &HashMap<String, u32>| {
+    let mut add = |src: &str, dst: &str, hard: bool, timing: PipTiming, index: &HashMap<String, u32>| {
         let (Some(&s), Some(&d)) = (index.get(src), index.get(dst)) else { return };
+        // A BUFR or PHASER_IN passes I to O only when the site is
+        // configured; prjxray still lists the pair as an `always` pseudo-pip.
+        // No design route may run through one it did not place.
+        if let (Some((ss, _)), Some((ds, _))) = (pin_of.get(src), pin_of.get(dst)) {
+            if ss == ds && (ss.starts_with("BUFR_") || ss.starts_with("PHASER_IN_PHY_")) {
+                return;
+            }
+        }
         let key = format!("{ty}.{dst}.{src}");
+        if unconfigurable_alternate(src, dst) && !has_bits(&key) {
+            return;
+        }
+        let io = io_pseudo(ty, src, dst).filter(|_| !has_bits(&key));
         let (feature, relay, is_default) = if has_bits(&key) {
             (Some(key), None, false)
+        } else if let Some(lines) = io.clone() {
+            // An I/O site route-through: configured by the site's own bits
+            // (those this tile type defines), or by none at all.
+            let lines: Vec<String> = lines.into_iter().filter(|l| has_bits(&format!("{}.{l}", ty.to_uppercase()))).collect();
+            match (lines.is_empty(), pin_of.get(dst).or(pin_of.get(src))) {
+                (false, Some((site, _))) => (None, Some((site.clone(), lines)), false),
+                _ => (None, None, false),
+            }
         } else if always(&key) || (hard && !pseudo_other(&key)) {
             (None, None, false)
         } else if let Some(r) = relay(src, dst) {
@@ -1654,20 +2049,39 @@ fn load_type(db: &Database, ty: &str) -> R<TypeData> {
         } else {
             return; // hint pseudo-pip, or a buffered pip with no known bits
         };
-        pips.push(TypePip { src: s, dst: d, feature, relay, default: is_default });
+        let through = io.is_some() && relay.is_some();
+        pips.push(TypePip { src: s, dst: d, feature, relay, default: is_default, through, timing });
     };
 
     if let Some(o) = v["pips"].as_object() {
         for (name, p) in o {
             let body = name.split_once('.').map(|x| x.1).unwrap_or(name);
             let pseudo = p["is_pseudo"].as_str() == Some("1");
+            // nextpnr: delay max(slow min, slow max) in ps, int(in_cap *
+            // 1000) fF, int(res); buffered unless a pass transistor.
+            let s2d = &p["src_to_dst"];
+            let delay = match s2d["delay"].as_array() {
+                Some(d) if d.len() >= 4 => (num(&d[2]).max(num(&d[3])) * 1000.0).trunc() as u32,
+                _ => 0,
+            };
+            let timing = PipTiming {
+                delay,
+                in_cap: (num(&s2d["in_cap"]) * 1000.0).trunc() as u32,
+                out_res: num(&s2d["res"]).trunc() as u32,
+                buffered: num(&p["is_pass_transistor"]) == 0.0,
+            };
+            for w in [&p["src_wire"], &p["dst_wire"]] {
+                if let Some(&i) = w.as_str().and_then(|w| index.get(w)) {
+                    used[i as usize] = true;
+                }
+            }
             if let Some((a, b)) = body.split_once("<<->>") {
-                add(a, b, false, &index);
-                add(b, a, false, &index);
+                add(a, b, false, timing, &index);
+                add(b, a, false, timing, &index);
             } else if let Some((a, b)) = body.split_once("->>") {
-                add(a, b, false, &index);
+                add(a, b, false, timing, &index);
             } else if let Some((a, b)) = body.split_once("->") {
-                add(a, b, !pseudo, &index);
+                add(a, b, !pseudo, timing, &index);
             }
         }
     }
@@ -1680,7 +2094,7 @@ fn load_type(db: &Database, ty: &str) -> R<TypeData> {
             let q = pin_of.iter().find(|(_, (s2, p2))| s2 == site && p2 == &format!("{l}Q")).map(|(w, _)| w.clone());
             if let (Some(&src), Some(dst)) = (index.get(w), q.and_then(|q| index.get(&q).copied())) {
                 let lines = vec![format!("{site}.{l}FFMUX.{l}X"), format!("{site}.{l}FF.ZINI"), format!("{site}.{l}FF.ZRST"), format!("{site}.FFSYNC")];
-                pips.push(TypePip { src, dst, feature: None, relay: Some((site.clone(), lines)), default: false });
+                pips.push(TypePip { src, dst, feature: None, relay: Some((site.clone(), lines)), default: false, through: false, timing: PipTiming::default() });
             }
         }
     }
@@ -1724,7 +2138,7 @@ fn load_type(db: &Database, ty: &str) -> R<TypeData> {
                 }
             }
             if let (Some(i), Some(o)) = (input.and_then(|w| index.get(&w).copied()), output.and_then(|w| index.get(&w).copied())) {
-                pips.push(TypePip { src: i, dst: o, feature: None, relay: Some((name.clone(), lines)), default: false });
+                pips.push(TypePip { src: i, dst: o, feature: None, relay: Some((name.clone(), lines)), default: false, through: false, timing: PipTiming::default() });
             }
         }
     }
@@ -1739,7 +2153,10 @@ fn load_type(db: &Database, ty: &str) -> R<TypeData> {
     let mut site_pins: Vec<(String, String, u32)> =
         pin_of.iter().filter_map(|(w, (site, pin))| index.get(w).map(|&i| (site.clone(), pin.clone(), i))).collect();
     site_pins.sort();
-    Ok(TypeData { wires, index, pips, site_pins })
+    for (_, _, w) in &site_pins {
+        used[*w as usize] = true;
+    }
+    Ok(TypeData { wires, index, pips, site_pins, wire_rc, used })
 }
 
 struct UnionFind {
@@ -1766,15 +2183,32 @@ impl UnionFind {
     }
     /// Root of every element as a dense id 0..n_nodes.
     fn dense(mut self) -> (Vec<u32>, usize) {
+        // Ids in order of first appearance.
         let n = self.parent.len();
-        let mut id: HashMap<u32, u32> = HashMap::new();
+        let mut id = vec![u32::MAX; n];
+        let mut count = 0u32;
         let mut out = Vec::with_capacity(n);
         for i in 0..n as u32 {
-            let r = self.find(i);
-            let next = id.len() as u32;
-            out.push(*id.entry(r).or_insert(next));
+            let r = self.find(i) as usize;
+            if id[r] == u32::MAX {
+                id[r] = count;
+                count += 1;
+            }
+            out.push(id[r]);
         }
-        let count = id.len();
-        (out, count)
+        (out, count as usize)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unconfigurable_alternate;
+
+    #[test]
+    fn ologic_clkb_only_from_oclkm() {
+        assert!(unconfigurable_alternate("IOI_OCLK_0", "IOI_OLOGIC0_CLKB"));
+        assert!(unconfigurable_alternate("IOI_OCLK_1", "IOI_OLOGIC1_CLKB"));
+        assert!(!unconfigurable_alternate("IOI_OCLKM_0", "IOI_OLOGIC0_CLKB"));
+        assert!(!unconfigurable_alternate("IOI_OCLK_0", "IOI_OLOGIC0_CLK"));
     }
 }

@@ -13,7 +13,7 @@ use oxibit_fasm::route::{EdgeKind, Graph, PipLookup, pip_lines};
 use oxibit_report::{Event, PhaseState, Progress};
 use serde_json::{Value, json};
 
-use crate::nets::{self, Net, NetClass};
+use crate::nets::{self, Identity, Net, NetClass};
 use crate::router::{Opts, Router, Stats};
 
 /// Outcome of `run`.
@@ -33,6 +33,8 @@ pub struct Reroute {
 pub struct Check {
     pub sinks: usize,
     pub sinks_missing: usize,
+    /// (net source, sink) of every sink not reached.
+    pub missing: Vec<(u32, u32)>,
     pub shorts: HashSet<u32>,
 }
 
@@ -83,6 +85,7 @@ fn class_name(c: NetClass) -> &'static str {
         NetClass::Constant => "constant",
         NetClass::Default => "default",
         NetClass::Clock => "clock",
+        NetClass::GlobalClock => "global_clock",
     }
 }
 
@@ -142,8 +145,27 @@ pub fn run(g: &Graph, fasm: &str, opts: Opts, p: &dyn Progress) -> Reroute {
 /// and hard wiring, where a hard edge into a node a set pip also drives is a
 /// mux's unselected input and does not conduct. Clock nets also cross the
 /// clock buffers the FASM configures (`Graph::trace` with relays).
+#[oxibit_prof::hot]
 pub fn check(g: &Graph, nets: &[Net], fasm: &str) -> Check {
     let on: HashSet<String> = pip_lines(fasm);
+    // Every bare line: a clock buffer relay's lines are site settings.
+    let mut all: HashSet<String> = fasm
+        .lines()
+        .map(|l| l.split('#').next().unwrap_or("").trim())
+        .filter(|f| !f.is_empty() && !f.contains('=') && !f.contains('['))
+        .map(String::from)
+        .collect();
+    // An I/O site route-through on a top SING IOI tile is written for its
+    // site's `_Y1` (`iocfg::IoCfg::route_line`); the graph names it `_Y0`.
+    let sing: Vec<String> = all
+        .iter()
+        .filter(|l| l.contains("IOI") && l.contains("_SING_"))
+        .filter_map(|l| {
+            let (tile, c) = l.split_once('.')?;
+            c.contains("Y1").then(|| format!("{tile}.{}", c.replacen("Y1", "Y0", 1)))
+        })
+        .collect();
+    all.extend(sing);
     let set_into: HashSet<u32> = on
         .iter()
         .filter_map(|l| match g.lookup_pip(l) {
@@ -151,23 +173,33 @@ pub fn check(g: &Graph, nets: &[Net], fasm: &str) -> Check {
             _ => None,
         })
         .collect();
-    let mut owner: HashMap<u32, usize> = HashMap::new();
+    // Nodes by the electrical net on them: constants of one value are one
+    // net, however many ties drive them.
+    let mut owner: HashMap<u32, Identity> = HashMap::new();
     let mut c = Check::default();
     for (i, n) in nets.iter().enumerate() {
         if n.class == NetClass::Default {
             continue;
         }
-        let nodes = if n.class == NetClass::Clock { g.trace(n.source, &on, true).0 } else { reach(g, n.source, &on, &set_into) };
+        let id = n.identity(i);
+        let nodes = if matches!(n.class, NetClass::Clock | NetClass::GlobalClock) {
+            g.trace(n.driver.anchor(), &all, true).0
+        } else {
+            reach(g, n.driver.nodes(), &on, &all, &set_into)
+        };
         c.sinks += n.sinks.len();
-        c.sinks_missing += n.sinks.iter().filter(|s| !nodes.contains(s)).count();
+        for &s in n.sinks.iter().filter(|s| !nodes.contains(s)) {
+            c.sinks_missing += 1;
+            c.missing.push((n.driver.anchor(), s));
+        }
         for m in nodes {
             match owner.get(&m) {
-                Some(&j) if j != i => {
+                Some(&j) if j != id => {
                     c.shorts.insert(m);
                 }
                 Some(_) => {}
                 None => {
-                    owner.insert(m, i);
+                    owner.insert(m, id);
                 }
             }
         }
@@ -175,15 +207,19 @@ pub fn check(g: &Graph, nets: &[Net], fasm: &str) -> Check {
     c
 }
 
-fn reach(g: &Graph, src: u32, on: &HashSet<String>, set_into: &HashSet<u32>) -> HashSet<u32> {
-    let mut seen = HashSet::from([src]);
-    let mut stack = vec![src];
+/// Nodes `src` reaches over set pips, fixed edges no set pip overrides,
+/// and the I/O site route-throughs whose settings (in `lines`) are set.
+fn reach(g: &Graph, roots: &[u32], on: &HashSet<String>, lines: &HashSet<String>, set_into: &HashSet<u32>) -> HashSet<u32> {
+    let mut seen: HashSet<u32> = roots.iter().copied().collect();
+    let mut stack = roots.to_vec();
     while let Some(n) = stack.pop() {
         for &(d, tile, pi) in g.out_edges(n) {
             let conducts = match g.edge_kind(tile, pi) {
                 EdgeKind::Feature => on.contains(&g.edge_pip(tile, pi).name()),
                 EdgeKind::Fixed => !set_into.contains(&d),
-                EdgeKind::Relay | EdgeKind::Default => false,
+                // A tie's default into an interconnect input no pip sets.
+                EdgeKind::Default => roots.contains(&n) && !set_into.contains(&d),
+                EdgeKind::Relay => g.edge_site_through(tile, pi) && g.relay_conducts(tile, pi, lines),
             };
             if conducts && seen.insert(d) {
                 stack.push(d);

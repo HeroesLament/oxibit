@@ -3,7 +3,7 @@
 //! propagation across an I/O bank). Output is the full, zero-filled frame
 //! set fasm2frames writes without `--sparse`.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use oxibit_bitstream::FRAME_WORDS;
 use oxibit_bitstream::layout::FrameAddress;
@@ -38,11 +38,22 @@ pub struct Assembler<'a> {
     bits: HashMap<Key, (bool, usize)>,
     lines: Vec<String>,
     set_features: Vec<SetFeature>,
+    /// Every feature with a set bit the lines enabled, as
+    /// `disassemble::decode` names it.
+    named: BTreeSet<String>,
 }
 
 /// Assemble a whole FASM file the way `fasm2frames --part P` does.
 pub fn assemble(db: &Database, fasm: &str) -> Result<BTreeMap<FrameAddress, Frame>, Error> {
-    let mut a = Assembler { db, bits: HashMap::new(), lines: Vec::new(), set_features: Vec::new() };
+    assemble_named(db, fasm).map(|(f, _)| f)
+}
+
+/// `assemble`, and every feature with a set bit it enabled (the FASM's,
+/// the part's required features, the STEPDOWN propagation), named as
+/// `disassemble::decode` names them: the tile, then the segbits name after
+/// its tile type, an aliased tile's in its alias type's names.
+pub fn assemble_named(db: &Database, fasm: &str) -> Result<(BTreeMap<FrameAddress, Frame>, BTreeSet<String>), Error> {
+    let mut a = Assembler { db, bits: HashMap::new(), lines: Vec::new(), set_features: Vec::new(), named: BTreeSet::new() };
     let mut missing = Vec::new();
 
     for raw in fasm.lines() {
@@ -60,7 +71,8 @@ pub fn assemble(db: &Database, fasm: &str) -> Result<BTreeMap<FrameAddress, Fram
     }
 
     a.stepdown()?;
-    Ok(a.frames())
+    let frames = a.frames();
+    Ok((frames, a.named))
 }
 
 impl<'a> Assembler<'a> {
@@ -75,7 +87,11 @@ impl<'a> Assembler<'a> {
 
         for address in sf.addresses() {
             match self.feature_bits(tile, feature, address) {
-                Ok(bits) => {
+                Ok((name, bits)) => {
+                    if let Some(n) = name.filter(|_| bits.iter().any(|b| b.1)) {
+                        let rest = n.split_once('.').map(|x| x.1).unwrap_or(&n);
+                        self.named.insert(format!("{tile}.{rest}"));
+                    }
                     for (key, set) in bits {
                         self.set_bit(key, set, line_no)?;
                     }
@@ -108,15 +124,16 @@ impl<'a> Assembler<'a> {
         }
     }
 
-    /// `enable_feature` + `feature_to_bits` (plain or aliased tile).
-    fn feature_bits(&self, tile: &str, feature: &str, address: u32) -> Result<Vec<(Key, bool)>, String> {
+    /// `enable_feature` + `feature_to_bits` (plain or aliased tile): the
+    /// full segbits name (none for a pseudo-pip) and the bits.
+    fn feature_bits(&self, tile: &str, feature: &str, address: u32) -> Result<Named, String> {
         let info = self.db.tiles.get(tile).ok_or_else(|| format!("tile {tile} not in tilegrid"))?;
         let db_k = format!("{}.{}", info.tile_type, feature);
         let own = self.segbits(&info.tile_type)?;
 
         let aliased = info.bits.iter().any(|(_, _, a)| a.is_some());
         if own.ppips.contains(&db_k) {
-            return Ok(vec![]);
+            return Ok((None, vec![]));
         }
         if !aliased {
             let bits_map: Vec<(u32, Bits)> = info.bits.iter().map(|(b, bits, _)| (*b, bits.clone())).collect();
@@ -232,17 +249,19 @@ impl<'a> Assembler<'a> {
     }
 }
 
+type Named = (Option<String>, Vec<(Key, bool)>);
+
 fn missing(info: &TileInfo, db_k: &str) -> String {
     format!("Segment DB {}, key {db_k} not found", info.tile_type)
 }
 
 /// `TileSegbits.feature_to_bits` + `map_bit_to_frame`.
-fn to_bits(seg: &TileSegbits, bits_map: &[(u32, Bits)], feature: &str, address: u32) -> Option<Vec<(Key, bool)>> {
+fn to_bits(seg: &TileSegbits, bits_map: &[(u32, Bits)], feature: &str, address: u32) -> Option<Named> {
     // Checked here as well as by the caller: for an aliased tile this is
     // the ALIAS type's ppips (e.g. RIOI3 for RIOI3_SING), which prjxray
     // consults inside the aliased lookup.
     if seg.ppips.contains(feature) {
-        return Some(vec![]);
+        return Some((None, vec![]));
     }
     let map_bit = |block: u32, column: u32, bit: u32, set: bool| -> Option<(Key, bool)> {
         let bits = &bits_map.iter().find(|(b, _)| *b == block)?.1;
@@ -253,13 +272,15 @@ fn to_bits(seg: &TileSegbits, bits_map: &[(u32, Bits)], feature: &str, address: 
     if address == 0 {
         for (block, map) in &seg.by_block {
             if let Some(sb) = map.get(feature) {
-                return sb.iter().map(|b| map_bit(*block, b.column, b.bit, b.set)).collect();
+                let bits: Option<Vec<_>> = sb.iter().map(|b| map_bit(*block, b.column, b.bit, b.set)).collect();
+                return bits.map(|b| (Some(feature.to_string()), b));
             }
         }
     }
     let (block, full) = seg.addresses.get(feature)?.get(&address)?;
     let map = &seg.by_block.iter().find(|(b, _)| b == block)?.1;
-    map.get(full)?.iter().map(|b| map_bit(*block, b.column, b.bit, b.set)).collect()
+    let bits: Option<Vec<_>> = map.get(full)?.iter().map(|b| map_bit(*block, b.column, b.bit, b.set)).collect();
+    bits.map(|b| (Some(full.clone()), b))
 }
 
 /// fasm2frames' `.frm` text: one line per frame, ascending address.

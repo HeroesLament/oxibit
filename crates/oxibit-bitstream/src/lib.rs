@@ -22,6 +22,7 @@ pub mod ecc;
 pub mod layout;
 pub mod packet;
 pub mod part;
+pub mod reader;
 pub mod writer;
 pub mod zynq_boot;
 

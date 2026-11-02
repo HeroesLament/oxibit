@@ -11,10 +11,11 @@
 
 pub mod assemble;
 pub mod db;
+pub mod disassemble;
 pub mod parse;
 pub mod route;
 
-pub use assemble::{Error, assemble, to_frm};
+pub use assemble::{Error, assemble, assemble_named, to_frm};
 
 /// FASM text -> configuration words (preamble through the trailing NOPs).
 pub fn build(db: &db::Database, fasm: &str) -> Result<Vec<u32>, Error> {

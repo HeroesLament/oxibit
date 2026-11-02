@@ -1,0 +1,11 @@
+[package]
+name = "oxibit-place"
+description = "Packing and placement for 7-series: from a primitive netlist to the packed, placed design oxibit-pnr routes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+oxibit-pnr.workspace = true
+serde_json.workspace = true

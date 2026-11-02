@@ -82,6 +82,22 @@ fn read(p: &Path) -> R<String> {
 }
 
 impl Database {
+    /// The tile type whose segbits `tile_type` (upper case) is configured
+    /// by: its own, or for a type with none that prjxray aliases (an I/O
+    /// SING tile to its pair, RIOI3_SING -> RIOI3), the alias type.
+    pub fn segbits_type(&self, tile_type: &str) -> String {
+        let own = self.segbits.get(tile_type).is_some_and(|s| s.by_block.iter().any(|(_, m)| !m.is_empty()));
+        if own {
+            return tile_type.to_string();
+        }
+        self.tiles
+            .values()
+            .filter(|t| t.tile_type.eq_ignore_ascii_case(tile_type))
+            .flat_map(|t| t.bits.iter())
+            .find_map(|(_, _, a)| a.as_ref().map(|a| a.tile_type.to_uppercase()))
+            .unwrap_or_else(|| tile_type.to_string())
+    }
+
     pub fn open(root: &Path, part: &str) -> R<Self> {
         let fabric = fabric_for_part(root, part)?;
         let part_dir = root.join(part);
