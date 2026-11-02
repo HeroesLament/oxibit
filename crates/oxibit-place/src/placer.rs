@@ -25,6 +25,7 @@ use oxibit_pnr::packed::Loc;
 use crate::device::Device;
 use crate::netlist::{CellId, NetId};
 use crate::pack::{Packer, slot};
+use crate::pins::PinPoints;
 
 // ---------------------------------------------------------------- sites ---
 
@@ -627,11 +628,27 @@ pub struct Options {
     /// over 48 but moved the pins into the neighbours, the 3x5-tile peak
     /// rose (695 to 704 of 840) and the route did worse.
     pub pin_weight: f64,
+    /// Per-pin grid points of fixed hard blocks, by cell type (`PS7_PS7`):
+    /// a net's pin on such a cell counts at its pin's point, not the
+    /// cell's (`pins::PinPoints`). Empty: every fixed pin at its cell.
+    pub pin_points: HashMap<String, PinPoints>,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { seed: 1, inner: 20, max_fanout: 200, max_moves_per_obj: 3000, t0_scale: 24.0, unit_frac: 0.5, unit_window: 4.0, polish: 0, tile_pin_cap: 48, pin_weight: 0.0 }
+        Options {
+            seed: 1,
+            inner: 20,
+            max_fanout: 200,
+            max_moves_per_obj: 3000,
+            t0_scale: 24.0,
+            unit_frac: 0.5,
+            unit_window: 4.0,
+            polish: 0,
+            tile_pin_cap: 48,
+            pin_weight: 0.0,
+            pin_points: HashMap::new(),
+        }
     }
 }
 
@@ -640,6 +657,18 @@ pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, op
     let mut st = PlaceStats::default();
     let mut rng = Rng(opts.seed.max(1) ^ 0x9E37_79B9_7F4A_7C15);
     let _ = dev;
+
+    // The PS7 has one site: fix it first, so its pins are fixed points of
+    // the nets below. Fixed at the end (as before), it had no bel during the
+    // anneal, every PS7 pin dropped out of the cost, and a one-sink net from
+    // a flop to a PS7 pin had one pin left and was not counted at all: the
+    // AXI HP address registers of the mimohalow board top were free to sit
+    // ~90 tiles from their pins.
+    for c in p.nl.cells_of("PS7_PS7") {
+        if let Some(s) = sites.ps7.first() {
+            p.nl.cell_mut(c).bel = Some(Loc::Grid { x: s.x, y: s.y, site: s.rel.clone(), bel: "PS7".into() });
+        }
+    }
 
     // Objects: slice macros (one slice, or a chain of slices going up) and
     // hard cells. `fills[o]` are the slice contents of a slice object.
@@ -985,11 +1014,12 @@ pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, op
                     continue;
                 }
                 let mut pins = Vec::new();
-                for (pc, _) in net.driver.iter().chain(net.users.iter()) {
+                for (pc, port) in net.driver.iter().chain(net.users.iter()) {
                     if let Some(&ci) = cidx.get(pc) {
                         pins.push(Pin::Cell(ci));
                     } else if let Some(Loc::Grid { x, y, .. }) = &p.nl.cell(*pc).bel {
-                        pins.push(Pin::Fixed(*x, *y));
+                        let at = opts.pin_points.get(&p.nl.cell(*pc).ty).and_then(|pp| pp.get(port)).unwrap_or((*x, *y));
+                        pins.push(Pin::Fixed(at.0, at.1));
                     }
                 }
                 if pins.len() < 2 || pins.len() > opts.max_fanout {
@@ -1374,11 +1404,6 @@ pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, op
             && let Some(s) = bufg.next()
         {
             p.nl.cell_mut(c).bel = Some(Loc::Grid { x: s.x, y: s.y, site: s.rel.clone(), bel: "BUFGCTRL".into() });
-        }
-    }
-    for c in p.nl.cells_of("PS7_PS7") {
-        if let Some(s) = sites.ps7.first() {
-            p.nl.cell_mut(c).bel = Some(Loc::Grid { x: s.x, y: s.y, site: s.rel.clone(), bel: "PS7".into() });
         }
     }
     for (c, b) in [("$PACKER_GND_DRV", "PSEUDO_GND"), ("$PACKER_VCC_DRV", "PSEUDO_VCC")] {

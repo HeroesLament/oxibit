@@ -398,6 +398,7 @@ dependencies = [
 name = "oxibit-place"
 version = "0.1.0"
 dependencies = [
+ "oxibit-fasm",
  "oxibit-pnr",
  "serde_json",
 ]

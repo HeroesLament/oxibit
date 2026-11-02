@@ -6,6 +6,7 @@ pub mod compare;
 pub mod device;
 pub mod netlist;
 pub mod pack;
+pub mod pins;
 pub mod place;
 pub mod placer;
 pub mod xdc;

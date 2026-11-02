@@ -53,6 +53,21 @@ fn run() -> Result<bool, String> {
                                       "ramb36": sites.ramb36.len(), "ramb18": sites.ramb18.len(), "bufg": sites.bufg.len(), "ps7": sites.ps7.len()}}})
         );
         let mut opts = oxibit_place::placer::Options { seed, ..Default::default() };
+        // The PS7's pins at their own interconnect (`pins::PinPoints`);
+        // OXIBIT_PS7_PINS=0 costs them at the site, as before.
+        let ps7_pins = std::env::var("OXIBIT_PS7_PINS").map(|v| v != "0").unwrap_or(true);
+        if ps7_pins && !p.nl.cells_of("PS7_PS7").is_empty() {
+            let tp = std::time::Instant::now();
+            let db_ = oxibit_fasm::db::Database::open(std::path::Path::new(db), part)?;
+            let g = oxibit_fasm::route::Graph::build_with(&db_, None, oxibit_fasm::route::GraphOpts { defaults: true })?;
+            for s in &sites.ps7 {
+                let tile = dev.site_tile.get(&s.rel).ok_or_else(|| format!("PS7 site {} has no tile", s.rel))?;
+                let pp = oxibit_place::pins::PinPoints::of_site(&g, tile, &s.rel);
+                let sample: Vec<_> = pp.iter().filter(|(k, _)| k.starts_with("SAXIHP0AWADDR") || k.starts_with("MAXIGP0RDATA")).take(6).collect();
+                println!("{}", json!({"ps7_pins": {"site": s.rel, "tile": tile, "pins": pp.len(), "site_xy": [s.x, s.y], "sample": sample, "seconds": tp.elapsed().as_secs_f64()}}));
+                opts.pin_points.insert("PS7_PS7".into(), pp);
+            }
+        }
         if let Some(m) = std::env::var("OXIBIT_PLACE_MOVES").ok().and_then(|v| v.parse().ok()) {
             opts.max_moves_per_obj = m;
         }
