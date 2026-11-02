@@ -18,7 +18,7 @@
 
 use oxibit_hdl::netlist::Module;
 use oxibit_report::{Event, Progress};
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::caps::{DeviceCaps, Mode};
 use crate::lower::Lowered;
@@ -95,33 +95,7 @@ pub trait PhysicalPass: Pass {
     fn run(&self, m: &mut Physical) -> Self::Stats;
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Outcome {
-    Ran,
-    Disabled,
-    Refused(String),
-}
-
-/// What happened to one pass, for the report.
-#[derive(Clone, Debug)]
-pub struct PassRecord {
-    pub name: &'static str,
-    pub stage: &'static str,
-    pub evidence: String,
-    pub outcome: Outcome,
-    pub stats: Value,
-}
-
-impl PassRecord {
-    pub fn json(&self) -> Value {
-        let outcome = match &self.outcome {
-            Outcome::Ran => json!("ran"),
-            Outcome::Disabled => json!("disabled"),
-            Outcome::Refused(why) => json!({"refused": why}),
-        };
-        json!({"pass": self.name, "stage": self.stage, "evidence": self.evidence, "outcome": outcome, "stats": self.stats})
-    }
-}
+pub use oxibit_policy::{Outcome, PassRecord};
 
 /// Runs passes under a policy and records the result of each.
 pub struct Flow<'a> {
@@ -224,6 +198,7 @@ impl<'a> Flow<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use crate::caps::Level;
     use crate::policy::EvidenceLevel;
 

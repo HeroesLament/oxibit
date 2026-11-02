@@ -6,12 +6,54 @@
 //!
 //! stdout: JSON lines (pack stats, comparison, placement).
 
+use oxibit_place::policy::{CarryDi, Level, Lut5Fill, PackPolicy};
 use oxibit_place::{compare, netlist::Netlist, pack, place};
 use oxibit_pnr::packed::Design;
 use serde_json::{Value, json};
 
 fn read(path: &str) -> Result<Value, String> {
     serde_json::from_str(&std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?).map_err(|e| format!("{path}: {e}"))
+}
+
+/// The packing policy from the environment:
+///   OXIBIT_PACK_POLICY  exploration (default) | production | nextpnr
+///   OXIBIT_PACK_FLOOR   unsupported | modeled | pnr | fasm | silicon
+///   OXIBIT_CARRY_DI     lut5 | bypass
+///   OXIBIT_LUT5_FILL    none, or a comma list of chain, ff_letter, pairs
+///   OXIBIT_PACK_FOLD    0 | 1
+///   OXIBIT_FILL_BYPASS  flops on bypass pins per slice, 1..4
+fn pack_policy() -> Result<PackPolicy, String> {
+    let var = |k: &str| std::env::var(k).ok();
+    let mut pol = match var("OXIBIT_PACK_POLICY").as_deref() {
+        None | Some("exploration") => PackPolicy::exploration(),
+        Some("production") => PackPolicy::production(),
+        Some("nextpnr") => PackPolicy::nextpnr_reference(),
+        Some(o) => return Err(format!("OXIBIT_PACK_POLICY={o}: expected exploration, production or nextpnr")),
+    };
+    if let Some(v) = var("OXIBIT_PACK_FLOOR") {
+        pol.floor = Level::parse(&v).ok_or_else(|| format!("OXIBIT_PACK_FLOOR={v}: expected unsupported, modeled, pnr, fasm or silicon"))?;
+    }
+    if let Some(v) = var("OXIBIT_CARRY_DI") {
+        pol.carry_di = CarryDi::parse(&v).ok_or_else(|| format!("OXIBIT_CARRY_DI={v}: expected lut5 or bypass"))?;
+    }
+    if let Some(v) = var("OXIBIT_LUT5_FILL") {
+        pol.lut5 = Lut5Fill::NONE;
+        for w in v.split(',').map(str::trim).filter(|w| !w.is_empty() && *w != "none") {
+            match w {
+                "chain" => pol.lut5.chain = true,
+                "ff_letter" => pol.lut5.ff_letter = true,
+                "pairs" => pol.lut5.pairs = true,
+                o => return Err(format!("OXIBIT_LUT5_FILL: unknown {o}: expected chain, ff_letter, pairs or none")),
+            }
+        }
+    }
+    if let Some(v) = var("OXIBIT_PACK_FOLD") {
+        pol.fold = v != "0";
+    }
+    if let Some(v) = var("OXIBIT_FILL_BYPASS") {
+        pol.bypass_ffs_per_slice = v.parse().map_err(|_| format!("OXIBIT_FILL_BYPASS={v}: expected 1..4"))?;
+    }
+    Ok(pol)
 }
 
 fn run() -> Result<bool, String> {
@@ -23,8 +65,9 @@ fn run() -> Result<bool, String> {
     let dev = oxibit_place::device::Device::open(std::path::Path::new(db), part)?;
     let props = oxibit_place::xdc::parse(&std::fs::read_to_string(xdc).map_err(|e| format!("{xdc}: {e}"))?);
     let nl = Netlist::from_json(&read(synth)?)?;
-    let fold = std::env::var("OXIBIT_PACK_FOLD").map(|v| v != "0").unwrap_or(true);
-    let mut p = pack::pack_with(nl, &dev, &props, fold)?;
+    let plan = pack_policy()?.plan(&oxibit_place::policy::xc7z020())?;
+    println!("{}", json!({"pack_policy": plan.json()}));
+    let mut p = pack::pack_with(nl, &dev, &props, &plan)?;
     let mut types: std::collections::BTreeMap<String, usize> = Default::default();
     for c in p.nl.cell_ids() {
         *types.entry(p.nl.cell(c).ty.clone()).or_default() += 1;
@@ -39,11 +82,8 @@ fn run() -> Result<bool, String> {
         // oxibit's own placer.
         let seed = rest.get(1).and_then(|s| s.parse().ok()).unwrap_or(1);
         let sites = oxibit_place::placer::Sites::from_device(&dev);
-        let mut fopts = oxibit_place::placer::FillOptions::default();
-        if let Some(m) = std::env::var("OXIBIT_FILL_BYPASS").ok().and_then(|v| v.parse().ok()) {
-            fopts.bypass_ffs_per_slice = m;
-        }
-        let (macros, fs) = oxibit_place::placer::fill(&p, &fopts);
+        let fopts = plan.fill();
+        let (macros, fs) = oxibit_place::placer::fill(&p, fopts);
         println!(
             "{}",
             json!({"fill": {"chains": fs.chains, "chain_slices": fs.chain_slices, "memory_slices": fs.memory_slices, "srl_slices": fs.srl_slices,

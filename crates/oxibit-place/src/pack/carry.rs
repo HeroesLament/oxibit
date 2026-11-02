@@ -7,16 +7,22 @@
 //! that can sit at that position (S on the 6LUT, DI on the 5LUT, five inputs
 //! between them); otherwise a feed-through LUT1 carries the signal there.
 //!
-//! With `OXIBIT_DI_BYPASS=1` (experimental: not yet routed or run on
-//! silicon) a DI no LUT can carry stays on its net, for the router to bring
+//! With `CarryDi::Bypass` (`PackMode::CarryDiBypass`, gated by the pack
+//! policy) a DI no LUT can carry stays on its net, for the router to bring
 //! in on the letter's bypass pin (AX..DX through the DI mux, its default
-//! input), and the S LUT may then use all six inputs.
+//! input), and the S LUT may then use all six inputs. Never for a constant
+//! DI, and not on a chain's bottom letter when a live CYINIT holds AX.
+//!
+//! A constant DI goes on the 5LUT as a LUT1 reading one of the S LUT's own
+//! inputs with an all-zeros or all-ones INIT: the same CY0 = O5 shape as
+//! any DI LUT, with no pin of its own, so the S LUT keeps its position.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use super::constants::prop32;
 use super::{Offset, Packer, Rule, slot};
 use crate::netlist::{CellId, Dir, NetId};
+use crate::policy::CarryDi;
 
 fn create(p: &mut Packer, ty: &str, name: &str) -> CellId {
     let c = p.nl.add_cell(name, ty);
@@ -102,7 +108,7 @@ struct Group {
     xorcys: Vec<Option<CellId>>,
 }
 
-pub fn pack_carries(p: &mut Packer) {
+pub fn pack_carries(p: &mut Packer, di: CarryDi) {
     split_carry4s(p);
     let roots: Vec<CellId> =
         p.nl.cells_of("MUXCY")
@@ -182,7 +188,7 @@ pub fn pack_carries(p: &mut Packer) {
         groups.push(g);
     }
 
-    let bypass = std::env::var("OXIBIT_DI_BYPASS").is_ok_and(|v| v == "1");
+    let bypass = di == CarryDi::Bypass;
     // With DI on the bypass pin the S LUT may read six inputs (A6 free).
     let lut_types: HashSet<&str> = if bypass {
         ["LUT1", "LUT2", "LUT3", "LUT4", "LUT5", "LUT6"].into_iter().collect()
@@ -190,7 +196,7 @@ pub fn pack_carries(p: &mut Packer) {
         ["LUT1", "LUT2", "LUT3", "LUT4", "LUT5"].into_iter().collect()
     };
     let mut packed: BTreeSet<CellId> = BTreeSet::new();
-    let (mut feeds, mut chains, mut bypassed) = (0usize, 0usize, 0usize);
+    let (mut feeds, mut chains, mut bypassed, mut cyinit_held, mut const_luts) = (0usize, 0usize, 0usize, 0usize, 0usize);
     for g in &groups {
         chains += 1;
         let mut c4s: Vec<CellId> = Vec::new();
@@ -266,8 +272,23 @@ pub fn pack_carries(p: &mut Packer) {
                     }
                 }
             }
+            // A constant DI: a LUT1 on the 5LUT reading an S input, adding no
+            // pin, when the S side reads at most five nets.
+            let s_all: BTreeSet<NetId> = match s_lut {
+                Some(l) => (0..6).filter_map(|j| p.nl.cell(l).net(&format!("I{j}"))).collect(),
+                None => s_net.into_iter().collect(),
+            };
+            let anchor = (s_all.len() <= 5).then(|| s_all.iter().copied().find(|&n| !p.nl.is_const(n))).flatten();
+            let di_const = di_net.filter(|&n| di_lut.is_none() && anchor.is_some() && p.nl.is_const(n)).map(|n| n == p.nl.vcc);
+            // CYINIT enters on the bottom letter's AX: a live one holds the
+            // pin DI[0] would come in on.
+            let x_held = i == 0 && p.nl.cell(c4).net("CYINIT").is_some_and(|n| !p.nl.is_const(n));
+            let di_live = di_net.is_some_and(|n| !p.nl.is_const(n));
+            if bypass && x_held && di_live {
+                cyinit_held += 1;
+            }
             let mut di_bypass = false;
-            if bypass {
+            if bypass && !x_held && di_live {
                 let ins = |p: &Packer, l: CellId| -> BTreeSet<NetId> { (0..6).filter_map(|j| p.nl.cell(l).net(&format!("I{j}"))).collect() };
                 let s_ins = s_lut.map(|l| ins(p, l)).unwrap_or_default();
                 // S: its own LUT (any width) or a feed on the S net.
@@ -285,7 +306,7 @@ pub fn pack_carries(p: &mut Packer) {
                 if s_lut.is_none() {
                     count += 1;
                 }
-                if di_lut.is_none() {
+                if di_lut.is_none() && di_const.is_none() {
                     count += 1;
                 }
                 if count > 5 {
@@ -301,7 +322,14 @@ pub fn pack_carries(p: &mut Packer) {
                 s_lut = Some(p.feed_through_lut(n, &[(c4, format!("S[{z}]"))]));
                 feeds += 1;
             }
-            if di_bypass {
+            if let (Some(v), None, Some(a)) = (di_const, di_lut, anchor) {
+                let name = format!("{}$DI{z}$const", p.nl.cell(c4).name);
+                let out = p.nl.add_net_unique(&format!("{name}$o"));
+                let l = p.create_lut(&name, &[a], Some(out), prop32(if v { 0x3 } else { 0x0 }));
+                p.nl.connect(c4, &format!("DI[{z}]"), out);
+                di_lut = Some(l);
+                const_luts += 1;
+            } else if di_bypass {
                 bypassed += 1;
             } else if di_lut.is_none()
                 && let Some(n) = di_net
@@ -362,5 +390,7 @@ pub fn pack_carries(p: &mut Packer) {
     p.count("carry.chains", chains);
     p.count("carry.feed_luts", feeds);
     p.count("carry.di_bypass", bypassed);
+    p.count("carry.di_bypass_cyinit_held", cyinit_held);
+    p.count("carry.di_const_luts", const_luts);
     p.count("carry.blasted", blasted);
 }

@@ -10,47 +10,7 @@
 
 use crate::caps::Level;
 
-/// How a post-check pass is known to be correct, weakest first.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PostCheckEvidence {
-    /// Nothing yet. Refused unless the policy allows unproven passes.
-    Unproven { why: &'static str },
-    /// Unit tests plus a rewrite simple enough to read.
-    Inspection { tests: &'static [&'static str] },
-    /// Random co-simulation of every shape the pass emits against the
-    /// reference semantics (not a proof).
-    CoSimulation { harness: &'static str },
-    /// Each emitted shape proven equivalent to what it replaces.
-    ShapeProof { harness: &'static str },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum EvidenceLevel {
-    Unproven,
-    Inspection,
-    CoSimulation,
-    ShapeProof,
-}
-
-impl PostCheckEvidence {
-    pub fn level(&self) -> EvidenceLevel {
-        match self {
-            PostCheckEvidence::Unproven { .. } => EvidenceLevel::Unproven,
-            PostCheckEvidence::Inspection { .. } => EvidenceLevel::Inspection,
-            PostCheckEvidence::CoSimulation { .. } => EvidenceLevel::CoSimulation,
-            PostCheckEvidence::ShapeProof { .. } => EvidenceLevel::ShapeProof,
-        }
-    }
-
-    pub fn describe(&self) -> String {
-        match self {
-            PostCheckEvidence::Unproven { why } => format!("unproven: {why}"),
-            PostCheckEvidence::Inspection { tests } => format!("inspection: {}", tests.join(", ")),
-            PostCheckEvidence::CoSimulation { harness } => format!("co-simulation: {harness}"),
-            PostCheckEvidence::ShapeProof { harness } => format!("shape proof: {harness}"),
-        }
-    }
-}
+pub use oxibit_policy::{EvidenceLevel, PostCheckEvidence};
 
 /// Optional passes. The core (lower, map, emit) always runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -91,6 +51,10 @@ pub struct Policy {
     pub carry_min: usize,
     /// Multipliers needing more DSP48E1s than this stay in fabric.
     pub dsp_max_per_mul: usize,
+    /// Exact local area recovery passes after the area-flow passes.
+    pub exact_passes: usize,
+    /// LUT levels the area passes may add over the depth-optimal mapping.
+    pub depth_slack: u32,
 }
 
 impl Policy {
@@ -103,6 +67,8 @@ impl Policy {
             area_passes: 2,
             carry_min: 3,
             dsp_max_per_mul: 4,
+            exact_passes: 0,
+            depth_slack: 0,
         }
     }
 
@@ -113,6 +79,16 @@ impl Policy {
             floor: Level::SiliconProven,
             evidence: EvidenceLevel::CoSimulation,
             ..Policy::exploration()
+        }
+    }
+}
+
+impl From<&Policy> for crate::map::MapOpts {
+    fn from(p: &Policy) -> Self {
+        crate::map::MapOpts {
+            area_passes: p.area_passes,
+            exact_passes: p.exact_passes,
+            depth_slack: p.depth_slack,
         }
     }
 }

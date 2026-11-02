@@ -28,6 +28,7 @@ use oxibit_pnr::packed::Loc;
 
 use crate::device::Device;
 use crate::netlist::{CellId, NetId};
+use crate::policy::Lut5Fill;
 use crate::pack::{Packer, slot};
 
 // ---------------------------------------------------------------- sites ---
@@ -232,11 +233,16 @@ pub struct FillOptions {
     /// limit) by default: 2 cost the PHY 342 slices and 2.6% wirelength for
     /// no routing gain.
     pub bypass_ffs_per_slice: usize,
+    /// Where a lone LUT may take a 5LUT (gated by the pack policy).
+    pub lut5: Lut5Fill,
 }
 
 impl Default for FillOptions {
     fn default() -> Self {
-        FillOptions { bypass_ffs_per_slice: 4 }
+        FillOptions {
+            bypass_ffs_per_slice: 4,
+            lut5: Lut5Fill::ALL,
+        }
     }
 }
 
@@ -363,7 +369,7 @@ pub fn fill(p: &Packer, opts: &FillOptions) -> (Vec<Macro>, FillStats) {
     }
 
     // Fractured letters (see the module doc).
-    let units = fracture(p, &mut macros, units, &mut st);
+    let units = fracture(p, &mut macros, units, opts.lut5, &mut st);
 
     // Logic: group flop-carrying units by control set; LUT-only units fill
     // whatever letters remain.
@@ -495,6 +501,7 @@ pub fn fill(p: &Packer, opts: &FillOptions) -> (Vec<Macro>, FillStats) {
         for &h in slice {
             let u = &units[h];
             if let (Some(l), None, Some(_)) = (u.lut, u.lut5, u.ff)
+                && opts.lut5.ff_letter
                 && lut_nets(p, l).len() <= 5
             {
                 hosts_of[si].push(h);
@@ -672,7 +679,7 @@ fn local_nets(p: &Packer, c: CellId) -> Vec<NetId> {
 /// Lone LUTs into 5LUT positions: beside carry-chain 6LUTs, then beside
 /// each other. Returns the units left (a LUT placed in a chain slice
 /// leaves; a paired LUT rides on its partner's unit).
-fn fracture(p: &Packer, macros: &mut [Macro], units: Vec<Unit>, st: &mut FillStats) -> Vec<Unit> {
+fn fracture(p: &Packer, macros: &mut [Macro], units: Vec<Unit>, lut5: Lut5Fill, st: &mut FillStats) -> Vec<Unit> {
     let lone = |u: &Unit| -> Option<CellId> {
         match (u.lut, u.lut5, u.ff) {
             (Some(c), None, None) if !is_memory(p, c) => Some(c),
@@ -714,7 +721,7 @@ fn fracture(p: &Packer, macros: &mut [Macro], units: Vec<Unit>, st: &mut FillSta
                 let Some(six) = six else { continue };
                 // The 5LUT's output leaves on the letter's MUX pin, which a
                 // chain output used outside the slice already takes.
-                if five || is_memory(p, six) || mux_busy(p, f, k, l) {
+                if !lut5.chain || five || is_memory(p, six) || mux_busy(p, f, k, l) {
                     continue;
                 }
                 let n = lut_nets(p, six);
@@ -799,7 +806,7 @@ fn fracture(p: &Packer, macros: &mut [Macro], units: Vec<Unit>, st: &mut FillSta
     let mut partner: HashMap<usize, usize> = HashMap::new(); // 6LUT unit -> 5LUT unit
     let mut taken: HashSet<usize> = HashSet::new();
     let mut order: Vec<usize> = (0..units.len())
-        .filter(|i| !gone.contains(i) && lone(&units[*i]).is_some_and(|c| nets.contains_key(&c)))
+        .filter(|i| lut5.pairs && !gone.contains(i) && lone(&units[*i]).is_some_and(|c| nets.contains_key(&c)))
         .collect();
     order.sort_by_key(|&i| std::cmp::Reverse(nets[&units[i].lut.expect("lut")].len()));
     for &i in &order {

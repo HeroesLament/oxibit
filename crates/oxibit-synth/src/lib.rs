@@ -146,7 +146,7 @@ pub fn synth(m: &Module, dirs: &lib_ports::PrimPorts, caps: &DeviceCaps, policy:
 
     let outs = lw.outputs();
     rep.emit(phase("map", true));
-    let mp = map::map(&lw.aig, &outs, policy.area_passes, rep);
+    let mp = map::map(&lw.aig, &outs, map::MapOpts::from(policy), rep);
     rep.emit(phase("map", false));
     let t2 = std::time::Instant::now();
 

@@ -357,8 +357,20 @@ pub fn cut_tt(g: &Aig, root: u32, leaves: &[u32]) -> u64 {
     go(g, root, &mut memo)
 }
 
+/// What the mapper optimises after the depth pass.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MapOpts {
+    /// Area-flow passes.
+    pub area_passes: usize,
+    /// Exact local area passes (`Mapper::exact_area`) after them.
+    pub exact_passes: usize,
+    /// LUT levels allowed over the depth-optimal mapping, fixed for every
+    /// later pass.
+    pub depth_slack: u32,
+}
+
 #[hot]
-pub fn map(g: &Aig, outs: &[Lit], area_passes: usize, rep: &dyn oxibit_report::Progress) -> Mapping {
+pub fn map(g: &Aig, outs: &[Lit], opts: MapOpts, rep: &dyn oxibit_report::Progress) -> Mapping {
     let n = g.nodes.len();
     let mut refs = vec![0f32; n];
     for node in &g.nodes {
@@ -379,7 +391,7 @@ pub fn map(g: &Aig, outs: &[Lit], area_passes: usize, rep: &dyn oxibit_report::P
         refs,
         req: vec![u32::MAX; n],
         nref: vec![0; n],
-        slack: std::env::var("OXIBIT_DEPTH_SLACK").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
+        slack: opts.depth_slack,
         target: None,
     };
     hot_block!("map.depth", { m.pass(Goal::Depth) });
@@ -392,13 +404,12 @@ pub fn map(g: &Aig, outs: &[Lit], area_passes: usize, rep: &dyn oxibit_report::P
         ));
     };
     report("depth", &m.best, &used, depth);
-    for k in 0..area_passes {
+    for k in 0..opts.area_passes {
         hot_block!("map.area", { m.pass(Goal::Area) });
         (used, depth) = m.cover(outs);
         report(&format!("area{}", k + 1), &m.best, &used, depth);
     }
-    let exact_passes = std::env::var("OXIBIT_EXACT_PASSES").ok().and_then(|v| v.parse().ok()).unwrap_or(0usize);
-    for k in 0..exact_passes {
+    for k in 0..opts.exact_passes {
         hot_block!("map.exact", { m.exact_area() });
         (used, depth) = m.cover(outs);
         report(&format!("exact{}", k + 1), &m.best, &used, depth);
@@ -479,7 +490,7 @@ mod tests {
             c = g.or(t, u);
         }
         outs.push(c);
-        let m = map(&g, &outs, 2, &oxibit_report::Silent);
+        let m = map(&g, &outs, MapOpts { area_passes: 2, ..MapOpts::default() }, &oxibit_report::Silent);
         check(&g, &outs, &m);
         assert!(m.luts.iter().all(|l| l.leaves.len() <= K));
     }

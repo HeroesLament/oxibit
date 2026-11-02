@@ -37,27 +37,7 @@ pub enum Mode {
     Obuf,
 }
 
-/// How far a mode is known to work, lowest first.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Level {
-    /// The back end cannot place or configure it.
-    Unsupported,
-    /// Synthesis can emit it and a simulation model exists.
-    Modeled,
-    /// oxibit-pnr places and configures it.
-    PnrSupported,
-    /// oxibit's FASM for it equals a reference flow's (nextpnr) on a design.
-    FasmMatchesReference,
-    /// A bitstream using it behaved correctly on a board.
-    SiliconProven,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Status {
-    pub level: Level,
-    /// What established the level (design, check, board, date).
-    pub basis: &'static str,
-}
+pub use oxibit_policy::{Level, Status};
 
 /// Cost-model facts the passes read instead of hard-coding them.
 #[derive(Clone, Debug, PartialEq, Eq)]

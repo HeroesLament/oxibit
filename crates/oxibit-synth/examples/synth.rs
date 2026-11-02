@@ -122,6 +122,8 @@ fn main() -> ExitCode {
     };
     policy.area_passes = env_num("OXIBIT_AREA_PASSES", policy.area_passes);
     policy.carry_min = env_num("OXIBIT_CARRY_MIN", policy.carry_min);
+    policy.exact_passes = env_num("OXIBIT_EXACT_PASSES", policy.exact_passes);
+    policy.depth_slack = env_num("OXIBIT_DEPTH_SLACK", policy.depth_slack as usize) as u32;
     let p = &mut policy.passes;
     p.dsp = env_on("OXIBIT_DSP", p.dsp);
     p.bram = env_on("OXIBIT_BRAM", p.bram);

@@ -8,4 +8,5 @@ pub mod netlist;
 pub mod pack;
 pub mod place;
 pub mod placer;
+pub mod policy;
 pub mod xdc;
