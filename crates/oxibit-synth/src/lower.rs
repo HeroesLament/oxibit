@@ -717,15 +717,7 @@ fn add(g: &mut Aig, a: &[Lit], b: &[Lit], mut c: Lit) -> (Vec<Lit>, Lit) {
         let s: Vec<Lit> = (i..j).map(|m| g.xor(a[m], b[m])).collect();
         // DI is the carry when a == b: either operand; prefer a constant.
         let di: Vec<Lit> = (i..j).map(|m| if b[m].is_const() { b[m] } else { a[m] }).collect();
-        let o: Vec<Lit> = (i..j).map(|_| g.input()).collect();
-        let co = g.input();
-        g.chains.push(crate::aig::Chain {
-            s,
-            di,
-            cin: c,
-            o: o.clone(),
-            co,
-        });
+        let (o, co) = g.chain(s, di, c);
         out.extend(o);
         c = co;
     } else {
@@ -809,9 +801,7 @@ fn ult(g: &mut Aig, a: &[Lit], b: &[Lit]) -> Lit {
     if hi - lo >= 3 {
         let s: Vec<Lit> = chunks[lo..hi].iter().map(|p| p.0).collect();
         let di: Vec<Lit> = chunks[lo..hi].iter().map(|p| p.1).collect();
-        let o: Vec<Lit> = (lo..hi).map(|_| g.input()).collect();
-        let co = g.input();
-        g.chains.push(crate::aig::Chain { s, di, cin: c, o, co });
+        let (_, co) = g.chain(s, di, c);
         c = co;
     } else {
         for &(eq, lt) in &chunks[lo..hi] {

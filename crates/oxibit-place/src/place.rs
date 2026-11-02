@@ -177,7 +177,7 @@ fn place_leftover_luts(p: &mut Packer, st: &mut ImportStats) {
 
 /// Inputs of a LUT cell as (logical input index, net), from its X_ORIG_PORT
 /// markers.
-fn lut_inputs(p: &Packer, c: CellId) -> Vec<(usize, NetId)> {
+pub(crate) fn lut_inputs(p: &Packer, c: CellId) -> Vec<(usize, NetId)> {
     let cell = p.nl.cell(c);
     let mut v = Vec::new();
     for k in 1..=6 {

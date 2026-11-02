@@ -47,7 +47,7 @@ fn run() -> Result<bool, String> {
         println!(
             "{}",
             json!({"fill": {"chains": fs.chains, "chain_slices": fs.chain_slices, "memory_slices": fs.memory_slices, "srl_slices": fs.srl_slices,
-                            "logic_slices": fs.logic_slices, "lone_lut_letters": fs.lone_lut_letters, "ff2_used": fs.ff2_used,
+                            "logic_slices": fs.logic_slices, "lone_lut_letters": fs.lone_lut_letters, "ff2_used": fs.ff2_used, "chain_5luts": fs.chain_5luts, "paired_luts": fs.paired_luts, "ff_letter_5luts": fs.ff_letter_5luts,
                             "control_sets": fs.control_sets, "leftovers": fs.leftovers.len(), "leftover_examples": fs.leftovers.iter().take(6).collect::<Vec<_>>(),
                             "sites": {"slices": sites.slices.len(), "slicem": sites.slices.iter().filter(|s| s.m).count(), "dsp": sites.dsp.len(),
                                       "ramb36": sites.ramb36.len(), "ramb18": sites.ramb18.len(), "bufg": sites.bufg.len(), "ps7": sites.ps7.len()}}})

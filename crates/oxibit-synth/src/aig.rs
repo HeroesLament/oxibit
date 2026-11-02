@@ -64,6 +64,10 @@ pub struct Aig {
     /// LUT inputs of the target (sizes comparator chunks).
     pub lut_k: usize,
     pub chains: Vec<Chain>,
+    /// Chains by (S, DI, CI): an identical chain is built once.
+    chain_index: HashMap<(Vec<Lit>, Vec<Lit>, Lit), usize>,
+    /// Chains asked for that an existing one already computed.
+    pub chains_shared: usize,
 }
 
 impl Aig {
@@ -75,7 +79,27 @@ impl Aig {
             carry_min: 0,
             lut_k: 6,
             chains: Vec::new(),
+            chain_index: HashMap::new(),
+            chains_shared: 0,
         }
+    }
+
+    /// A carry chain over (S, DI, CI): its O and CO, which are fresh AIG
+    /// inputs, or those of an identical chain already built (same inputs,
+    /// same outputs: structural hashing for chains, which the AND table
+    /// cannot see because chain outputs are inputs to it).
+    pub fn chain(&mut self, s: Vec<Lit>, di: Vec<Lit>, cin: Lit) -> (Vec<Lit>, Lit) {
+        let key = (s, di, cin);
+        if let Some(&k) = self.chain_index.get(&key) {
+            self.chains_shared += 1;
+            return (self.chains[k].o.clone(), self.chains[k].co);
+        }
+        let o: Vec<Lit> = (0..key.0.len()).map(|_| self.input()).collect();
+        let co = self.input();
+        self.chain_index.insert(key.clone(), self.chains.len());
+        let (s, di, cin) = key;
+        self.chains.push(Chain { s, di, cin, o: o.clone(), co });
+        (o, co)
     }
 
     pub fn input(&mut self) -> Lit {

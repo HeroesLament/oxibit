@@ -15,7 +15,11 @@
 //!    cost on each CLB tile's input pins over `Options::tile_pin_cap`.
 //! 3. Bels written to the netlist (`Cell::bel`), ready for `place::legalise`.
 //!
-//! Not yet: 5LUT/6LUT fracturing outside carry and LUTRAM, replicating
+//!    A lone LUT (no flop of its own) shares a letter with another LUT when
+//!    the two read at most five distinct nets: first the free 5LUT beside a
+//!    carry chain's 6LUT (mostly route-through feeds), then another lone LUT.
+//!
+//! Not yet: fracturing beside a LUT that feeds a flop, replicating
 //! wide-fanout drivers near their loads, timing.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -199,6 +203,12 @@ pub struct FillStats {
     pub srl_slices: usize,
     pub logic_slices: usize,
     pub lone_lut_letters: usize,
+    /// Lone LUTs on the 5LUT of a carry-chain letter.
+    pub chain_5luts: usize,
+    /// Lone LUTs on the 5LUT beside another lone LUT.
+    pub paired_luts: usize,
+    /// Lone LUTs on the 5LUT of a letter whose 6LUT feeds its flop.
+    pub ff_letter_5luts: usize,
     pub ff2_used: usize,
     pub control_sets: usize,
     pub leftovers: Vec<String>,
@@ -228,6 +238,8 @@ impl Default for FillOptions {
 #[derive(Debug, Clone, Copy)]
 struct Unit {
     lut: Option<CellId>,
+    /// A second LUT on the same letter's 5LUT (inputs shared, at most five).
+    lut5: Option<CellId>,
     ff: Option<CellId>,
 }
 
@@ -296,7 +308,7 @@ pub fn fill(p: &Packer, opts: &FillOptions) -> (Vec<Macro>, FillStats) {
             .get(&c)
             .and_then(|cl| cl.members.iter().find(|(m, _)| p.nl.cell(*m).ty == "SLICE_FFX" && !done.contains(m)).map(|(m, _)| *m))
             .filter(|&f| !is_memory(p, c) || p.nl.cell(f).net("CK") == p.nl.cell(c).net("CLK"));
-        let u = Unit { lut: Some(c), ff };
+        let u = Unit { lut: Some(c), lut5: None, ff };
         done.insert(c);
         if let Some(f) = ff {
             done.insert(f);
@@ -309,7 +321,7 @@ pub fn fill(p: &Packer, opts: &FillOptions) -> (Vec<Macro>, FillStats) {
     }
     for c in p.nl.cell_ids() {
         if !done.contains(&c) && p.nl.cell(c).ty == "SLICE_FFX" {
-            units.push(Unit { lut: None, ff: Some(c) });
+            units.push(Unit { lut: None, lut5: None, ff: Some(c) });
             done.insert(c);
         }
     }
@@ -343,6 +355,9 @@ pub fn fill(p: &Packer, opts: &FillOptions) -> (Vec<Macro>, FillStats) {
         }
     }
 
+    // Fractured letters (see the module doc).
+    let units = fracture(p, &mut macros, units, &mut st);
+
     // Logic: group flop-carrying units by control set; LUT-only units fill
     // whatever letters remain.
     let mut by_ctrl: BTreeMap<Ctrl, Vec<usize>> = BTreeMap::new();
@@ -358,13 +373,13 @@ pub fn fill(p: &Packer, opts: &FillOptions) -> (Vec<Macro>, FillStats) {
     // Net adjacency between units for locality.
     let mut unit_of: HashMap<CellId, usize> = HashMap::new();
     for (i, u) in units.iter().enumerate() {
-        for c in u.lut.iter().chain(u.ff.iter()) {
+        for c in u.lut.iter().chain(u.lut5.iter()).chain(u.ff.iter()) {
             unit_of.insert(*c, i);
         }
     }
     let nets_of = |u: &Unit| -> Vec<NetId> {
         let mut v = Vec::new();
-        for c in u.lut.iter().chain(u.ff.iter()) {
+        for c in u.lut.iter().chain(u.lut5.iter()).chain(u.ff.iter()) {
             for port in p.nl.cell(*c).ports.values() {
                 if let Some(n) = port.net
                     && !p.nl.is_const(n)
@@ -464,6 +479,65 @@ pub fn fill(p: &Packer, opts: &FillOptions) -> (Vec<Macro>, FillStats) {
             None => unplaced_lone.push(i),
         }
     }
+    // Lone LUTs with no free letter near them: the 5LUT of a LUT + flop
+    // letter in the neighbours' slices, else in any slice, when the two
+    // LUTs read at most five nets. `ff5`: host unit -> the LUT on its 5LUT.
+    let mut ff5: HashMap<usize, CellId> = HashMap::new();
+    let mut hosts_of: Vec<Vec<usize>> = vec![Vec::new(); logic.len()];
+    for (si, slice) in logic.iter().enumerate() {
+        for &h in slice {
+            let u = &units[h];
+            if let (Some(l), None, Some(_)) = (u.lut, u.lut5, u.ff)
+                && lut_nets(p, l).len() <= 5
+            {
+                hosts_of[si].push(h);
+            }
+        }
+    }
+    let mut still: Vec<usize> = Vec::new();
+    let mut any_slice = 0usize;
+    for &i in &unplaced_lone {
+        let Some(l) = units[i].lut.filter(|_| units[i].lut5.is_none()) else {
+            still.push(i);
+            continue;
+        };
+        let mine = lut_nets(p, l);
+        if mine.len() > 5 {
+            still.push(i);
+            continue;
+        }
+        let mut score: HashMap<usize, usize> = HashMap::new();
+        for j in neighbours(i) {
+            if let Some(&si) = slice_of.get(&j) {
+                *score.entry(si).or_default() += 1;
+            }
+        }
+        let mut ranked: Vec<(usize, usize)> = score.into_iter().collect();
+        ranked.sort_by_key(|&(si, sc)| (std::cmp::Reverse(sc), si));
+        let fits = |h: usize, ff5: &HashMap<usize, CellId>| {
+            !ff5.contains_key(&h) && lut_nets(p, units[h].lut.expect("lut")).union(&mine).count() <= 5
+        };
+        let mut pick = ranked.iter().find_map(|&(si, _)| hosts_of[si].iter().copied().find(|&h| fits(h, &ff5)));
+        // no neighbour slice has room: scan on from where the last scan stopped
+        if pick.is_none() {
+            for k in 0..logic.len() {
+                let si = (any_slice + k) % logic.len();
+                if let Some(h) = hosts_of[si].iter().copied().find(|&h| fits(h, &ff5)) {
+                    pick = Some(h);
+                    any_slice = si;
+                    break;
+                }
+            }
+        }
+        match pick {
+            Some(h) => {
+                ff5.insert(h, l);
+                st.ff_letter_5luts += 1;
+            }
+            None => still.push(i),
+        }
+    }
+    let unplaced_lone = still;
     let rest_set: HashSet<usize> = unplaced_lone.iter().copied().collect();
     let mut taken: HashSet<usize> = HashSet::new();
     let mut lone_groups: Vec<Vec<usize>> = Vec::new();
@@ -503,6 +577,9 @@ pub fn fill(p: &Packer, opts: &FillOptions) -> (Vec<Macro>, FillStats) {
         for &i in &lut_units {
             let l = letter(letter_i);
             f.cells.push((units[i].lut.expect("lut"), format!("{l}6LUT")));
+            if let Some(l5) = units[i].lut5.or(ff5.get(&i).copied()) {
+                f.cells.push((l5, format!("{l}5LUT")));
+            }
             f.cells.push((units[i].ff.expect("ff"), format!("{l}FF")));
             letter_i += 1;
         }
@@ -526,6 +603,9 @@ pub fn fill(p: &Packer, opts: &FillOptions) -> (Vec<Macro>, FillStats) {
         for li in letter_i..4 {
             if let Some(&i) = lone.next() {
                 f.cells.push((units[i].lut.expect("lut"), format!("{}6LUT", letter(li))));
+                if let Some(l5) = units[i].lut5 {
+                    f.cells.push((l5, format!("{}5LUT", letter(li))));
+                }
                 st.lone_lut_letters += 1;
             }
         }
@@ -535,6 +615,9 @@ pub fn fill(p: &Packer, opts: &FillOptions) -> (Vec<Macro>, FillStats) {
         let mut f = Fill { logic: true, ..Fill::default() };
         for (k, &i) in g.iter().enumerate() {
             f.cells.push((units[i].lut.expect("lut"), format!("{}6LUT", letter(k as i32))));
+            if let Some(l5) = units[i].lut5 {
+                f.cells.push((l5, format!("{}5LUT", letter(k as i32))));
+            }
             st.lone_lut_letters += 1;
         }
         fills.push(f);
@@ -542,6 +625,229 @@ pub fn fill(p: &Packer, opts: &FillOptions) -> (Vec<Macro>, FillStats) {
     st.logic_slices = fills.len();
     macros.extend(fills.into_iter().map(|f| Macro { slices: vec![f] }));
     (macros, st)
+}
+
+/// Whether letter `l` (index `k`) of chain slice `f` sends a carry output
+/// (`O`/`CO` of position `k`) anywhere but its own flops or the next
+/// CARRY4: that takes the letter's MUX output pin.
+fn mux_busy(p: &Packer, f: &Fill, k: usize, l: char) -> bool {
+    let Some(carry) = f.cells.iter().find(|(_, b)| b == "CARRY4").map(|(c, _)| *c) else {
+        return false;
+    };
+    let own: HashSet<CellId> = f
+        .cells
+        .iter()
+        .filter(|(_, b)| *b == format!("{l}FF") || *b == format!("{l}5FF"))
+        .map(|(c, _)| *c)
+        .collect();
+    let names = [format!("O{k}"), format!("O[{k}]"), format!("CO{k}"), format!("CO[{k}]")];
+    names.iter().any(|port| {
+        let Some(n) = p.nl.cell(carry).net(port) else { return false };
+        p.nl.net(n).users.iter().any(|(u, _)| !own.contains(u) && p.nl.cell(*u).ty != "CARRY4")
+    })
+}
+
+/// Distinct nets on a LUT's inputs (as `legalise` counts them).
+fn lut_nets(p: &Packer, c: CellId) -> BTreeSet<NetId> {
+    crate::place::lut_inputs(p, c).into_iter().map(|(_, n)| n).collect()
+}
+
+/// Nets on any port of `c`, skipping constants and very wide nets.
+fn local_nets(p: &Packer, c: CellId) -> Vec<NetId> {
+    p.nl.cell(c)
+        .ports
+        .values()
+        .filter_map(|port| port.net)
+        .filter(|&n| !p.nl.is_const(n) && p.nl.net(n).users.len() < 64)
+        .collect()
+}
+
+/// Lone LUTs into 5LUT positions: beside carry-chain 6LUTs, then beside
+/// each other. Returns the units left (a LUT placed in a chain slice
+/// leaves; a paired LUT rides on its partner's unit).
+fn fracture(p: &Packer, macros: &mut [Macro], units: Vec<Unit>, st: &mut FillStats) -> Vec<Unit> {
+    let lone = |u: &Unit| -> Option<CellId> {
+        match (u.lut, u.lut5, u.ff) {
+            (Some(c), None, None) if !is_memory(p, c) => Some(c),
+            _ => None,
+        }
+    };
+    let mut nets: HashMap<CellId, BTreeSet<NetId>> = HashMap::new();
+    for u in &units {
+        if let Some(c) = lone(u) {
+            let n = lut_nets(p, c);
+            if n.len() <= 5 {
+                nets.insert(c, n);
+            }
+        }
+    }
+
+    // Chain letters with a 6LUT of at most five inputs and a free 5LUT.
+    struct Host {
+        mi: usize,
+        si: usize,
+        letter: char,
+        nets: BTreeSet<NetId>,
+        free: bool,
+    }
+    let mut hosts: Vec<Host> = Vec::new();
+    let mut slice_of: HashMap<CellId, (usize, usize)> = HashMap::new();
+    for (mi, m) in macros.iter().enumerate() {
+        let chain = m.slices.iter().any(|f| f.cells.iter().any(|(_, b)| b == "CARRY4"));
+        if !chain {
+            continue;
+        }
+        for (si, f) in m.slices.iter().enumerate() {
+            for (c, _) in &f.cells {
+                slice_of.insert(*c, (mi, si));
+            }
+            for (k, l) in ['A', 'B', 'C', 'D'].into_iter().enumerate() {
+                let six = f.cells.iter().find(|(_, b)| *b == format!("{l}6LUT")).map(|(c, _)| *c);
+                let five = f.cells.iter().any(|(_, b)| *b == format!("{l}5LUT"));
+                let Some(six) = six else { continue };
+                // The 5LUT's output leaves on the letter's MUX pin, which a
+                // chain output used outside the slice already takes.
+                if five || is_memory(p, six) || mux_busy(p, f, k, l) {
+                    continue;
+                }
+                let n = lut_nets(p, six);
+                if n.len() <= 5 {
+                    hosts.push(Host { mi, si, letter: l, nets: n, free: true });
+                }
+            }
+        }
+    }
+    if std::env::var_os("OXIBIT_FILL_DEBUG").is_some() {
+        // why chain letters are not hosts: (no 6LUT, 5LUT used, memory, mux busy, > 5 inputs)
+        let mut why = [0usize; 5];
+        for m in macros.iter() {
+            if !m.slices.iter().any(|f| f.cells.iter().any(|(_, b)| b == "CARRY4")) {
+                continue;
+            }
+            for f in &m.slices {
+                for (k, l) in ['A', 'B', 'C', 'D'].into_iter().enumerate() {
+                    let six = f.cells.iter().find(|(_, b)| *b == format!("{l}6LUT")).map(|(c, _)| *c);
+                    let five = f.cells.iter().any(|(_, b)| *b == format!("{l}5LUT"));
+                    match six {
+                        None => why[0] += 1,
+                        Some(_) if five => why[1] += 1,
+                        Some(c) if is_memory(p, c) => why[2] += 1,
+                        Some(_) if mux_busy(p, f, k, l) => why[3] += 1,
+                        Some(c) if lut_nets(p, c).len() > 5 => why[4] += 1,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        eprintln!("fill debug: chain hosts {} lone candidates {} not-host {:?}", hosts.len(), nets.len(), why);
+    }
+    let mut hosts_in: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+    for (h, host) in hosts.iter().enumerate() {
+        hosts_in.entry((host.mi, host.si)).or_default().push(h);
+    }
+
+    let mut gone: HashSet<usize> = HashSet::new();
+    for (i, u) in units.iter().enumerate() {
+        let Some(c) = lone(u) else { continue };
+        let Some(mine) = nets.get(&c) else { continue };
+        let mut score: HashMap<(usize, usize), usize> = HashMap::new();
+        for n in local_nets(p, c) {
+            let net = p.nl.net(n);
+            for (d, _) in net.driver.iter().chain(net.users.iter()) {
+                if let Some(&s) = slice_of.get(d) {
+                    *score.entry(s).or_default() += 1;
+                }
+            }
+        }
+        let mut ranked: Vec<((usize, usize), usize)> = score.into_iter().collect();
+        ranked.sort_by_key(|&(s, sc)| (std::cmp::Reverse(sc), s));
+        let pick = ranked.iter().find_map(|(s, _)| {
+            hosts_in.get(s)?.iter().copied().find(|&h| hosts[h].free && hosts[h].nets.union(mine).count() <= 5)
+        });
+        if let Some(h) = pick {
+            let host = &mut hosts[h];
+            host.free = false;
+            macros[host.mi].slices[host.si].cells.push((c, format!("{}5LUT", host.letter)));
+            st.chain_5luts += 1;
+            gone.insert(i);
+        }
+    }
+
+    // Lone LUTs left: pair by shared inputs, then any two that fit.
+    let mut by_net: HashMap<NetId, Vec<usize>> = HashMap::new();
+    for (i, u) in units.iter().enumerate() {
+        if gone.contains(&i) {
+            continue;
+        }
+        if let Some(c) = lone(u)
+            && let Some(n) = nets.get(&c)
+        {
+            for net in n {
+                if !p.nl.is_const(*net) {
+                    by_net.entry(*net).or_default().push(i);
+                }
+            }
+        }
+    }
+    let mut partner: HashMap<usize, usize> = HashMap::new(); // 6LUT unit -> 5LUT unit
+    let mut taken: HashSet<usize> = HashSet::new();
+    let mut order: Vec<usize> = (0..units.len())
+        .filter(|i| !gone.contains(i) && lone(&units[*i]).is_some_and(|c| nets.contains_key(&c)))
+        .collect();
+    order.sort_by_key(|&i| std::cmp::Reverse(nets[&units[i].lut.expect("lut")].len()));
+    for &i in &order {
+        if taken.contains(&i) {
+            continue;
+        }
+        let ni = &nets[&units[i].lut.expect("lut")];
+        let mut shared: HashMap<usize, usize> = HashMap::new();
+        for net in ni {
+            for &j in by_net.get(net).map(|v| v.as_slice()).unwrap_or(&[]) {
+                if j != i && !taken.contains(&j) {
+                    *shared.entry(j).or_default() += 1;
+                }
+            }
+        }
+        let best = shared
+            .into_iter()
+            .filter(|&(j, _)| nets[&units[j].lut.expect("lut")].union(ni).count() <= 5)
+            .max_by_key(|&(j, sc)| (sc, std::cmp::Reverse(j)));
+        if let Some((j, _)) = best {
+            taken.insert(i);
+            taken.insert(j);
+            partner.insert(i, j);
+        }
+    }
+    // Unshared leftovers: smallest with largest, while the sum fits.
+    let mut rest: Vec<usize> = order.iter().copied().filter(|i| !taken.contains(i)).collect();
+    rest.sort_by_key(|&i| nets[&units[i].lut.expect("lut")].len());
+    let (mut lo, mut hi) = (0usize, rest.len());
+    while lo + 1 < hi {
+        let (a, b) = (rest[lo], rest[hi - 1]);
+        let fit = nets[&units[a].lut.expect("lut")].union(&nets[&units[b].lut.expect("lut")]).count() <= 5;
+        if fit {
+            partner.insert(b, a);
+            lo += 1;
+            hi -= 1;
+        } else {
+            hi -= 1;
+        }
+    }
+    let mut riders: HashSet<usize> = partner.values().copied().collect();
+    riders.extend(gone.iter().copied());
+    let mut out = Vec::with_capacity(units.len());
+    for (i, u) in units.iter().enumerate() {
+        if riders.contains(&i) {
+            continue;
+        }
+        let mut u = *u;
+        if let Some(&j) = partner.get(&i) {
+            u.lut5 = units[j].lut;
+            st.paired_luts += 1;
+        }
+        out.push(u);
+    }
+    out
 }
 
 // ------------------------------------------------------------ placement ---
