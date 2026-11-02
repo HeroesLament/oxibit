@@ -57,8 +57,17 @@ struct Slice {
 
 impl Slice {
     fn kind(&self) -> u8 {
-        let any = self.carry || self.letters.iter().any(|l| l.l6.is_some() || l.l5.is_some() || l.ff || l.ff5);
-        let mem = self.letters.iter().any(|l| [l.l6, l.l5].iter().flatten().any(|x| x.kind == LutKind::Memory));
+        let any = self.carry
+            || self
+                .letters
+                .iter()
+                .any(|l| l.l6.is_some() || l.l5.is_some() || l.ff || l.ff5);
+        let mem = self.letters.iter().any(|l| {
+            [l.l6, l.l5]
+                .iter()
+                .flatten()
+                .any(|x| x.kind == LutKind::Memory)
+        });
         match (any, self.carry, mem) {
             (false, _, _) => 0,
             (_, true, _) => 2,
@@ -69,7 +78,8 @@ impl Slice {
 }
 
 fn read(path: &str) -> Result<Value, String> {
-    serde_json::from_str(&std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?).map_err(|e| format!("{path}: {e}"))
+    serde_json::from_str(&std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?)
+        .map_err(|e| format!("{path}: {e}"))
 }
 
 /// The net id of a one-bit connection, or None for a constant or absent bit.
@@ -90,7 +100,10 @@ fn run() -> Result<(), String> {
     // the top: the module with the most cells (the file also lists cell modules)
     let module = v["modules"]
         .as_object()
-        .and_then(|m| m.values().max_by_key(|x| x["cells"].as_object().map_or(0, |c| c.len())))
+        .and_then(|m| {
+            m.values()
+                .max_by_key(|x| x["cells"].as_object().map_or(0, |c| c.len()))
+        })
         .ok_or("no module")?;
     let cells = module["cells"].as_object().ok_or("no cells")?;
 
@@ -99,8 +112,17 @@ fn run() -> Result<(), String> {
     for c in cells.values() {
         let ty = c["type"].as_str().unwrap_or("");
         if ty == "PSEUDO_VCC" || ty == "PSEUDO_GND" {
-            for bits in c["connections"].as_object().into_iter().flat_map(|m| m.values()) {
-                consts.extend(bits.as_array().into_iter().flatten().filter_map(Value::as_i64));
+            for bits in c["connections"]
+                .as_object()
+                .into_iter()
+                .flat_map(|m| m.values())
+            {
+                consts.extend(
+                    bits.as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_i64),
+                );
             }
         }
     }
@@ -113,7 +135,12 @@ fn run() -> Result<(), String> {
         let dirs = &c["port_directions"];
         for (port, bits) in c["connections"].as_object().into_iter().flatten() {
             let out = dirs.get(port).and_then(Value::as_str) == Some("output");
-            for n in bits.as_array().into_iter().flatten().filter_map(Value::as_i64) {
+            for n in bits
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_i64)
+            {
                 if out {
                     drv.insert(n, ty.clone());
                 } else {
@@ -126,10 +153,16 @@ fn run() -> Result<(), String> {
 
     let mut slices: HashMap<String, Slice> = HashMap::new();
     for (name, c) in cells {
-        let Some(bel) = c["attributes"].get("NEXTPNR_BEL").and_then(Value::as_str) else { continue };
+        let Some(bel) = c["attributes"].get("NEXTPNR_BEL").and_then(Value::as_str) else {
+            continue;
+        };
         // `X{gx}Y{gy}/{tile-relative site}.{bel}`: key by tile and site
-        let Some((tile, rest)) = bel.split_once('/') else { continue };
-        let Some((site, b)) = rest.split_once('.') else { continue };
+        let Some((tile, rest)) = bel.split_once('/') else {
+            continue;
+        };
+        let Some((site, b)) = rest.split_once('.') else {
+            continue;
+        };
         if !site.starts_with("SLICE_") {
             continue;
         }
@@ -139,15 +172,28 @@ fn run() -> Result<(), String> {
             s.carry = true;
             continue;
         }
-        let Some(l) = b.chars().next().and_then(|ch| "ABCD".find(ch)) else { continue };
+        let Some(l) = b.chars().next().and_then(|ch| "ABCD".find(ch)) else {
+            continue;
+        };
         let letter = &mut s.letters[l];
         match &b[1..] {
             "6LUT" | "5LUT" => {
-                let ins: HashSet<i64> = (1..=6).filter_map(|k| net_of(c, &format!("A{k}"), &consts)).collect();
+                let ins: HashSet<i64> = (1..=6)
+                    .filter_map(|k| net_of(c, &format!("A{k}"), &consts))
+                    .collect();
                 let attrs = &c["attributes"];
-                let mem = attrs.get("X_LUT_AS_DRAM").is_some() || attrs.get("X_LUT_AS_SRL").is_some();
-                let only = if ins.len() == 1 { ins.iter().next().copied() } else { None };
-                let lut = Lut { inputs: ins.len(), kind: if mem { LutKind::Memory } else { LutKind::Logic }, only };
+                let mem =
+                    attrs.get("X_LUT_AS_DRAM").is_some() || attrs.get("X_LUT_AS_SRL").is_some();
+                let only = if ins.len() == 1 {
+                    ins.iter().next().copied()
+                } else {
+                    None
+                };
+                let lut = Lut {
+                    inputs: ins.len(),
+                    kind: if mem { LutKind::Memory } else { LutKind::Logic },
+                    only,
+                };
                 if &b[1..] == "6LUT" {
                     letter.l6 = Some(lut);
                 } else {
@@ -160,7 +206,11 @@ fn run() -> Result<(), String> {
                 } else {
                     letter.ff5 = true;
                 }
-                s.ctrl.insert((net_of(c, "CK", &consts), net_of(c, "CE", &consts), net_of(c, "SR", &consts)));
+                s.ctrl.insert((
+                    net_of(c, "CK", &consts),
+                    net_of(c, "CE", &consts),
+                    net_of(c, "SR", &consts),
+                ));
             }
             _ => {}
         }
@@ -170,7 +220,9 @@ fn run() -> Result<(), String> {
     let mut tot: BTreeMap<&str, usize> = BTreeMap::new();
     let mut rows: Vec<Value> = Vec::new();
     for site in &sites.slices {
-        let s = slices.remove(&format!("X{}Y{}/{}", site.x, site.y, site.rel)).unwrap_or_default();
+        let s = slices
+            .remove(&format!("X{}Y{}/{}", site.x, site.y, site.rel))
+            .unwrap_or_default();
         let kind = s.kind();
         let (sx, sy) = site
             .rel
@@ -182,7 +234,15 @@ fn run() -> Result<(), String> {
         if kind == 0 {
             *tot.entry("empty_slices").or_default() += 1;
         }
-        *tot.entry(["slices_empty", "slices_logic", "slices_chain", "slices_memory"][kind as usize]).or_default() += 1;
+        *tot.entry(
+            [
+                "slices_empty",
+                "slices_logic",
+                "slices_chain",
+                "slices_memory",
+            ][kind as usize],
+        )
+        .or_default() += 1;
         for l in &s.letters {
             let n6 = l.l6.map(|x| x.inputs);
             if l.l6.is_some() {
@@ -217,14 +277,25 @@ fn run() -> Result<(), String> {
                 if kind == 2 && x.kind == LutKind::Logic && x.inputs == 1 {
                     let n = x.only.expect("one input");
                     let src = drv.get(&n).map(String::as_str).unwrap_or("none");
-                    let fan = if fanout.get(&n).copied().unwrap_or(0) > 1 { "multi" } else { "single" };
-                    *feed_src.entry(format!("lut{pos}_from_{src}_{fan}")).or_default() += 1;
+                    let fan = if fanout.get(&n).copied().unwrap_or(0) > 1 {
+                        "multi"
+                    } else {
+                        "single"
+                    };
+                    *feed_src
+                        .entry(format!("lut{pos}_from_{src}_{fan}"))
+                        .or_default() += 1;
                 }
             }
             for x in [l.l6, l.l5].into_iter().flatten() {
                 if x.kind == LutKind::Logic && x.inputs <= 1 {
                     *r.entry("single_input_luts").or_default() += 1;
-                    *tot.entry(if kind == 2 { "single_input_luts_chain" } else { "single_input_luts_logic" }).or_default() += 1;
+                    *tot.entry(if kind == 2 {
+                        "single_input_luts_chain"
+                    } else {
+                        "single_input_luts_logic"
+                    })
+                    .or_default() += 1;
                 }
             }
         }
@@ -250,11 +321,30 @@ fn run() -> Result<(), String> {
     }
     *tot.entry("unmatched_slice_sites").or_default() += slices.len();
     let cols = [
-        "sx", "sy", "tile_x", "tile_y", "slicem", "kind", "lut6", "lut5", "ff", "single_input", "free5_pairable", "free_letters", "ctrl_sets",
+        "sx",
+        "sy",
+        "tile_x",
+        "tile_y",
+        "slicem",
+        "kind",
+        "lut6",
+        "lut5",
+        "ff",
+        "single_input",
+        "free5_pairable",
+        "free_letters",
+        "ctrl_sets",
     ];
-    std::fs::write(grid_out, json!({"cols": cols, "kinds": ["empty", "logic", "chain", "memory"], "rows": rows}).to_string())
-        .map_err(|e| format!("{grid_out}: {e}"))?;
-    println!("{}", json!({"occupancy": tot, "chain_single_input_sources": feed_src, "slices": sites.slices.len()}));
+    std::fs::write(
+        grid_out,
+        json!({"cols": cols, "kinds": ["empty", "logic", "chain", "memory"], "rows": rows})
+            .to_string(),
+    )
+    .map_err(|e| format!("{grid_out}: {e}"))?;
+    println!(
+        "{}",
+        json!({"occupancy": tot, "chain_single_input_sources": feed_src, "slices": sites.slices.len()})
+    );
     Ok(())
 }
 

@@ -12,7 +12,8 @@ use oxibit_pnr::packed::Design;
 use serde_json::{Value, json};
 
 fn read(path: &str) -> Result<Value, String> {
-    serde_json::from_str(&std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?).map_err(|e| format!("{path}: {e}"))
+    serde_json::from_str(&std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?)
+        .map_err(|e| format!("{path}: {e}"))
 }
 
 /// The packing policy from the environment:
@@ -32,13 +33,20 @@ fn pack_policy() -> Result<PackPolicy, String> {
         None | Some("exploration") => PackPolicy::exploration(),
         Some("production") => PackPolicy::production(),
         Some("nextpnr") => PackPolicy::nextpnr_reference(),
-        Some(o) => return Err(format!("OXIBIT_PACK_POLICY={o}: expected exploration, production or nextpnr")),
+        Some(o) => {
+            return Err(format!(
+                "OXIBIT_PACK_POLICY={o}: expected exploration, production or nextpnr"
+            ));
+        }
     };
     if let Some(v) = var("OXIBIT_PACK_FLOOR") {
-        pol.floor = Level::parse(&v).ok_or_else(|| format!("OXIBIT_PACK_FLOOR={v}: expected unsupported, modeled, pnr, fasm or silicon"))?;
+        pol.floor = Level::parse(&v).ok_or_else(|| {
+            format!("OXIBIT_PACK_FLOOR={v}: expected unsupported, modeled, pnr, fasm or silicon")
+        })?;
     }
     if let Some(v) = var("OXIBIT_CARRY_DI") {
-        pol.carry_di = CarryDi::parse(&v).ok_or_else(|| format!("OXIBIT_CARRY_DI={v}: expected lut5 or bypass"))?;
+        pol.carry_di = CarryDi::parse(&v)
+            .ok_or_else(|| format!("OXIBIT_CARRY_DI={v}: expected lut5 or bypass"))?;
     }
     if let Some(v) = var("OXIBIT_CARRY_FF") {
         pol.carry_ff = match v.as_str() {
@@ -49,12 +57,20 @@ fn pack_policy() -> Result<PackPolicy, String> {
     }
     if let Some(v) = var("OXIBIT_LUT5_FILL") {
         pol.lut5 = Lut5Fill::NONE;
-        for w in v.split(',').map(str::trim).filter(|w| !w.is_empty() && *w != "none") {
+        for w in v
+            .split(',')
+            .map(str::trim)
+            .filter(|w| !w.is_empty() && *w != "none")
+        {
             match w {
                 "chain" => pol.lut5.chain = true,
                 "ff_letter" => pol.lut5.ff_letter = true,
                 "pairs" => pol.lut5.pairs = true,
-                o => return Err(format!("OXIBIT_LUT5_FILL: unknown {o}: expected chain, ff_letter, pairs or none")),
+                o => {
+                    return Err(format!(
+                        "OXIBIT_LUT5_FILL: unknown {o}: expected chain, ff_letter, pairs or none"
+                    ));
+                }
             }
         }
     }
@@ -62,9 +78,18 @@ fn pack_policy() -> Result<PackPolicy, String> {
         pol.fold = v != "0";
     }
     if let Some(v) = var("OXIBIT_FILL_BYPASS") {
-        pol.bypass_ffs_per_slice = v.parse().map_err(|_| format!("OXIBIT_FILL_BYPASS={v}: expected 1..4"))?;
+        pol.bypass_ffs_per_slice = v
+            .parse()
+            .map_err(|_| format!("OXIBIT_FILL_BYPASS={v}: expected 1..4"))?;
     }
-    let num = |k: &str| -> Result<Option<f64>, String> { var(k).map(|v| v.parse::<f64>().map_err(|_| format!("{k}={v}: expected a number"))).transpose() };
+    let num = |k: &str| -> Result<Option<f64>, String> {
+        var(k)
+            .map(|v| {
+                v.parse::<f64>()
+                    .map_err(|_| format!("{k}={v}: expected a number"))
+            })
+            .transpose()
+    };
     if let Some(c) = num("OXIBIT_PLACE_PIN_CAP")? {
         pol.objective.pins.cap = c as u32;
     }
@@ -86,6 +111,9 @@ fn pack_policy() -> Result<PackPolicy, String> {
     if let Some(b) = num("OXIBIT_PLACE_DENSITY_BIN")? {
         pol.objective.density.bin = b as i32;
     }
+    if let Some(v) = var("OXIBIT_PLACE_FLOORPLAN") {
+        pol.floorplan = oxibit_place::floorplan::Floorplan::parse(&v)?;
+    }
     Ok(pol)
 }
 
@@ -96,7 +124,8 @@ fn run() -> Result<bool, String> {
     };
     let t0 = std::time::Instant::now();
     let dev = oxibit_place::device::Device::open(std::path::Path::new(db), part)?;
-    let props = oxibit_place::xdc::parse(&std::fs::read_to_string(xdc).map_err(|e| format!("{xdc}: {e}"))?);
+    let props =
+        oxibit_place::xdc::parse(&std::fs::read_to_string(xdc).map_err(|e| format!("{xdc}: {e}"))?);
     let nl = Netlist::from_json(&read(synth)?)?;
     let plan = pack_policy()?.plan(&oxibit_place::policy::xc7z020())?;
     println!("{}", json!({"pack_policy": plan.json()}));
@@ -125,40 +154,80 @@ fn run() -> Result<bool, String> {
                             "sites": {"slices": sites.slices.len(), "slicem": sites.slices.iter().filter(|s| s.m).count(), "dsp": sites.dsp.len(),
                                       "ramb36": sites.ramb36.len(), "ramb18": sites.ramb18.len(), "bufg": sites.bufg.len(), "ps7": sites.ps7.len()}}})
         );
-        let mut opts = oxibit_place::placer::Options { seed, ..Default::default() };
-        if let Some(m) = std::env::var("OXIBIT_PLACE_MOVES").ok().and_then(|v| v.parse().ok()) {
+        let mut opts = oxibit_place::placer::Options {
+            seed,
+            ..Default::default()
+        };
+        if let Some(m) = std::env::var("OXIBIT_PLACE_MOVES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+        {
             opts.max_moves_per_obj = m;
         }
-        if let Some(m) = std::env::var("OXIBIT_PLACE_T0").ok().and_then(|v| v.parse().ok()) {
+        if let Some(m) = std::env::var("OXIBIT_PLACE_T0")
+            .ok()
+            .and_then(|v| v.parse().ok())
+        {
             opts.t0_scale = m;
         }
-        if let Some(m) = std::env::var("OXIBIT_PLACE_INNER").ok().and_then(|v| v.parse().ok()) {
+        if let Some(m) = std::env::var("OXIBIT_PLACE_INNER")
+            .ok()
+            .and_then(|v| v.parse().ok())
+        {
             opts.inner = m;
         }
-        if let Some(m) = std::env::var("OXIBIT_PLACE_UNIT").ok().and_then(|v| v.parse().ok()) {
+        if let Some(m) = std::env::var("OXIBIT_PLACE_UNIT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+        {
             opts.unit_frac = m;
         }
-        if let Some(m) = std::env::var("OXIBIT_PLACE_UNIT_WINDOW").ok().and_then(|v| v.parse().ok()) {
+        if let Some(m) = std::env::var("OXIBIT_PLACE_UNIT_WINDOW")
+            .ok()
+            .and_then(|v| v.parse().ok())
+        {
             opts.unit_window = m;
         }
-        if let Some(m) = std::env::var("OXIBIT_PLACE_POLISH").ok().and_then(|v| v.parse().ok()) {
+        if let Some(m) = std::env::var("OXIBIT_PLACE_POLISH")
+            .ok()
+            .and_then(|v| v.parse().ok())
+        {
             opts.polish = m;
         }
         opts.pins = plan.objective().pins;
         opts.bypass = plan.objective().bypass;
         opts.density = plan.objective().density;
+        opts.floorplan = plan.floorplan().clone();
         let ps = oxibit_place::placer::place(&mut p, &dev, &sites, macros, &opts)?;
-        println!("{}", json!({"hpwl_measured": oxibit_place::placer::hpwl(&p, 200)}));
+        println!(
+            "{}",
+            json!({"hpwl_measured": oxibit_place::placer::hpwl(&p, 200)})
+        );
         let lg = place::legalise(&mut p, &place::ps7_inputs(std::path::Path::new(meta))?);
-        let unplaced: Vec<String> = p.nl.cell_ids().into_iter().filter(|&c| p.nl.cell(c).bel.is_none()).map(|c| p.nl.cell(c).name.clone()).collect();
+        let unplaced: Vec<String> =
+            p.nl.cell_ids()
+                .into_iter()
+                .filter(|&c| p.nl.cell(c).bel.is_none())
+                .map(|c| p.nl.cell(c).name.clone())
+                .collect();
         let clashes = oxibit_place::slice::check(&p);
         ok = unplaced.is_empty() && lg.over_five.is_empty() && clashes.is_empty();
         let shown: Vec<String> = clashes
             .iter()
             .take(6)
-            .map(|(s, c)| format!("{s} {}X: {:?} holds, {:?} wanted", (b'A' + c.letter) as char, c.held.by, c.wanted.by))
+            .map(|(s, c)| {
+                format!(
+                    "{s} {}X: {:?} holds, {:?} wanted",
+                    (b'A' + c.letter) as char,
+                    c.held.by,
+                    c.wanted.by
+                )
+            })
             .collect();
-        println!("{}", json!({"bypass_check": {"clashes": clashes.len(), "examples": shown}}));
+        println!(
+            "{}",
+            json!({"bypass_check": {"clashes": clashes.len(), "examples": shown}})
+        );
         println!(
             "{}",
             json!({"placer": {"objects": ps.objects, "chains": ps.chains_placed, "hpwl_start": ps.hpwl_start, "hpwl_end": ps.hpwl_end,
@@ -169,16 +238,22 @@ fn run() -> Result<bool, String> {
                                          "tiles_over_cap": ps.bypass_tiles_over_cap, "tile_max": ps.bypass_tile_max, "fill_clashes": ps.bypass_clashes},
                               "density": {"bin": opts.density.bin, "target": opts.density.target, "weight": opts.density.weight,
                                           "excess_start": ps.density_excess_start, "excess_end": ps.density_excess_end, "bins_over": ps.density_bins_over},
-                              "steps": ps.trace.len(), "trace": ps.trace.iter().step_by((ps.trace.len() / 25).max(1)).map(|t| json!([(t.0 * 100.0).round() / 100.0, t.1.round(), (t.2 * 1000.0).round() / 1000.0, t.3])).collect::<Vec<_>>(), "unplaced": unplaced.len(),
+                              "floorplan": ps.floorplan.as_ref().map(|f| f.json()), "steps": ps.trace.len(), "trace": ps.trace.iter().step_by((ps.trace.len() / 25).max(1)).map(|t| json!([(t.0 * 100.0).round() / 100.0, t.1.round(), (t.2 * 1000.0).round() / 1000.0, t.3])).collect::<Vec<_>>(), "unplaced": unplaced.len(),
                               "unplaced_examples": unplaced.iter().take(6).collect::<Vec<_>>(), "fractured": lg.fractured, "over_five": lg.over_five.len()}})
         );
     } else if let Some(r) = rest.first() {
         let theirs = Design::from_json(&read(r)?)?;
         let diff = compare::compare(&p.nl.to_design(), &theirs);
-        println!("{}", json!({"compare": diff.to_json(), "differences": diff.total()}));
+        println!(
+            "{}",
+            json!({"compare": diff.to_json(), "differences": diff.total()})
+        );
         let st = place::import(&mut p, &theirs);
         let lg = place::legalise(&mut p, &place::ps7_inputs(std::path::Path::new(meta))?);
-        println!("{}", json!({"reference_hpwl": oxibit_place::placer::hpwl(&p, 200)}));
+        println!(
+            "{}",
+            json!({"reference_hpwl": oxibit_place::placer::hpwl(&p, 200)})
+        );
         ok = st.unplaced.is_empty() && st.collisions.is_empty() && lg.over_five.is_empty();
         println!(
             "{}",
@@ -193,7 +268,8 @@ fn run() -> Result<bool, String> {
     let (ports, names) = p.nl.ports_and_names();
     v["modules"][&p.nl.top]["ports"] = ports;
     v["modules"][&p.nl.top]["netnames"] = names;
-    std::fs::write(out, serde_json::to_string(&v).map_err(|e| e.to_string())?).map_err(|e| format!("{out}: {e}"))?;
+    std::fs::write(out, serde_json::to_string(&v).map_err(|e| e.to_string())?)
+        .map_err(|e| format!("{out}: {e}"))?;
     Ok(ok)
 }
 

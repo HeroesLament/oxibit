@@ -53,8 +53,18 @@ pub fn pack_io(p: &mut Packer, dev: &Device, props: &PortProps) -> Result<(), St
         let Some(net) = tp.net else { continue };
         let on_pad = |p: &Packer, c: CellId, port: &str| pad_pins(&p.nl.cell(c).ty).contains(&port);
         let buf = match tp.dir {
-            Dir::Input => p.nl.net(net).users.iter().find(|(c, port)| on_pad(p, *c, port)).map(|(c, _)| *c),
-            Dir::Output => p.nl.driver(net).filter(|(c, port)| on_pad(p, *c, port)).map(|(c, _)| c),
+            Dir::Input => {
+                p.nl.net(net)
+                    .users
+                    .iter()
+                    .find(|(c, port)| on_pad(p, *c, port))
+                    .map(|(c, _)| *c)
+            }
+            Dir::Output => {
+                p.nl.driver(net)
+                    .filter(|(c, port)| on_pad(p, *c, port))
+                    .map(|(c, _)| c)
+            }
             Dir::Inout => None,
         };
         let Some(buf) = buf else {
@@ -80,8 +90,10 @@ pub fn pack_io(p: &mut Packer, dev: &Device, props: &PortProps) -> Result<(), St
             cell.attrs.insert(k.clone(), json!(v));
         }
         cell.attrs.insert("LOC".into(), json!(pin));
-        cell.attrs
-            .insert("X_IO_DIR".into(), json!(if tp.dir == Dir::Input { "IN" } else { "OUT" }));
+        cell.attrs.insert(
+            "X_IO_DIR".into(),
+            json!(if tp.dir == Dir::Input { "IN" } else { "OUT" }),
+        );
         cell.bel = dev.grid_loc(&site, &format!("{site_ty}.PAD"));
         pad_site.insert(net, site);
         if !bufs.contains(&buf) {
@@ -103,7 +115,12 @@ pub fn pack_io(p: &mut Packer, dev: &Device, props: &PortProps) -> Result<(), St
                 let (i, o) = (get(p, "I"), get(p, "O"));
                 let site = site_of(i)?;
                 p.nl.remove_cell(b);
-                let c = add_cell(p, &format!("{name}$intcell$IBUF"), "IBUF", &[("I", Dir::Input, i), ("O", Dir::Output, o)]);
+                let c = add_cell(
+                    p,
+                    &format!("{name}$intcell$IBUF"),
+                    "IBUF",
+                    &[("I", Dir::Input, i), ("O", Dir::Output, o)],
+                );
                 p.nl.cell_mut(c).bel = dev.grid_loc(&site, "IOB33.INBUF_EN");
                 p.io_site.insert(c, site);
             }
@@ -111,7 +128,12 @@ pub fn pack_io(p: &mut Packer, dev: &Device, props: &PortProps) -> Result<(), St
                 let (i, o) = (get(p, "I"), get(p, "O"));
                 let site = site_of(o)?;
                 p.nl.remove_cell(b);
-                let c = add_cell(p, &format!("{name}$intcell$OBUF"), "OBUF", &[("I", Dir::Input, i), ("O", Dir::Output, o)]);
+                let c = add_cell(
+                    p,
+                    &format!("{name}$intcell$OBUF"),
+                    "OBUF",
+                    &[("I", Dir::Input, i), ("O", Dir::Output, o)],
+                );
                 p.nl.cell_mut(c).bel = dev.grid_loc(&site, "IOB33.OUTBUF");
                 p.io_site.insert(c, site);
             }
@@ -123,7 +145,11 @@ pub fn pack_io(p: &mut Packer, dev: &Device, props: &PortProps) -> Result<(), St
                     p,
                     &format!("{name}$intcell$IBUF"),
                     "IBUFDS",
-                    &[("I", Dir::Input, i), ("IB", Dir::Input, ib), ("O", Dir::Output, o)],
+                    &[
+                        ("I", Dir::Input, i),
+                        ("IB", Dir::Input, ib),
+                        ("O", Dir::Output, o),
+                    ],
                 );
                 let cell = p.nl.cell_mut(c);
                 cell.bel = dev.grid_loc(&site, "IOB33M.INBUF_EN");
@@ -144,7 +170,12 @@ pub fn pack_io(p: &mut Packer, dev: &Device, props: &PortProps) -> Result<(), St
                 let cell = p.nl.cell_mut(inv);
                 cell.bel = dev.grid_loc(&sn, "IOB33S.O_ININV");
                 cell.attrs.insert("X_IOB_SITE_TYPE".into(), json!("IOB33S"));
-                let bp = add_cell(p, &format!("{name}$subcell$P"), "OBUF", &[("I", Dir::Input, i), ("O", Dir::Output, o)]);
+                let bp = add_cell(
+                    p,
+                    &format!("{name}$subcell$P"),
+                    "OBUF",
+                    &[("I", Dir::Input, i), ("O", Dir::Output, o)],
+                );
                 let cell = p.nl.cell_mut(bp);
                 cell.bel = dev.grid_loc(&sp, "IOB33M.OUTBUF");
                 cell.attrs.insert("X_IOB_SITE_TYPE".into(), json!("IOB33M"));
@@ -164,7 +195,10 @@ pub fn pack_io(p: &mut Packer, dev: &Device, props: &PortProps) -> Result<(), St
     }
 
     // Buffers onto their bel types.
-    let ob = Rule::to("IOB33_OUTBUF").port("I", "IN").port("O", "OUT").port("T", "TRI");
+    let ob = Rule::to("IOB33_OUTBUF")
+        .port("I", "IN")
+        .port("O", "OUT")
+        .port("T", "TRI");
     let ib = Rule::to("IOB33_INBUF_EN").port("I", "PAD").port("O", "OUT");
     let rules: BTreeMap<String, Rule> = [
         ("OBUF".to_string(), ob.clone()),
@@ -185,7 +219,10 @@ pub fn pack_io(p: &mut Packer, dev: &Device, props: &PortProps) -> Result<(), St
     }
     let rules: BTreeMap<String, Rule> = [
         ("PAD".to_string(), Rule::to("PAD")),
-        ("INV".to_string(), Rule::to("INVERTER").port("I", "IN").port("O", "OUT")),
+        (
+            "INV".to_string(),
+            Rule::to("INVERTER").port("I", "IN").port("O", "OUT"),
+        ),
     ]
     .into_iter()
     .collect();
@@ -211,32 +248,46 @@ pub fn pack_iologic(p: &mut Packer, dev: &Device) -> Result<(), String> {
         let name = p.nl.cell(c).name.clone();
         match ty.as_str() {
             "IDELAYE2" => {
-                let d = p.nl.cell(c).net("IDATAIN").ok_or_else(|| format!("{name}: IDATAIN unconnected"))?;
-                let (drv, _) = p.nl.driver(d).ok_or_else(|| format!("{name}: IDATAIN undriven"))?;
+                let d =
+                    p.nl.cell(c)
+                        .net("IDATAIN")
+                        .ok_or_else(|| format!("{name}: IDATAIN unconnected"))?;
+                let (drv, _) =
+                    p.nl.driver(d)
+                        .ok_or_else(|| format!("{name}: IDATAIN undriven"))?;
                 if !p.nl.cell(drv).ty.contains("INBUF_EN") {
                     return Err(format!("{name}: IDATAIN from {}", p.nl.cell(drv).ty));
                 }
                 let io_loc = p.nl.cell(drv).bel.clone().ok_or("input buffer unplaced")?;
                 let io_site = p.io_site.get(&drv).cloned().ok_or("input buffer site")?;
-                let site = dev.io_logic_site(&io_site, "IDELAY").ok_or_else(|| format!("no IDELAY for {io_site}"))?;
+                let site = dev
+                    .io_logic_site(&io_site, "IDELAY")
+                    .ok_or_else(|| format!("no IDELAY for {io_site}"))?;
                 let cell = p.nl.cell_mut(c);
                 cell.bel = dev.grid_loc(&site, "IDELAYE2");
                 cell.attrs.insert("X_IO_BEL".into(), json!(io_loc.text()));
                 p.io_site.insert(c, io_site);
             }
             "ODDR" => {
-                let q = p.nl.cell(c).net("Q").ok_or_else(|| format!("{name}: Q unconnected"))?;
+                let q =
+                    p.nl.cell(c)
+                        .net("Q")
+                        .ok_or_else(|| format!("{name}: Q unconnected"))?;
                 let users = p.nl.net(q).users.clone();
                 let outs: Vec<CellId> = users
                     .iter()
-                    .filter(|(u, _)| matches!(p.nl.cell(*u).ty.as_str(), "IOB33_OUTBUF" | "IOB33M_OUTBUF"))
+                    .filter(|(u, _)| {
+                        matches!(p.nl.cell(*u).ty.as_str(), "IOB33_OUTBUF" | "IOB33M_OUTBUF")
+                    })
                     .map(|(u, _)| *u)
                     .collect();
                 let [ob] = outs[..] else {
                     return Err(format!("{name}: Q must drive one output buffer"));
                 };
                 let io_site = p.io_site.get(&ob).cloned().ok_or("output buffer site")?;
-                let site = dev.io_logic_site(&io_site, "OLOGIC").ok_or_else(|| format!("no OLOGIC for {io_site}"))?;
+                let site = dev
+                    .io_logic_site(&io_site, "OLOGIC")
+                    .ok_or_else(|| format!("no OLOGIC for {io_site}"))?;
                 let tri = users.first().is_some_and(|(_, port)| port == "TRI");
                 // The OLOGIC has one SR pin: ODDR's S or its R, whichever the
                 // design drives (R when neither is). The other comes off, and
@@ -248,15 +299,25 @@ pub fn pack_iologic(p: &mut Packer, dev: &Device) -> Result<(), String> {
                     (false, _) => ("R", "S"),
                 };
                 p.nl.remove_port(c, other);
-                let rule = Rule::to(if tri { "OLOGICE3_TFF" } else { "OLOGICE3_OUTFF" }).port("C", "CK").port(sr, "SR");
+                let rule = Rule::to(if tri {
+                    "OLOGICE3_TFF"
+                } else {
+                    "OLOGICE3_OUTFF"
+                })
+                .port("C", "CK")
+                .port(sr, "SR");
                 p.xform(c, &rule);
                 p.nl.cell_mut(c).bel = dev.grid_loc(&site, if tri { "TFF" } else { "OUTFF" });
             }
-            "IDDR" | "ISERDESE2" | "OSERDESE2" | "ODELAYE2" => return Err(format!("{name}: {ty} not packed yet")),
+            "IDDR" | "ISERDESE2" | "OSERDESE2" | "ODELAYE2" => {
+                return Err(format!("{name}: {ty} not packed yet"));
+            }
             _ => {}
         }
     }
-    let rules: BTreeMap<String, Rule> = [("IDELAYE2".to_string(), Rule::to("IDELAYE2_IDELAYE2"))].into_iter().collect();
+    let rules: BTreeMap<String, Rule> = [("IDELAYE2".to_string(), Rule::to("IDELAYE2_IDELAYE2"))]
+        .into_iter()
+        .collect();
     let n = p.generic_xform(&rules);
     p.count("io.idelays", n);
     Ok(())
@@ -279,13 +340,20 @@ pub fn pack_idelayctrl(p: &mut Packer, dev: &Device) -> Result<(), String> {
     let mut sites: BTreeSet<String> = BTreeSet::new();
     for d in &delays {
         let io = p.io_site.get(d).ok_or("delay without its IOB site")?;
-        sites.insert(dev.ioctrl_site(io).ok_or_else(|| format!("no IDELAYCTRL for {io}"))?);
+        sites.insert(
+            dev.ioctrl_site(io)
+                .ok_or_else(|| format!("no IDELAYCTRL for {io}"))?,
+        );
     }
     if sites.is_empty() {
         return Err("IDELAYCTRL with no delays".into());
     }
     let name = p.nl.cell(ctrl).name.clone();
-    let (refclk, rst, rdy) = (p.nl.cell(ctrl).net("REFCLK"), p.nl.cell(ctrl).net("RST"), p.nl.cell(ctrl).net("RDY"));
+    let (refclk, rst, rdy) = (
+        p.nl.cell(ctrl).net("REFCLK"),
+        p.nl.cell(ctrl).net("RST"),
+        p.nl.cell(ctrl).net("RDY"),
+    );
     p.nl.remove_cell(ctrl);
     let mut rdys = Vec::new();
     let single = sites.len() == 1;
@@ -299,7 +367,11 @@ pub fn pack_idelayctrl(p: &mut Packer, dev: &Device) -> Result<(), String> {
             p,
             &format!("{name}$intcell$CTRL_DUP_{i}"),
             "IDELAYCTRL",
-            &[("REFCLK", Dir::Input, refclk), ("RST", Dir::Input, rst), ("RDY", Dir::Output, r)],
+            &[
+                ("REFCLK", Dir::Input, refclk),
+                ("RST", Dir::Input, rst),
+                ("RDY", Dir::Output, r),
+            ],
         );
         p.nl.cell_mut(c).bel = dev.grid_loc(site, "IDELAYCTRL");
         if let Some(r) = r {
@@ -316,11 +388,19 @@ pub fn pack_idelayctrl(p: &mut Packer, dev: &Device) -> Result<(), String> {
             } else {
                 p.nl.add_net_unique(&format!("{name}$intnet$ANDED_RDY_{j}"))
             };
-            p.create_lut(&format!("{name}/RDY_AND_LUT_{j}"), &[acc, rdys[j]], Some(o), super::constants::prop32(8));
+            p.create_lut(
+                &format!("{name}/RDY_AND_LUT_{j}"),
+                &[acc, rdys[j]],
+                Some(o),
+                super::constants::prop32(8),
+            );
             acc = o;
         }
     }
-    let rules: BTreeMap<String, Rule> = [("IDELAYCTRL".to_string(), Rule::to("IDELAYCTRL_IDELAYCTRL"))].into_iter().collect();
+    let rules: BTreeMap<String, Rule> =
+        [("IDELAYCTRL".to_string(), Rule::to("IDELAYCTRL_IDELAYCTRL"))]
+            .into_iter()
+            .collect();
     p.generic_xform(&rules);
     p.count("io.idelayctrls", sites.len());
     Ok(())

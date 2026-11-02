@@ -137,7 +137,10 @@ impl Netlist {
         let (top, m) = mods
             .iter()
             .find(|(_, m)| m["attributes"]["top"].is_string() || m["attributes"]["top"].is_number())
-            .or_else(|| mods.iter().max_by_key(|(_, m)| m["cells"].as_object().map_or(0, |c| c.len())))
+            .or_else(|| {
+                mods.iter()
+                    .max_by_key(|(_, m)| m["cells"].as_object().map_or(0, |c| c.len()))
+            })
             .ok_or("no top module")?;
         let mut nl = Netlist::new(top);
         nl.attrs = m["attributes"].as_object().cloned().unwrap_or_default();
@@ -149,7 +152,11 @@ impl Netlist {
             let bits = nn["bits"].as_array().cloned().unwrap_or_default();
             for (i, b) in bits.iter().enumerate() {
                 let Some(b) = b.as_i64() else { continue };
-                let full = if bits.len() == 1 { name.clone() } else { format!("{name}[{i}]") };
+                let full = if bits.len() == 1 {
+                    name.clone()
+                } else {
+                    format!("{name}[{i}]")
+                };
                 let key = (hidden, full.len(), full);
                 match best.get(&b) {
                     Some(k) if (k.0, k.1, &k.2) <= (key.0, key.1, &key.2) => {}
@@ -168,7 +175,10 @@ impl Netlist {
                 Bit::Net(b) => Some(match by_bit.get(&b) {
                     Some(&n) => n,
                     None => {
-                        let name = best.get(&b).map(|k| k.2.clone()).unwrap_or_else(|| format!("$bit{b}"));
+                        let name = best
+                            .get(&b)
+                            .map(|k| k.2.clone())
+                            .unwrap_or_else(|| format!("$bit{b}"));
                         let n = nl.add_net_unique(&name);
                         by_bit.insert(b, n);
                         n
@@ -185,21 +195,40 @@ impl Netlist {
             };
             let bits = p["bits"].as_array().cloned().unwrap_or_default();
             for (i, b) in bits.iter().enumerate() {
-                let name = if bits.len() == 1 { pname.clone() } else { format!("{pname}[{i}]") };
+                let name = if bits.len() == 1 {
+                    pname.clone()
+                } else {
+                    format!("{pname}[{i}]")
+                };
                 let net = net_of(&mut nl, b)?;
                 nl.ports.push(TopPort { name, dir, net });
             }
         }
 
         for (cname, c) in m["cells"].as_object().into_iter().flatten() {
-            let ty = c["type"].as_str().ok_or_else(|| format!("cell {cname} has no type"))?;
+            let ty = c["type"]
+                .as_str()
+                .ok_or_else(|| format!("cell {cname} has no type"))?;
             let id = nl.add_cell(cname, ty);
             {
                 let cell = nl.cell_mut(id);
-                cell.params = c["parameters"].as_object().cloned().unwrap_or_default().into_iter().collect();
-                cell.attrs = c["attributes"].as_object().cloned().unwrap_or_default().into_iter().collect();
+                cell.params = c["parameters"]
+                    .as_object()
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect();
+                cell.attrs = c["attributes"]
+                    .as_object()
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect();
             }
-            let dirs = c["port_directions"].as_object().cloned().unwrap_or_default();
+            let dirs = c["port_directions"]
+                .as_object()
+                .cloned()
+                .unwrap_or_default();
             for (p, bits) in c["connections"].as_object().into_iter().flatten() {
                 let bits = bits.as_array().cloned().unwrap_or_default();
                 let dir = match dirs.get(p).and_then(Value::as_str) {
@@ -208,7 +237,11 @@ impl Netlist {
                     _ => Dir::Input,
                 };
                 for (i, b) in bits.iter().enumerate() {
-                    let pn = if bits.len() == 1 { p.clone() } else { format!("{p}[{i}]") };
+                    let pn = if bits.len() == 1 {
+                        p.clone()
+                    } else {
+                        format!("{p}[{i}]")
+                    };
                     nl.add_port(id, &pn, dir);
                     if let Some(n) = net_of(&mut nl, b)? {
                         nl.connect(id, &pn, n);
@@ -223,7 +256,10 @@ impl Netlist {
 
     pub fn add_cell(&mut self, name: &str, ty: &str) -> CellId {
         let id = CellId(self.cells.len() as u32);
-        assert!(!self.cell_by_name.contains_key(name), "duplicate cell name {name}");
+        assert!(
+            !self.cell_by_name.contains_key(name),
+            "duplicate cell name {name}"
+        );
         self.cells.push(Some(Cell {
             name: name.to_string(),
             ty: ty.to_string(),
@@ -261,7 +297,10 @@ impl Netlist {
     }
 
     pub fn cells_of(&self, ty: &str) -> Vec<CellId> {
-        self.cell_ids().into_iter().filter(|&c| self.cell(c).ty == ty).collect()
+        self.cell_ids()
+            .into_iter()
+            .filter(|&c| self.cell(c).ty == ty)
+            .collect()
     }
 
     /// Remove a cell, disconnecting every port.
@@ -278,7 +317,10 @@ impl Netlist {
     // ---- ports ----
 
     pub fn add_port(&mut self, c: CellId, port: &str, dir: Dir) {
-        self.cell_mut(c).ports.entry(port.to_string()).or_insert(Port { dir, net: None });
+        self.cell_mut(c)
+            .ports
+            .entry(port.to_string())
+            .or_insert(Port { dir, net: None });
     }
 
     /// Connect `port` (added as an input if missing) to `net`, after
@@ -287,7 +329,10 @@ impl Netlist {
         self.disconnect(c, port);
         let dir = {
             let cell = self.cell_mut(c);
-            let p = cell.ports.entry(port.to_string()).or_insert(Port { dir: Dir::Input, net: None });
+            let p = cell.ports.entry(port.to_string()).or_insert(Port {
+                dir: Dir::Input,
+                net: None,
+            });
             p.net = Some(net);
             p.dir
         };
@@ -300,10 +345,15 @@ impl Netlist {
     }
 
     pub fn disconnect(&mut self, c: CellId, port: &str) {
-        let Some(p) = self.cell_mut(c).ports.get_mut(port) else { return };
+        let Some(p) = self.cell_mut(c).ports.get_mut(port) else {
+            return;
+        };
         let Some(net) = p.net.take() else { return };
         let n = self.net_mut(net);
-        if n.driver.as_ref().is_some_and(|(dc, dp)| *dc == c && dp == port) {
+        if n.driver
+            .as_ref()
+            .is_some_and(|(dc, dp)| *dc == c && dp == port)
+        {
             n.driver = None;
         }
         n.users.retain(|(uc, up)| !(*uc == c && up == port));
@@ -320,7 +370,9 @@ impl Netlist {
         if old == new {
             return;
         }
-        let Some(p) = self.cell_mut(c).ports.remove(old) else { return };
+        let Some(p) = self.cell_mut(c).ports.remove(old) else {
+            return;
+        };
         if let Some(net) = p.net {
             let n = self.net_mut(net);
             if let Some((dc, dp)) = &mut n.driver
@@ -340,7 +392,9 @@ impl Netlist {
 
     /// Move `port` of `from` to `to_port` of `to`, with its net.
     pub fn move_port(&mut self, from: CellId, port: &str, to: CellId, to_port: &str) {
-        let Some(p) = self.cell(from).ports.get(port).cloned() else { return };
+        let Some(p) = self.cell(from).ports.get(port).cloned() else {
+            return;
+        };
         self.disconnect(from, port);
         self.cell_mut(from).ports.remove(port);
         self.add_port(to, to_port, p.dir);
@@ -354,7 +408,10 @@ impl Netlist {
 
     pub fn add_net(&mut self, name: &str) -> NetId {
         let id = NetId(self.nets.len() as u32);
-        assert!(!self.net_by_name.contains_key(name), "duplicate net name {name}");
+        assert!(
+            !self.net_by_name.contains_key(name),
+            "duplicate net name {name}"
+        );
         self.nets.push(Some(Net {
             name: name.to_string(),
             driver: None,
@@ -402,11 +459,15 @@ impl Netlist {
 
     /// Nets with neither driver nor users nor a top-level port are dropped.
     pub fn sweep_nets(&mut self) {
-        let on_port: std::collections::HashSet<NetId> = self.ports.iter().filter_map(|p| p.net).collect();
+        let on_port: std::collections::HashSet<NetId> =
+            self.ports.iter().filter_map(|p| p.net).collect();
         for i in 0..self.nets.len() {
             let id = NetId(i as u32);
-            let dead =
-                self.nets[i].as_ref().is_some_and(|n| n.driver.is_none() && n.users.is_empty()) && !on_port.contains(&id) && !self.is_const(id);
+            let dead = self.nets[i]
+                .as_ref()
+                .is_some_and(|n| n.driver.is_none() && n.users.is_empty())
+                && !on_port.contains(&id)
+                && !self.is_const(id);
             if dead {
                 let name = self.nets[i].take().expect("live").name;
                 self.net_by_name.remove(&name);
@@ -447,7 +508,10 @@ impl Netlist {
         let mut names = serde_json::Map::new();
         for (i, n) in self.nets.iter().enumerate() {
             if let Some(n) = n {
-                names.insert(n.name.clone(), json!({"hide_name": 0, "bits": [i as i64 + 2], "attributes": {}}));
+                names.insert(
+                    n.name.clone(),
+                    json!({"hide_name": 0, "bits": [i as i64 + 2], "attributes": {}}),
+                );
             }
         }
         (Value::Object(ports), Value::Object(names))
@@ -496,7 +560,10 @@ mod tests {
         assert_eq!(nl.cell(l).net("I1"), Some(nl.vcc));
         let y = nl.cell(l).net("O").unwrap();
         assert_eq!(nl.net(y).name, "y");
-        assert_eq!(nl.driver(y).map(|(c, p)| (c, p.to_string())), Some((l, "O".to_string())));
+        assert_eq!(
+            nl.driver(y).map(|(c, p)| (c, p.to_string())),
+            Some((l, "O".to_string()))
+        );
         let w = nl.cell_id("w").unwrap();
         assert_eq!(nl.cell(w).net("S[1]"), Some(nl.gnd));
         assert_eq!(nl.cell(w).net("S[2]"), None);

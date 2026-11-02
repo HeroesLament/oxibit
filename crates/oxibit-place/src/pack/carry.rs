@@ -28,7 +28,12 @@ use crate::slice::{BypassPins, XUse};
 fn create(p: &mut Packer, ty: &str, name: &str) -> CellId {
     let c = p.nl.add_cell(name, ty);
     let ports: &[(&str, Dir)] = match ty {
-        "MUXCY" => &[("CI", Dir::Input), ("DI", Dir::Input), ("S", Dir::Input), ("O", Dir::Output)],
+        "MUXCY" => &[
+            ("CI", Dir::Input),
+            ("DI", Dir::Input),
+            ("S", Dir::Input),
+            ("O", Dir::Output),
+        ],
         "XORCY" => &[("CI", Dir::Input), ("LI", Dir::Input), ("O", Dir::Output)],
         "CARRY4" => &[],
         _ => &[],
@@ -116,7 +121,11 @@ pub fn pack_carries(p: &mut Packer, di: CarryDi) {
             .into_iter()
             .filter(|&m| match p.nl.cell(m).net("CI") {
                 None => true,
-                Some(ci) => p.nl.driver(ci).is_none_or(|(d, _)| p.nl.cell(d).ty != "MUXCY") || illegal_fanout(p, ci),
+                Some(ci) => {
+                    p.nl.driver(ci)
+                        .is_none_or(|(d, _)| p.nl.cell(d).ty != "MUXCY")
+                        || illegal_fanout(p, ci)
+                }
             })
             .collect();
 
@@ -134,7 +143,10 @@ pub fn pack_carries(p: &mut Packer, di: CarryDi) {
             g.xorcys.push(None);
             if let Some(s) = p.nl.cell(muxcy).net("S") {
                 for (u, port) in p.nl.net(s).users.clone() {
-                    if p.nl.cell(u).ty == "XORCY" && port == "LI" && p.nl.cell(u).net("CI") == mux_ci {
+                    if p.nl.cell(u).ty == "XORCY"
+                        && port == "LI"
+                        && p.nl.cell(u).net("CI") == mux_ci
+                    {
                         *g.xorcys.last_mut().expect("pushed") = Some(u);
                         break;
                     }
@@ -145,7 +157,13 @@ pub fn pack_carries(p: &mut Packer, di: CarryDi) {
             if illegal_fanout(p, o) {
                 break;
             }
-            match p.nl.net(o).users.iter().find(|(u, _)| p.nl.cell(*u).ty == "MUXCY") {
+            match p
+                .nl
+                .net(o)
+                .users
+                .iter()
+                .find(|(u, _)| p.nl.cell(*u).ty == "MUXCY")
+            {
                 Some((u, _)) => muxcy = *u,
                 None => break,
             }
@@ -192,12 +210,17 @@ pub fn pack_carries(p: &mut Packer, di: CarryDi) {
     let bypass = di == CarryDi::Bypass;
     // With DI on the bypass pin the S LUT may read six inputs (A6 free).
     let lut_types: HashSet<&str> = if bypass {
-        ["LUT1", "LUT2", "LUT3", "LUT4", "LUT5", "LUT6"].into_iter().collect()
+        ["LUT1", "LUT2", "LUT3", "LUT4", "LUT5", "LUT6"]
+            .into_iter()
+            .collect()
     } else {
-        ["LUT1", "LUT2", "LUT3", "LUT4", "LUT5"].into_iter().collect()
+        ["LUT1", "LUT2", "LUT3", "LUT4", "LUT5"]
+            .into_iter()
+            .collect()
     };
     let mut packed: BTreeSet<CellId> = BTreeSet::new();
-    let (mut feeds, mut chains, mut bypassed, mut cyinit_held, mut const_luts) = (0usize, 0usize, 0usize, 0usize, 0usize);
+    let (mut feeds, mut chains, mut bypassed, mut cyinit_held, mut const_luts) =
+        (0usize, 0usize, 0usize, 0usize, 0usize);
     for g in &groups {
         chains += 1;
         let mut c4s: Vec<CellId> = Vec::new();
@@ -257,7 +280,8 @@ pub fn pack_carries(p: &mut Packer, di: CarryDi) {
             let mut s_inputs = 0;
             let lut_driver = |p: &Packer, n: NetId| -> Option<CellId> {
                 let (d, _) = p.nl.driver(n)?;
-                (p.nl.net(n).users.len() == 1 && lut_types.contains(p.nl.cell(d).ty.as_str())).then_some(d)
+                (p.nl.net(n).users.len() == 1 && lut_types.contains(p.nl.cell(d).ty.as_str()))
+                    .then_some(d)
             };
             let mut s_lut = s_net.and_then(|n| lut_driver(p, n));
             if let Some(l) = s_lut {
@@ -279,11 +303,17 @@ pub fn pack_carries(p: &mut Packer, di: CarryDi) {
             // A constant DI: a LUT1 on the 5LUT reading an S input, adding no
             // pin, when the S side reads at most five nets.
             let s_all: BTreeSet<NetId> = match s_lut {
-                Some(l) => (0..6).filter_map(|j| p.nl.cell(l).net(&format!("I{j}"))).collect(),
+                Some(l) => (0..6)
+                    .filter_map(|j| p.nl.cell(l).net(&format!("I{j}")))
+                    .collect(),
                 None => s_net.into_iter().collect(),
             };
-            let anchor = (s_all.len() <= 5).then(|| s_all.iter().copied().find(|&n| !p.nl.is_const(n))).flatten();
-            let di_const = di_net.filter(|&n| di_lut.is_none() && anchor.is_some() && p.nl.is_const(n)).map(|n| n == p.nl.vcc);
+            let anchor = (s_all.len() <= 5)
+                .then(|| s_all.iter().copied().find(|&n| !p.nl.is_const(n)))
+                .flatten();
+            let di_const = di_net
+                .filter(|&n| di_lut.is_none() && anchor.is_some() && p.nl.is_const(n))
+                .map(|n| n == p.nl.vcc);
             // A live CYINIT holds the bottom letter's AX.
             if i == 0
                 && let Some(n) = p.nl.cell(c4).net("CYINIT").filter(|&n| !p.nl.is_const(n))
@@ -299,10 +329,18 @@ pub fn pack_carries(p: &mut Packer, di: CarryDi) {
             }
             let mut di_bypass = false;
             if bypass && x_free {
-                let ins = |p: &Packer, l: CellId| -> BTreeSet<NetId> { (0..6).filter_map(|j| p.nl.cell(l).net(&format!("I{j}"))).collect() };
+                let ins = |p: &Packer, l: CellId| -> BTreeSet<NetId> {
+                    (0..6)
+                        .filter_map(|j| p.nl.cell(l).net(&format!("I{j}")))
+                        .collect()
+                };
                 let s_ins = s_lut.map(|l| ins(p, l)).unwrap_or_default();
                 // S: its own LUT (any width) or a feed on the S net.
-                let s_pins: BTreeSet<NetId> = if s_lut.is_some() { s_ins.clone() } else { s_net.into_iter().collect() };
+                let s_pins: BTreeSet<NetId> = if s_lut.is_some() {
+                    s_ins.clone()
+                } else {
+                    s_net.into_iter().collect()
+                };
                 // DI: a LUT on the 5LUT only if the two share at most five pins,
                 // else the bypass pin.
                 if let Some(l) = di_lut
@@ -393,7 +431,10 @@ pub fn pack_carries(p: &mut Packer, di: CarryDi) {
     );
     rules.insert(
         "XORCY".to_string(),
-        Rule::to("LUT2").port("CI", "I0").port("LI", "I1").param("INIT", prop32(0x6)),
+        Rule::to("LUT2")
+            .port("CI", "I0")
+            .port("LI", "I1")
+            .param("INIT", prop32(0x6)),
     );
     let blasted = p.generic_xform(&rules);
     // Bus brackets off the CARRY4 ports; CI on CIN.

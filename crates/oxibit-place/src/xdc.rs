@@ -8,17 +8,30 @@ use std::collections::BTreeMap;
 pub type PortProps = BTreeMap<String, BTreeMap<String, String>>;
 
 fn unbrace(s: &str) -> &str {
-    s.trim().trim_start_matches('{').trim_end_matches('}').trim()
+    s.trim()
+        .trim_start_matches('{')
+        .trim_end_matches('}')
+        .trim()
 }
 
 pub fn parse(text: &str) -> PortProps {
     let mut out = PortProps::new();
     for raw in text.lines() {
         let line = raw.split('#').next().unwrap_or("").trim();
-        let Some(rest) = line.strip_prefix("set_property") else { continue };
-        let Some(gp) = rest.find("[get_ports") else { continue };
-        let target = rest[gp + "[get_ports".len()..].trim().trim_end_matches(']').trim();
-        let ports: Vec<String> = unbrace(target).split_whitespace().map(|p| unbrace(p).to_string()).collect();
+        let Some(rest) = line.strip_prefix("set_property") else {
+            continue;
+        };
+        let Some(gp) = rest.find("[get_ports") else {
+            continue;
+        };
+        let target = rest[gp + "[get_ports".len()..]
+            .trim()
+            .trim_end_matches(']')
+            .trim();
+        let ports: Vec<String> = unbrace(target)
+            .split_whitespace()
+            .map(|p| unbrace(p).to_string())
+            .collect();
         let head = rest[..gp].trim();
         let mut props: Vec<(String, String)> = Vec::new();
         if let Some(d) = head.strip_prefix("-dict") {

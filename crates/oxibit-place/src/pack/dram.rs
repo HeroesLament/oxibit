@@ -23,8 +23,12 @@ struct Ctrl {
 }
 
 fn rule64() -> Rule {
-    let mut r = Rule::to("SLICE_LUTX").port("I", "DI1").port("O", "O6").attr("X_LUT_AS_DRAM", json!("1"));
-    r.param.insert("IS_CLK_INVERTED".into(), "IS_WCLK_INVERTED".into());
+    let mut r = Rule::to("SLICE_LUTX")
+        .port("I", "DI1")
+        .port("O", "O6")
+        .attr("X_LUT_AS_DRAM", json!("1"));
+    r.param
+        .insert("IS_CLK_INVERTED".into(), "IS_WCLK_INVERTED".into());
     for i in 0..6 {
         r = r.port(&format!("RADR{i}"), &format!("A{}", i + 1));
     }
@@ -41,7 +45,8 @@ fn rule32(o5: bool) -> Rule {
     } else {
         r.port("I", "DI2").port("O", "O6")
     };
-    r.param.insert("IS_CLK_INVERTED".into(), "IS_WCLK_INVERTED".into());
+    r.param
+        .insert("IS_CLK_INVERTED".into(), "IS_WCLK_INVERTED".into());
     for i in 0..5 {
         r = r
             .port(&format!("RADR{i}"), &format!("A{}", i + 1))
@@ -62,7 +67,8 @@ fn dram_lut(
     z: i32,
     d32: Option<bool>,
 ) -> CellId {
-    let c = p.nl.add_cell(name, if d32.is_some() { "RAMD32" } else { "RAMD64E" });
+    let c =
+        p.nl.add_cell(name, if d32.is_some() { "RAMD32" } else { "RAMD64E" });
     let (ra, wa) = if d32.is_some() { (5, 5) } else { (6, 8) };
     for i in 0..ra {
         p.nl.add_port(c, &format!("RADR{i}"), Dir::Input);
@@ -91,16 +97,34 @@ fn dram_lut(
     for (i, a) in cs.wa.iter().enumerate().take(wa) {
         conn(p, &format!("WADR{i}"), *a);
     }
-    p.nl.cell_mut(c).params.insert("IS_WCLK_INVERTED".into(), prop32(cs.wclk_inv as u64));
+    p.nl.cell_mut(c)
+        .params
+        .insert("IS_WCLK_INVERTED".into(), prop32(cs.wclk_inv as u64));
     let rule = match d32 {
         None => rule64(),
         Some(o5) => rule32(o5),
     };
     p.xform(c, &rule);
-    let z = slot::at(z, if d32 == Some(true) { slot::LUT5 } else { slot::LUT6 });
+    let z = slot::at(
+        z,
+        if d32 == Some(true) {
+            slot::LUT5
+        } else {
+            slot::LUT6
+        },
+    );
     match base {
         None => p.make_root(c, Some(z)),
-        Some(b) => p.add_member(b, c, Offset { dx: 0, dy: 0, z, abs: true }),
+        Some(b) => p.add_member(
+            b,
+            c,
+            Offset {
+                dx: 0,
+                dy: 0,
+                z,
+                abs: true,
+            },
+        ),
     }
     c
 }
@@ -114,13 +138,27 @@ fn extract(v: Option<&Value>, total: usize, lo: usize, n: usize) -> Value {
     Value::String(
         (lo..lo + n)
             .rev()
-            .map(|i| if bits.get(i).copied().unwrap_or(false) { '1' } else { '0' })
+            .map(|i| {
+                if bits.get(i).copied().unwrap_or(false) {
+                    '1'
+                } else {
+                    '0'
+                }
+            })
             .collect(),
     )
 }
 
 /// MUXF7 (and up) tree over `data`, selected by `select`, rooted on `out`.
-fn muxf_tree(p: &mut Packer, base: CellId, name_base: &str, data: Vec<Option<NetId>>, select: &[Option<NetId>], out: Option<NetId>, zoffset: i32) {
+fn muxf_tree(
+    p: &mut Packer,
+    base: CellId,
+    name_base: &str,
+    data: Vec<Option<NetId>>,
+    select: &[Option<NetId>],
+    out: Option<NetId>,
+    zoffset: i32,
+) {
     let levels = match data.len() {
         0..=2 => 1,
         3..=4 => 2,
@@ -139,8 +177,14 @@ fn muxf_tree(p: &mut Packer, base: CellId, name_base: &str, data: Vec<Option<Net
                 Some(p.nl.add_net_unique(&format!("{base_name}$intnet${name_base}_muxq_{i}_{j}")))
             };
             next.push(output);
-            let m = p.nl.add_cell(&format!("{base_name}$intcell${name_base}_muxf_{i}_{j}"), ty);
-            for (port, d) in [("I0", Dir::Input), ("I1", Dir::Input), ("S", Dir::Input), ("O", Dir::Output)] {
+            let m =
+                p.nl.add_cell(&format!("{base_name}$intcell${name_base}_muxf_{i}_{j}"), ty);
+            for (port, d) in [
+                ("I0", Dir::Input),
+                ("I1", Dir::Input),
+                ("S", Dir::Input),
+                ("O", Dir::Output),
+            ] {
                 p.nl.add_port(m, port, d);
             }
             for (port, n) in [
@@ -180,7 +224,11 @@ pub fn pack_dram(p: &mut Packer) {
         }
         let dual = ty == "RAM128X1D";
         for i in 0..6 {
-            let a = if ty == "RAM128X1S" { format!("A{i}") } else { format!("A[{i}]") };
+            let a = if ty == "RAM128X1S" {
+                format!("A{i}")
+            } else {
+                format!("A[{i}]")
+            };
             if get(p, c, &a) != Some(gnd) {
                 continue;
             }
@@ -200,9 +248,10 @@ pub fn pack_dram(p: &mut Packer) {
                         bits[j] = bits[j & !(1 << i)];
                     }
                 }
-                p.nl.cell_mut(c)
-                    .params
-                    .insert("INIT".into(), Value::String(bits.into_iter().rev().collect()));
+                p.nl.cell_mut(c).params.insert(
+                    "INIT".into(),
+                    Value::String(bits.into_iter().rev().collect()),
+                );
             }
         }
     }
@@ -217,7 +266,13 @@ pub fn pack_dram(p: &mut Packer) {
         match ty.as_str() {
             "RAM128X1D" | "RAM128X1S" => {
                 let dual = ty == "RAM128X1D";
-                let a = |i: usize| if dual { format!("A[{i}]") } else { format!("A{i}") };
+                let a = |i: usize| {
+                    if dual {
+                        format!("A[{i}]")
+                    } else {
+                        format!("A{i}")
+                    }
+                };
                 let cs = Ctrl {
                     wa: (0..7).map(|i| get(p, c, &a(i))).collect(),
                     wclk: get(p, c, "WCLK"),
@@ -235,23 +290,49 @@ pub fn pack_dram(p: &mut Packer) {
                 let mut base = None;
                 let mut spo_pre = Vec::new();
                 for i in 0..2 {
-                    let n = p.nl.add_net_unique(&format!("{name}$intnet${spo_name}_{i}"));
-                    let spr = dram_lut(p, &format!("{name}/ADDR{i}"), base, &cs, &cs.wa[..6], d, Some(n), z, None);
+                    let n =
+                        p.nl.add_net_unique(&format!("{name}$intnet${spo_name}_{i}"));
+                    let spr = dram_lut(
+                        p,
+                        &format!("{name}/ADDR{i}"),
+                        base,
+                        &cs,
+                        &cs.wa[..6],
+                        d,
+                        Some(n),
+                        z,
+                        None,
+                    );
                     base.get_or_insert(spr);
                     spo_pre.push(Some(n));
-                    p.nl.cell_mut(spr).params.insert("INIT".into(), extract(init.as_ref(), 128, i * 64, 64));
+                    p.nl.cell_mut(spr)
+                        .params
+                        .insert("INIT".into(), extract(init.as_ref(), 128, i * 64, 64));
                     z -= 1;
                 }
                 let base = base.expect("two cells");
                 muxf_tree(p, base, spo_name, spo_pre, &cs.wa[6..], spo, 2);
                 if dual {
-                    let ra: Vec<Option<NetId>> = (0..7).map(|i| get(p, c, &format!("DPRA[{i}]"))).collect();
+                    let ra: Vec<Option<NetId>> =
+                        (0..7).map(|i| get(p, c, &format!("DPRA[{i}]"))).collect();
                     let mut dpo_pre = Vec::new();
                     for i in 0..2 {
                         let n = p.nl.add_net_unique(&format!("{name}$intnet$DPO_{i}"));
-                        let dpr = dram_lut(p, &format!("{name}/DPR{i}"), Some(base), &cs, &ra[..6], d, Some(n), z, None);
+                        let dpr = dram_lut(
+                            p,
+                            &format!("{name}/DPR{i}"),
+                            Some(base),
+                            &cs,
+                            &ra[..6],
+                            d,
+                            Some(n),
+                            z,
+                            None,
+                        );
                         dpo_pre.push(Some(n));
-                        p.nl.cell_mut(dpr).params.insert("INIT".into(), extract(init.as_ref(), 128, i * 64, 64));
+                        p.nl.cell_mut(dpr)
+                            .params
+                            .insert("INIT".into(), extract(init.as_ref(), 128, i * 64, 64));
                         z -= 1;
                     }
                     muxf_tree(p, base, "DPO", dpo_pre, &ra[6..], dpo, 0);
@@ -262,7 +343,9 @@ pub fn pack_dram(p: &mut Packer) {
                 let is64 = ty == "RAM64M";
                 let abits = if is64 { 6 } else { 5 };
                 let cs = Ctrl {
-                    wa: (0..abits).map(|i| get(p, c, &format!("ADDRD[{i}]"))).collect(),
+                    wa: (0..abits)
+                        .map(|i| get(p, c, &format!("ADDRD[{i}]")))
+                        .collect(),
                     wclk: get(p, c, "WCLK"),
                     we: get(p, c, "WE"),
                     wclk_inv,
@@ -270,23 +353,49 @@ pub fn pack_dram(p: &mut Packer) {
                 let mut base = None;
                 for i in 0..4 {
                     let l = (b'A' + i as u8) as char;
-                    let address: Vec<Option<NetId>> = (0..abits).map(|j| get(p, c, &format!("ADDR{l}[{j}]"))).collect();
+                    let address: Vec<Option<NetId>> = (0..abits)
+                        .map(|j| get(p, c, &format!("ADDR{l}[{j}]")))
+                        .collect();
                     let init = p.nl.cell(c).params.get(&format!("INIT_{l}")).cloned();
                     if is64 {
-                        let (di, dout) = (get(p, c, &format!("DI{l}")), get(p, c, &format!("DO{l}")));
+                        let (di, dout) =
+                            (get(p, c, &format!("DI{l}")), get(p, c, &format!("DO{l}")));
                         p.nl.disconnect(c, &format!("DI{l}"));
                         p.nl.disconnect(c, &format!("DO{l}"));
-                        let d = dram_lut(p, &format!("{name}/DPR{i}"), base, &cs, &address, di, dout, i, None);
+                        let d = dram_lut(
+                            p,
+                            &format!("{name}/DPR{i}"),
+                            base,
+                            &cs,
+                            &address,
+                            di,
+                            dout,
+                            i,
+                            None,
+                        );
                         base.get_or_insert(d);
                         if let Some(v) = init {
                             p.nl.cell_mut(d).params.insert("INIT".into(), v);
                         }
                     } else {
                         for j in 0..2 {
-                            let (di, dout) = (get(p, c, &format!("DI{l}[{j}]")), get(p, c, &format!("DO{l}[{j}]")));
+                            let (di, dout) = (
+                                get(p, c, &format!("DI{l}[{j}]")),
+                                get(p, c, &format!("DO{l}[{j}]")),
+                            );
                             p.nl.disconnect(c, &format!("DI{l}[{j}]"));
                             p.nl.disconnect(c, &format!("DO{l}[{j}]"));
-                            let d = dram_lut(p, &format!("{name}/DPR{i}_{j}"), base, &cs, &address, di, dout, i, Some(j == 0));
+                            let d = dram_lut(
+                                p,
+                                &format!("{name}/DPR{i}_{j}"),
+                                base,
+                                &cs,
+                                &address,
+                                di,
+                                dout,
+                                i,
+                                Some(j == 0),
+                            );
                             base.get_or_insert(d);
                             if let Some(Value::String(s)) = &init {
                                 // INIT_x interleaves the port's two bits per
@@ -294,16 +403,29 @@ pub fn pack_dram(p: &mut Packer) {
                                 let bits: Vec<bool> = s.chars().rev().map(|ch| ch == '1').collect();
                                 let half: String = (0..32)
                                     .rev()
-                                    .map(|k| if bits.get(k * 2 + j).copied().unwrap_or(false) { '1' } else { '0' })
+                                    .map(|k| {
+                                        if bits.get(k * 2 + j).copied().unwrap_or(false) {
+                                            '1'
+                                        } else {
+                                            '0'
+                                        }
+                                    })
                                     .collect();
-                                p.nl.cell_mut(d).params.insert("INIT".into(), Value::String(half));
+                                p.nl.cell_mut(d)
+                                    .params
+                                    .insert("INIT".into(), Value::String(half));
                             }
                         }
                     }
                 }
                 packed.push(c);
             }
-            t if t.starts_with("RAM") && (t.contains("X1") || t.ends_with('M')) && !t.starts_with("RAMB") => unhandled += 1,
+            t if t.starts_with("RAM")
+                && (t.contains("X1") || t.ends_with('M'))
+                && !t.starts_with("RAMB") =>
+            {
+                unhandled += 1
+            }
             _ => {}
         }
     }

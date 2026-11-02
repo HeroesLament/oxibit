@@ -30,11 +30,20 @@ fn init_bits(v: Option<&Value>, k: usize) -> Option<Vec<bool>> {
         return None;
     }
     let lsb_first: Vec<bool> = s.chars().rev().map(|c| c == '1').collect();
-    Some((0..1usize << k).map(|i| lsb_first.get(i).copied().unwrap_or(false)).collect())
+    Some(
+        (0..1usize << k)
+            .map(|i| lsb_first.get(i).copied().unwrap_or(false))
+            .collect(),
+    )
 }
 
 fn bits_string(bits: &[bool]) -> Value {
-    Value::String(bits.iter().rev().map(|&b| if b { '1' } else { '0' }).collect())
+    Value::String(
+        bits.iter()
+            .rev()
+            .map(|&b| if b { '1' } else { '0' })
+            .collect(),
+    )
 }
 
 /// The truth table with inputs `consts` (index, value) fixed, over the
@@ -68,7 +77,13 @@ pub fn fold_luts(p: &mut Packer) {
     let (mut inputs, mut cells, mut emptied, mut dead) = (0usize, 0usize, 0usize, 0usize);
     for c in p.nl.cell_ids() {
         let ty = p.nl.cell(c).ty.clone();
-        let Some(k) = ty.strip_prefix("LUT").and_then(|k| k.parse::<usize>().ok()).filter(|k| (1..=6).contains(k)) else { continue };
+        let Some(k) = ty
+            .strip_prefix("LUT")
+            .and_then(|k| k.parse::<usize>().ok())
+            .filter(|k| (1..=6).contains(k))
+        else {
+            continue;
+        };
         let mut consts: Vec<(usize, bool)> = (0..k)
             .filter_map(|j| match p.nl.cell(c).net(&format!("I{j}")) {
                 Some(n) if n == gnd => Some((j, false)),
@@ -76,7 +91,9 @@ pub fn fold_luts(p: &mut Packer) {
                 _ => None,
             })
             .collect();
-        let Some(table) = init_bits(p.nl.cell(c).params.get("INIT"), k) else { continue };
+        let Some(table) = init_bits(p.nl.cell(c).params.get("INIT"), k) else {
+            continue;
+        };
         let n_const = consts.len();
         // An input the table never reads folds like a constant (either value).
         for j in 0..k {
@@ -91,7 +108,10 @@ pub fn fold_luts(p: &mut Packer) {
         consts.sort_unstable();
         let (mut bits, live) = cofactor(table, k, &consts);
         // Rewire: the live inputs move down to I0..; the rest come off.
-        let nets: Vec<_> = live.iter().map(|&j| p.nl.cell(c).net(&format!("I{j}"))).collect();
+        let nets: Vec<_> = live
+            .iter()
+            .map(|&j| p.nl.cell(c).net(&format!("I{j}")))
+            .collect();
         for j in 0..k {
             p.nl.disconnect(c, &format!("I{j}"));
         }
@@ -113,7 +133,9 @@ pub fn fold_luts(p: &mut Packer) {
         for j in k2.max(1)..k {
             p.nl.remove_port(c, &format!("I{j}"));
         }
-        p.nl.cell_mut(c).params.insert("INIT".into(), bits_string(&bits));
+        p.nl.cell_mut(c)
+            .params
+            .insert("INIT".into(), bits_string(&bits));
         inputs += n_const;
         cells += 1;
     }
@@ -134,20 +156,25 @@ pub fn dram_addr_high(p: &mut Packer) {
             "RAM64M" => 6,
             _ => continue,
         };
-        let uniform = ["INIT_A", "INIT_B", "INIT_C", "INIT_D"].iter().all(|k| match p.nl.cell(c).params.get(*k) {
-            None => true,
-            Some(Value::String(s)) => {
-                let t = s.trim();
-                t.chars().all(|ch| ch == '0') || t.chars().all(|ch| ch == '1')
+        let uniform = ["INIT_A", "INIT_B", "INIT_C", "INIT_D"].iter().all(|k| {
+            match p.nl.cell(c).params.get(*k) {
+                None => true,
+                Some(Value::String(s)) => {
+                    let t = s.trim();
+                    t.chars().all(|ch| ch == '0') || t.chars().all(|ch| ch == '1')
+                }
+                Some(Value::Number(n)) => n.as_u64() == Some(0),
+                _ => false,
             }
-            Some(Value::Number(n)) => n.as_u64() == Some(0),
-            _ => false,
         });
         if !uniform {
             continue;
         }
         for i in 0..width {
-            let ports: Vec<String> = ["ADDRA", "ADDRB", "ADDRC", "ADDRD"].iter().map(|a| format!("{a}[{i}]")).collect();
+            let ports: Vec<String> = ["ADDRA", "ADDRB", "ADDRC", "ADDRD"]
+                .iter()
+                .map(|a| format!("{a}[{i}]"))
+                .collect();
             if ports.iter().all(|q| p.nl.cell(c).net(q) == Some(gnd)) {
                 for q in &ports {
                     p.nl.connect(c, q, vcc);
@@ -194,7 +221,10 @@ mod tests {
                 if consts.iter().any(|&(j, v)| (full >> j & 1 == 1) != v) {
                     continue;
                 }
-                let m = live.iter().enumerate().fold(0, |m, (i, &j)| m | ((full >> j & 1) << i));
+                let m = live
+                    .iter()
+                    .enumerate()
+                    .fold(0, |m, (i, &j)| m | ((full >> j & 1) << i));
                 assert_eq!(folded[m], bits[full]);
             }
         }

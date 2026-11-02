@@ -67,8 +67,15 @@ pub fn constrain_muxf_tree(p: &mut Packer, curr: CellId, base: CellId, zoffset: 
 /// MUXF7/MUXF8 -> `SELMUX2_1`: inputs on `0` / `1`, select on `S0`, output
 /// on `OUT`.
 pub fn finalise_muxfs(p: &mut Packer) {
-    let r = Rule::to("SELMUX2_1").port("I0", "0").port("I1", "1").port("S", "S0").port("O", "OUT");
-    let rules: BTreeMap<String, Rule> = [("MUXF7".to_string(), r.clone()), ("MUXF8".to_string(), r)].into_iter().collect();
+    let r = Rule::to("SELMUX2_1")
+        .port("I0", "0")
+        .port("I1", "1")
+        .port("S", "S0")
+        .port("O", "OUT");
+    let rules: BTreeMap<String, Rule> =
+        [("MUXF7".to_string(), r.clone()), ("MUXF8".to_string(), r)]
+            .into_iter()
+            .collect();
     let n = p.generic_xform(&rules);
     p.count("muxf", n);
 }

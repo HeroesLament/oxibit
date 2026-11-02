@@ -43,7 +43,12 @@ fn yaml_child(text: &str, key: &str, child: &str) -> Option<String> {
             continue;
         }
         if !line.starts_with(' ') {
-            inside = line.trim_end().trim_end_matches(':').trim().trim_matches('"') == key;
+            inside = line
+                .trim_end()
+                .trim_end_matches(':')
+                .trim()
+                .trim_matches('"')
+                == key;
             continue;
         }
         if inside
@@ -59,11 +64,16 @@ fn yaml_child(text: &str, key: &str, child: &str) -> Option<String> {
 impl Device {
     /// From a prjxray-db family directory (`.../zynq7`) and part name.
     pub fn open(root: &Path, part: &str) -> R<Device> {
-        let device =
-            yaml_child(&read(&root.join("mapping/parts.yaml"))?, part, "device").ok_or_else(|| format!("{part} not in mapping/parts.yaml"))?;
-        let fabric = yaml_child(&read(&root.join("mapping/devices.yaml"))?, &device, "fabric")
-            .ok_or_else(|| format!("{device} not in mapping/devices.yaml"))?;
-        let grid: Value = serde_json::from_str(&read(&root.join(&fabric).join("tilegrid.json"))?).map_err(|e| format!("tilegrid: {e}"))?;
+        let device = yaml_child(&read(&root.join("mapping/parts.yaml"))?, part, "device")
+            .ok_or_else(|| format!("{part} not in mapping/parts.yaml"))?;
+        let fabric = yaml_child(
+            &read(&root.join("mapping/devices.yaml"))?,
+            &device,
+            "fabric",
+        )
+        .ok_or_else(|| format!("{device} not in mapping/devices.yaml"))?;
+        let grid: Value = serde_json::from_str(&read(&root.join(&fabric).join("tilegrid.json"))?)
+            .map_err(|e| format!("tilegrid: {e}"))?;
         let mut d = Device {
             part: part.to_string(),
             ..Device::default()
@@ -147,7 +157,12 @@ impl Device {
             .values()
             .filter(|h| h.ty.starts_with("HCLK_IOI") && h.clock_region == t.clock_region)
             .min_by_key(|h| (h.grid_x - t.grid_x).abs())
-            .and_then(|h| h.sites.iter().find(|(_, ty)| ty.as_str() == "IDELAYCTRL").map(|(s, _)| s.clone()))
+            .and_then(|h| {
+                h.sites
+                    .iter()
+                    .find(|(_, ty)| ty.as_str() == "IDELAYCTRL")
+                    .map(|(s, _)| s.clone())
+            })
     }
 }
 

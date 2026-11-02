@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 pub use oxibit_policy::{Caps, Level, Outcome, PassRecord, Status};
 use serde_json::{Value, json};
 
+use crate::floorplan::Floorplan;
 use crate::placer::{DensityCost, FillOptions, PinCost};
 
 /// A slice configuration packing can produce.
@@ -152,6 +153,9 @@ pub struct PackPolicy {
     pub bypass_ffs_per_slice: usize,
     /// What the annealer pays for besides wirelength.
     pub objective: PlaceObjective,
+    /// Boxes groups of cells are held to. A constraint on where cells go,
+    /// never on what a slice holds, so it needs no capability level.
+    pub floorplan: Floorplan,
 }
 
 /// Placement cost terms beside wirelength. They change where cells go,
@@ -186,6 +190,7 @@ impl PackPolicy {
             fold: true,
             bypass_ffs_per_slice: FillOptions::default().bypass_ffs_per_slice,
             objective: PlaceObjective::WIRELENGTH,
+            floorplan: Floorplan::default(),
         }
     }
 
@@ -214,27 +219,42 @@ impl PackPolicy {
             return Err(format!("carry chains: {why}"));
         }
         let mut records = Vec::new();
-        let mut gate = |name: &'static str, stage: &'static str, on: bool, emits: &[PackMode]| -> bool {
-            let evidence = emits.iter().map(|m| format!("{m:?}: {}", caps.status(*m).basis)).collect::<Vec<_>>().join("; ");
-            let outcome = if !on {
-                Outcome::Disabled
-            } else if let Some(why) = caps.below_floor(emits, self.floor) {
-                Outcome::Refused(why)
-            } else {
-                Outcome::Ran
+        let mut gate =
+            |name: &'static str, stage: &'static str, on: bool, emits: &[PackMode]| -> bool {
+                let evidence = emits
+                    .iter()
+                    .map(|m| format!("{m:?}: {}", caps.status(*m).basis))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                let outcome = if !on {
+                    Outcome::Disabled
+                } else if let Some(why) = caps.below_floor(emits, self.floor) {
+                    Outcome::Refused(why)
+                } else {
+                    Outcome::Ran
+                };
+                let ran = outcome == Outcome::Ran;
+                records.push(PassRecord {
+                    name,
+                    stage,
+                    evidence,
+                    outcome,
+                    stats: Value::Null,
+                });
+                ran
             };
-            let ran = outcome == Outcome::Ran;
-            records.push(PassRecord {
-                name,
-                stage,
-                evidence,
-                outcome,
-                stats: Value::Null,
-            });
-            ran
-        };
-        let bypass = gate("carry_di_bypass", "pack", self.carry_di == CarryDi::Bypass, CarryDi::Bypass.emits());
-        let carry_ff = gate("carry_ff_shared", "pack", self.carry_ff == CarryFf::Shared, CarryFf::Shared.emits());
+        let bypass = gate(
+            "carry_di_bypass",
+            "pack",
+            self.carry_di == CarryDi::Bypass,
+            CarryDi::Bypass.emits(),
+        );
+        let carry_ff = gate(
+            "carry_ff_shared",
+            "pack",
+            self.carry_ff == CarryFf::Shared,
+            CarryFf::Shared.emits(),
+        );
         let frac = [PackMode::FracturedLetter];
         let lut5 = Lut5Fill {
             chain: gate("lut5_chain", "fill", self.lut5.chain, &frac),
@@ -242,14 +262,23 @@ impl PackPolicy {
             pairs: gate("lut5_pairs", "fill", self.lut5.pairs, &frac),
         };
         Ok(PackPlan {
-            carry_di: if bypass { CarryDi::Bypass } else { CarryDi::Lut5 },
-            carry_ff: if carry_ff { CarryFf::Shared } else { CarryFf::SoleUser },
+            carry_di: if bypass {
+                CarryDi::Bypass
+            } else {
+                CarryDi::Lut5
+            },
+            carry_ff: if carry_ff {
+                CarryFf::Shared
+            } else {
+                CarryFf::SoleUser
+            },
             fold: self.fold,
             fill: FillOptions {
                 bypass_ffs_per_slice: self.bypass_ffs_per_slice,
                 lut5,
             },
             objective: self.objective,
+            floorplan: self.floorplan.clone(),
             records,
         })
     }
@@ -269,6 +298,7 @@ pub struct PackPlan {
     fold: bool,
     fill: FillOptions,
     objective: PlaceObjective,
+    floorplan: Floorplan,
     records: Vec<PassRecord>,
 }
 
@@ -288,13 +318,17 @@ impl PackPlan {
     pub fn objective(&self) -> PlaceObjective {
         self.objective
     }
+    pub fn floorplan(&self) -> &Floorplan {
+        &self.floorplan
+    }
     pub fn records(&self) -> &[PassRecord] {
         &self.records
     }
     pub fn json(&self) -> Value {
-        let by_name: BTreeMap<&str, Value> = self.records.iter().map(|r| (r.name, r.json())).collect();
+        let by_name: BTreeMap<&str, Value> =
+            self.records.iter().map(|r| (r.name, r.json())).collect();
         json!({"carry_di": format!("{:?}", self.carry_di), "carry_ff": format!("{:?}", self.carry_ff), "fold": self.fold,
-               "bypass_ffs_per_slice": self.fill.bypass_ffs_per_slice, "strategies": by_name,
+               "bypass_ffs_per_slice": self.fill.bypass_ffs_per_slice, "strategies": by_name, "floorplan": self.floorplan.json(),
                "objective": {"pins": [self.objective.pins.cap, self.objective.pins.weight],
                              "bypass": [self.objective.bypass.cap, self.objective.bypass.weight],
                              "density": [self.objective.density.bin as f64, self.objective.density.target, self.objective.density.weight]}})
@@ -314,8 +348,14 @@ mod tests {
         };
         let plan = pol.plan(&caps).expect("core is above pnr");
         assert_eq!(plan.carry_di(), CarryDi::Lut5);
-        let r = plan.records().iter().find(|r| r.name == "carry_di_bypass").expect("recorded");
-        assert!(matches!(&r.outcome, Outcome::Refused(w) if w.contains("CarryDiBypass is Modeled")));
+        let r = plan
+            .records()
+            .iter()
+            .find(|r| r.name == "carry_di_bypass")
+            .expect("recorded");
+        assert!(
+            matches!(&r.outcome, Outcome::Refused(w) if w.contains("CarryDiBypass is Modeled"))
+        );
         pol.floor = Level::Modeled;
         assert_eq!(pol.plan(&caps).expect("plan").carry_di(), CarryDi::Bypass);
     }
@@ -323,10 +363,20 @@ mod tests {
     #[test]
     fn carry_ff_shared_by_default_not_for_nextpnr() {
         let caps = xc7z020();
-        assert_eq!(PackPolicy::exploration().plan(&caps).expect("plan").carry_ff(), CarryFf::Shared);
+        assert_eq!(
+            PackPolicy::exploration()
+                .plan(&caps)
+                .expect("plan")
+                .carry_ff(),
+            CarryFf::Shared
+        );
         let plan = PackPolicy::nextpnr_reference().plan(&caps).expect("plan");
         assert_eq!(plan.carry_ff(), CarryFf::SoleUser);
-        let r = plan.records().iter().find(|r| r.name == "carry_ff_shared").expect("recorded");
+        let r = plan
+            .records()
+            .iter()
+            .find(|r| r.name == "carry_ff_shared")
+            .expect("recorded");
         assert_eq!(r.outcome, Outcome::Disabled);
     }
 
@@ -346,17 +396,29 @@ mod tests {
         };
         let plan = pol.plan(&caps).expect("core is fasm-matched");
         assert_eq!(plan.fill().lut5, Lut5Fill::NONE);
-        assert!(plan.records().iter().filter(|r| r.stage == "fill").all(|r| matches!(r.outcome, Outcome::Refused(_))));
+        assert!(
+            plan.records()
+                .iter()
+                .filter(|r| r.stage == "fill")
+                .all(|r| matches!(r.outcome, Outcome::Refused(_)))
+        );
     }
 
     #[test]
     fn disabled_is_not_refused() {
         let pol = PackPolicy {
-            lut5: Lut5Fill { pairs: false, ..Lut5Fill::ALL },
+            lut5: Lut5Fill {
+                pairs: false,
+                ..Lut5Fill::ALL
+            },
             ..PackPolicy::exploration()
         };
         let plan = pol.plan(&xc7z020()).expect("plan");
-        let r = plan.records().iter().find(|r| r.name == "lut5_pairs").expect("recorded");
+        let r = plan
+            .records()
+            .iter()
+            .find(|r| r.name == "lut5_pairs")
+            .expect("recorded");
         assert_eq!(r.outcome, Outcome::Disabled);
         assert!(!plan.fill().lut5.pairs && plan.fill().lut5.chain);
     }

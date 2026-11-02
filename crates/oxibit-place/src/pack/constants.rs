@@ -16,7 +16,12 @@ use crate::netlist::{CellId, Dir};
 /// A parameter value as nextpnr writes an integer `Property`: a binary
 /// string, `width` bits.
 pub fn prop(v: u64, width: usize) -> Value {
-    Value::String((0..width).rev().map(|i| if i < 64 && v >> i & 1 == 1 { '1' } else { '0' }).collect())
+    Value::String(
+        (0..width)
+            .rev()
+            .map(|i| if i < 64 && v >> i & 1 == 1 { '1' } else { '0' })
+            .collect(),
+    )
 }
 
 /// `prop(v, 32)`, nextpnr's default width.
@@ -35,7 +40,8 @@ pub fn invertible(ty: &str, pin: &str) -> bool {
         "BUFHCE" => &["CE"],
         "FDRE" | "FDSE" | "FDCE" | "FDPE" => &["C"],
         "SRL16E" | "SRLC32E" => &["CLK"],
-        "RAM128X1D" | "RAM128X1S" | "RAM256X1S" | "RAM32M" | "RAM32X1D" | "RAM32X1S" | "RAM32X2S" | "RAM64M" | "RAM64X1D" | "RAM64X1S" => &["WCLK"],
+        "RAM128X1D" | "RAM128X1S" | "RAM256X1S" | "RAM32M" | "RAM32X1D" | "RAM32X1S"
+        | "RAM32X2S" | "RAM64M" | "RAM64X1D" | "RAM64X1S" => &["WCLK"],
         "RAMB18E1" | "RAMB36E1" => &[
             "CLKARDCLK",
             "CLKBWRCLK",
@@ -62,12 +68,14 @@ pub fn invertible(ty: &str, pin: &str) -> bool {
         "BUFMRCE" => &["CE"],
         "DSP48E1" => {
             return pin == "CARRYIN"
-                || [("ALUMODE[", 4), ("INMODE[", 5), ("OPMODE[", 7)].iter().any(|(b, n)| {
-                    pin.strip_prefix(b)
-                        .and_then(|r| r.strip_suffix(']'))
-                        .and_then(|i| i.parse::<usize>().ok())
-                        .is_some_and(|i| i < *n)
-                });
+                || [("ALUMODE[", 4), ("INMODE[", 5), ("OPMODE[", 7)]
+                    .iter()
+                    .any(|(b, n)| {
+                        pin.strip_prefix(b)
+                            .and_then(|r| r.strip_suffix(']'))
+                            .and_then(|i| i.parse::<usize>().ok())
+                            .is_some_and(|i| i < *n)
+                    });
         }
         _ => &[],
     };
@@ -126,7 +134,9 @@ pub fn tied(ty: &str) -> Vec<(String, bool)> {
             }
         }
         "PLLE2_ADV" => {
-            for p in ["CLKFBIN", "CLKIN1", "CLKIN2", "DCLK", "DEN", "DWE", "PWRDWN", "RST"] {
+            for p in [
+                "CLKFBIN", "CLKIN1", "CLKIN2", "DCLK", "DEN", "DWE", "PWRDWN", "RST",
+            ] {
                 add(p, false);
             }
             add("CLKINSEL", true);
@@ -220,7 +230,9 @@ pub fn pack_constants_with(p: &mut Packer, first: bool) {
         p.nl.add_port(c, &port, Dir::Input);
         let ty = p.nl.cell(c).ty.clone();
         if !val && invertible(&ty, &port) {
-            p.nl.cell_mut(c).params.insert(format!("IS_{port}_INVERTED"), prop32(1));
+            p.nl.cell_mut(c)
+                .params
+                .insert(format!("IS_{port}_INVERTED"), prop32(1));
             val = true;
             inverted += 1;
         }

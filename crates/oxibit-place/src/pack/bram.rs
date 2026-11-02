@@ -28,11 +28,22 @@ fn ul_pins() -> Vec<(String, Vec<String>)> {
         "RSTREGARSTREG",
         "RSTREGB",
     ] {
-        v.push((base.to_string(), vec![format!("{base}L"), format!("{base}U")]));
+        v.push((
+            base.to_string(),
+            vec![format!("{base}L"), format!("{base}U")],
+        ));
     }
-    for (base, n) in [("ADDRARDADDR", 15), ("ADDRBWRADDR", 15), ("WEA", 4), ("WEBWE", 8)] {
+    for (base, n) in [
+        ("ADDRARDADDR", 15),
+        ("ADDRBWRADDR", 15),
+        ("WEA", 4),
+        ("WEBWE", 8),
+    ] {
         for i in 0..n {
-            v.push((format!("{base}[{i}]"), vec![format!("{base}L{i}"), format!("{base}U{i}")]));
+            v.push((
+                format!("{base}[{i}]"),
+                vec![format!("{base}L{i}"), format!("{base}U{i}")],
+            ));
         }
     }
     v
@@ -40,22 +51,33 @@ fn ul_pins() -> Vec<(String, Vec<String>)> {
 
 fn rules(sdp: bool) -> BTreeMap<String, Rule> {
     let mut r18 = Rule::to("RAMB18E1_RAMB18E1");
-    r18.multi.insert("WEA[0]".into(), vec!["WEA0".into(), "WEA1".into()]);
-    r18.multi.insert("WEA[1]".into(), vec!["WEA2".into(), "WEA3".into()]);
+    r18.multi
+        .insert("WEA[0]".into(), vec!["WEA0".into(), "WEA1".into()]);
+    r18.multi
+        .insert("WEA[1]".into(), vec!["WEA2".into(), "WEA3".into()]);
     let mut r36 = Rule::to("RAMB36E1_RAMB36E1");
     for (l, b) in ul_pins() {
         r36.multi.insert(l, b);
     }
-    r36.multi.entry("ADDRARDADDR[15]".into()).or_insert_with(|| vec!["ADDRARDADDRL15".into()]);
-    r36.multi.entry("ADDRBWRADDR[15]".into()).or_insert_with(|| vec!["ADDRBWRADDRL15".into()]);
+    r36.multi
+        .entry("ADDRARDADDR[15]".into())
+        .or_insert_with(|| vec!["ADDRARDADDRL15".into()]);
+    r36.multi
+        .entry("ADDRBWRADDR[15]".into())
+        .or_insert_with(|| vec!["ADDRBWRADDRL15".into()]);
     if sdp {
         for i in 0..4 {
-            r18.multi
-                .insert(format!("WEBWE[{i}]"), vec![format!("WEBWE{}", i * 2), format!("WEBWE{}", i * 2 + 1)]);
+            r18.multi.insert(
+                format!("WEBWE[{i}]"),
+                vec![format!("WEBWE{}", i * 2), format!("WEBWE{}", i * 2 + 1)],
+            );
             r18.multi.insert(format!("WEA[{i}]"), vec![]);
         }
         for i in 0..8 {
-            r36.multi.insert(format!("WEBWE[{i}]"), vec![format!("WEBWEL{i}"), format!("WEBWEU{i}")]);
+            r36.multi.insert(
+                format!("WEBWE[{i}]"),
+                vec![format!("WEBWEL{i}"), format!("WEBWEU{i}")],
+            );
             r36.multi.insert(format!("WEA[{i}]"), vec![]);
         }
     } else {
@@ -63,7 +85,9 @@ fn rules(sdp: bool) -> BTreeMap<String, Rule> {
             r36.multi.insert(format!("WEBWE[{i}]"), vec![]);
         }
     }
-    [("RAMB18E1".to_string(), r18), ("RAMB36E1".to_string(), r36)].into_iter().collect()
+    [("RAMB18E1".to_string(), r18), ("RAMB36E1".to_string(), r36)]
+        .into_iter()
+        .collect()
 }
 
 fn ensure_tie(p: &mut Packer, c: CellId, port: &str, n: NetId, replace: bool) {
@@ -88,9 +112,9 @@ pub fn pack_bram(p: &mut Packer) {
                 continue;
             }
             if let Some(n) = p.nl.cell(c).net(pin)
-                && p.nl
-                    .driver(n)
-                    .is_none_or(|(d, _)| matches!(p.nl.cell(d).ty.as_str(), "PSEUDO_VCC" | "PSEUDO_GND"))
+                && p.nl.driver(n).is_none_or(|(d, _)| {
+                    matches!(p.nl.cell(d).ty.as_str(), "PSEUDO_VCC" | "PSEUDO_GND")
+                })
             {
                 p.nl.disconnect(c, pin);
             }
@@ -115,8 +139,15 @@ pub fn pack_bram(p: &mut Packer) {
             continue;
         }
         for port in ['A', 'B'] {
-            let ww = p.nl.cell(c).int_param(&format!("WRITE_WIDTH_{port}")).unwrap_or(18);
-            let we_width = if ty == "RAMB36E1" || port == 'B' { 4 } else { 2 };
+            let ww =
+                p.nl.cell(c)
+                    .int_param(&format!("WRITE_WIDTH_{port}"))
+                    .unwrap_or(18);
+            let we_width = if ty == "RAMB36E1" || port == 'B' {
+                4
+            } else {
+                2
+            };
             if ww >= 9 * we_width {
                 continue;
             }
@@ -150,7 +181,12 @@ pub fn pack_bram(p: &mut Packer) {
                     ensure_tie(p, c, &format!("WEBWE{i}"), gnd, false);
                 }
             }
-            for t in ["ADDRATIEHIGH0", "ADDRATIEHIGH1", "ADDRBTIEHIGH0", "ADDRBTIEHIGH1"] {
+            for t in [
+                "ADDRATIEHIGH0",
+                "ADDRATIEHIGH1",
+                "ADDRBTIEHIGH0",
+                "ADDRBTIEHIGH1",
+            ] {
                 ensure_tie(p, c, t, vcc, true);
             }
         } else if ty == "RAMB36E1_RAMB36E1" {
@@ -169,7 +205,9 @@ pub fn pack_bram(p: &mut Packer) {
                         p.nl.add_port(c, &format!("{di}1"), Dir::Input);
                         p.nl.connect(c, &format!("{di}1"), n);
                     }
-                    p.nl.cell_mut(c).attrs.insert(format!("X_ORIG_PORT_{di}1"), json!(logical));
+                    p.nl.cell_mut(c)
+                        .attrs
+                        .insert(format!("X_ORIG_PORT_{di}1"), json!(logical));
                     p.nl.disconnect(c, &format!("{dip}0"));
                     p.nl.disconnect(c, &format!("{dip}1"));
                 }
@@ -178,7 +216,9 @@ pub fn pack_bram(p: &mut Packer) {
                 {
                     p.nl.add_port(c, &format!("{dip}1"), Dir::Input);
                     p.nl.connect(c, &format!("{dip}1"), n);
-                    p.nl.cell_mut(c).attrs.insert(format!("X_ORIG_PORT_{dip}1"), json!(format!("{dip}[0]")));
+                    p.nl.cell_mut(c)
+                        .attrs
+                        .insert(format!("X_ORIG_PORT_{dip}1"), json!(format!("{dip}[0]")));
                 }
             }
             if p.nl.cell(c).int_param("WRITE_WIDTH_B").unwrap_or(0) != 72 {

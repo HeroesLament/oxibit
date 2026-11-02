@@ -55,7 +55,11 @@ impl BypassPins {
         let wanted = XClaim { by, net };
         let slot = &mut self.0[usize::from(letter & 3)];
         match *slot {
-            Some(held) if held.net != net => Err(Clash { letter, held, wanted }),
+            Some(held) if held.net != net => Err(Clash {
+                letter,
+                held,
+                wanted,
+            }),
             Some(_) => Ok(()),
             None => {
                 *slot = Some(wanted);
@@ -87,7 +91,9 @@ impl BypassPins {
 pub fn bypass_claims(p: &Packer, cells: &[(CellId, String)]) -> (BypassPins, Vec<Clash>) {
     let members: HashMap<CellId, u8> = cells.iter().map(|(c, b)| (*c, b.as_bytes()[0])).collect();
     let inside = |n: NetId, l: u8| match p.nl.driver(n) {
-        Some((d, _)) => members.get(&d).is_some_and(|&dl| p.nl.cell(d).ty != "SLICE_LUTX" || dl == l),
+        Some((d, _)) => members
+            .get(&d)
+            .is_some_and(|&dl| p.nl.cell(d).ty != "SLICE_LUTX" || dl == l),
         None => false,
     };
     let live = |c: CellId, port: &str| p.nl.cell(c).net(port).filter(|&n| !p.nl.is_const(n));
@@ -107,7 +113,11 @@ pub fn bypass_claims(p: &Packer, cells: &[(CellId, String)]) -> (BypassPins, Vec
             }
             "SLICE_FFX" => {
                 if let Some(n) = live(*c, "D").filter(|&n| !inside(n, l)) {
-                    let by = if b.ends_with("5FF") { XUse::Ff5D } else { XUse::FfD };
+                    let by = if b.ends_with("5FF") {
+                        XUse::Ff5D
+                    } else {
+                        XUse::FfD
+                    };
                     wants.push((1, l.wrapping_sub(b'A'), by, n));
                 }
             }
@@ -138,14 +148,20 @@ pub fn check(p: &Packer) -> Vec<(String, Clash)> {
         if let Some(Loc::Grid { x, y, site, bel }) = &p.nl.cell(c).bel
             && site.starts_with("SLICE")
         {
-            by_site.entry((*x, *y, site.clone())).or_default().push((c, bel.clone()));
+            by_site
+                .entry((*x, *y, site.clone()))
+                .or_default()
+                .push((c, bel.clone()));
         }
     }
     by_site
         .into_iter()
         .flat_map(|((x, y, site), cells)| {
             let at = format!("X{x}Y{y}/{site}");
-            bypass_claims(p, &cells).1.into_iter().map(move |cl| (at.clone(), cl))
+            bypass_claims(p, &cells)
+                .1
+                .into_iter()
+                .map(move |cl| (at.clone(), cl))
         })
         .collect()
 }

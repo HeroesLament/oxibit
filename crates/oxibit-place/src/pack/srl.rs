@@ -51,7 +51,11 @@ pub fn pack_srls(p: &mut Packer) {
             p.nl.add_port(c, t, crate::netlist::Dir::Input);
             p.nl.connect(c, t, vcc);
         }
-        if p.nl.cell(c).net("MC31").is_some_and(|n| !p.nl.net(n).users.is_empty()) {
+        if p.nl
+            .cell(c)
+            .net("MC31")
+            .is_some_and(|n| !p.nl.net(n).users.is_empty())
+        {
             cascades += 1;
         }
     }

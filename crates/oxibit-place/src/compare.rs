@@ -94,8 +94,15 @@ impl<'a> Side<'a> {
                 match c.ty.as_str() {
                     "PSEUDO_GND" => "GND".into(),
                     "PSEUDO_VCC" => "VCC".into(),
-                    _ if self.shared.contains(*cell) || depth > 6 => format!("{cell}.{}", port.replace(['[', ']'], "")),
-                    _ => format!("{}<{}>.{}", c.ty, self.inputs(c, depth + 1).join(","), port.replace(['[', ']'], "")),
+                    _ if self.shared.contains(*cell) || depth > 6 => {
+                        format!("{cell}.{}", port.replace(['[', ']'], ""))
+                    }
+                    _ => format!(
+                        "{}<{}>.{}",
+                        c.ty,
+                        self.inputs(c, depth + 1).join(","),
+                        port.replace(['[', ']'], "")
+                    ),
                 }
             }
         };
@@ -105,7 +112,9 @@ impl<'a> Side<'a> {
 
     /// A cell's inputs as `pin=net`, LUT inputs by logical port.
     fn inputs(&self, c: &Cell, depth: usize) -> Vec<String> {
-        let lut = c.ty == "SLICE_LUTX" && !c.attrs.contains_key("X_LUT_AS_SRL") && !c.attrs.contains_key("X_LUT_AS_DRAM");
+        let lut = c.ty == "SLICE_LUTX"
+            && !c.attrs.contains_key("X_LUT_AS_SRL")
+            && !c.attrs.contains_key("X_LUT_AS_DRAM");
         let mut v: Vec<String> = Vec::new();
         for (p, port) in &c.ports {
             if port.dir == Some(oxibit_pnr::packed::Dir::Output) {
@@ -142,12 +151,20 @@ fn norm_param(v: &Value) -> String {
         if !t.is_empty() && t.chars().all(|c| c == '0' || c == '1') {
             // Binary: compare by value (widths differ between writers).
             let t = t.trim_start_matches('0');
-            return if t.is_empty() { "0".into() } else { format!("b{t}") };
+            return if t.is_empty() {
+                "0".into()
+            } else {
+                format!("b{t}")
+            };
         }
         return t.to_string();
     }
     if let Some(n) = v.as_i64() {
-        return if n == 0 { "0".into() } else { format!("b{n:b}") };
+        return if n == 0 {
+            "0".into()
+        } else {
+            format!("b{n:b}")
+        };
     }
     v.to_string()
 }
@@ -164,7 +181,15 @@ fn counter_named(name: &str) -> bool {
     tail("$LUT") || tail("$MUX$")
 }
 
-const IGNORED_ATTRS: &[&str] = &["NEXTPNR_BEL", "X_IO_BEL", "BEL_STRENGTH", "src", "hdlname", "module_not_derived", "keep"];
+const IGNORED_ATTRS: &[&str] = &[
+    "NEXTPNR_BEL",
+    "X_IO_BEL",
+    "BEL_STRENGTH",
+    "src",
+    "hdlname",
+    "module_not_derived",
+    "keep",
+];
 
 /// Compare `ours` against `theirs`.
 pub fn compare(ours: &Design, theirs: &Design) -> Diff {
@@ -179,21 +204,39 @@ pub fn compare(ours: &Design, theirs: &Design) -> Diff {
     let b = Side::new(theirs, &shared);
 
     for (name, ca) in &ours.cells {
-        let Some(cb) = theirs.cells.get(name) else { continue };
+        let Some(cb) = theirs.cells.get(name) else {
+            continue;
+        };
         let ty = format!("{}:{}", ca.ty, ca.orig_type().unwrap_or("-"));
         if ca.ty != cb.ty {
             diff.add("type", format!("{name}: {} vs {}", ca.ty, cb.ty));
             continue;
         }
         let mut bad = false;
-        for k in ca.params.keys().chain(cb.params.keys()).collect::<std::collections::BTreeSet<_>>() {
-            let (x, y) = (ca.params.get(k).map(norm_param), cb.params.get(k).map(norm_param));
+        for k in ca
+            .params
+            .keys()
+            .chain(cb.params.keys())
+            .collect::<std::collections::BTreeSet<_>>()
+        {
+            let (x, y) = (
+                ca.params.get(k).map(norm_param),
+                cb.params.get(k).map(norm_param),
+            );
             if x != y {
-                diff.add(&format!("param.{ty}.{k}"), format!("{name}: {x:?} vs {y:?}"));
+                diff.add(
+                    &format!("param.{ty}.{k}"),
+                    format!("{name}: {x:?} vs {y:?}"),
+                );
                 bad = true;
             }
         }
-        for k in ca.attrs.keys().chain(cb.attrs.keys()).collect::<std::collections::BTreeSet<_>>() {
+        for k in ca
+            .attrs
+            .keys()
+            .chain(cb.attrs.keys())
+            .collect::<std::collections::BTreeSet<_>>()
+        {
             if IGNORED_ATTRS.contains(&k.as_str()) || k.starts_with("X_ORIG_PORT_") {
                 continue;
             }
@@ -224,9 +267,15 @@ pub fn compare(ours: &Design, theirs: &Design) -> Diff {
             // Constant ties nextpnr adds after placement (`fixup_placement`:
             // A6 high beside a used 5LUT, unused PS7 inputs low) are the
             // placer's to add, not the packer's.
-            let fixup = only_a.is_empty() && only_b.iter().all(|e| e.ends_with("=VCC") || e.ends_with("=GND"));
+            let fixup = only_a.is_empty()
+                && only_b
+                    .iter()
+                    .all(|e| e.ends_with("=VCC") || e.ends_with("=GND"));
             let cat = if fixup { "after_place_ties" } else { "inputs" };
-            diff.add(&format!("{cat}.{ty}"), format!("{name}: ours {only_a:?} theirs {only_b:?}"));
+            diff.add(
+                &format!("{cat}.{ty}"),
+                format!("{name}: ours {only_a:?} theirs {only_b:?}"),
+            );
             bad = true;
         }
         if !bad {
@@ -240,7 +289,12 @@ pub fn compare(ours: &Design, theirs: &Design) -> Diff {
             if shared.contains(name) {
                 continue;
             }
-            let key = format!("{}:{} <{}>", c.ty, c.orig_type().unwrap_or("-"), s.inputs(c, 0).join(","));
+            let key = format!(
+                "{}:{} <{}>",
+                c.ty,
+                c.orig_type().unwrap_or("-"),
+                s.inputs(c, 0).join(",")
+            );
             let e = m.entry(key).or_insert((0, name.clone()));
             e.0 += 1;
         }

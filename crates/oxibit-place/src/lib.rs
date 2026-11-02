@@ -4,6 +4,7 @@
 
 pub mod compare;
 pub mod device;
+pub mod floorplan;
 pub mod netlist;
 pub mod pack;
 pub mod place;

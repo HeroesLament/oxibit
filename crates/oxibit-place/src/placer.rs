@@ -29,9 +29,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use oxibit_pnr::packed::Loc;
 
 use crate::device::Device;
+use crate::floorplan::{Floorplan, FloorplanStats};
 use crate::netlist::{CellId, NetId};
-use crate::policy::Lut5Fill;
 use crate::pack::{Packer, slot};
+use crate::policy::Lut5Fill;
 
 // ---------------------------------------------------------------- sites ---
 
@@ -85,12 +86,22 @@ impl Sites {
                     if ty == "SLICEL" || ty == "SLICEM" {
                         let r = rel(site);
                         by_pos.insert((t.grid_x, t.grid_y, r.clone()), s.slices.len());
-                        s.slices.push(SliceSite { x: t.grid_x, y: t.grid_y, rel: r, m: ty == "SLICEM" });
+                        s.slices.push(SliceSite {
+                            x: t.grid_x,
+                            y: t.grid_y,
+                            rel: r,
+                            m: ty == "SLICEM",
+                        });
                     }
                 }
             } else if t.ty.starts_with("BRAM_") && !t.ty.contains("INT") {
                 for (site, ty) in &t.sites {
-                    let h = HardSite { x: t.grid_x, y: t.grid_y, rel: rel(site), tile: bram_tile };
+                    let h = HardSite {
+                        x: t.grid_x,
+                        y: t.grid_y,
+                        rel: rel(site),
+                        tile: bram_tile,
+                    };
                     match ty.as_str() {
                         "RAMBFIFO36E1" => s.ramb36.push(h),
                         "RAMB18E1" | "FIFO18E1" => s.ramb18.push(h),
@@ -101,36 +112,62 @@ impl Sites {
             } else if t.ty.starts_with("DSP_") {
                 for (site, ty) in &t.sites {
                     if ty == "DSP48E1" {
-                        s.dsp.push(HardSite { x: t.grid_x, y: t.grid_y, rel: rel(site), tile: 0 });
+                        s.dsp.push(HardSite {
+                            x: t.grid_x,
+                            y: t.grid_y,
+                            rel: rel(site),
+                            tile: 0,
+                        });
                     }
                 }
             } else if t.ty.starts_with("CLK_BUFG_") && !t.ty.contains("REBUF") {
                 for (site, ty) in &t.sites {
                     if ty == "BUFGCTRL" {
-                        s.bufg.push(HardSite { x: t.grid_x, y: t.grid_y, rel: rel(site), tile: 0 });
+                        s.bufg.push(HardSite {
+                            x: t.grid_x,
+                            y: t.grid_y,
+                            rel: rel(site),
+                            tile: 0,
+                        });
                     }
                 }
             } else if t.sites.values().any(|ty| ty == "MMCME2_ADV") {
                 for (site, ty) in &t.sites {
                     if ty == "MMCME2_ADV" {
-                        s.mmcm.push(HardSite { x: t.grid_x, y: t.grid_y, rel: rel(site), tile: 0 });
+                        s.mmcm.push(HardSite {
+                            x: t.grid_x,
+                            y: t.grid_y,
+                            rel: rel(site),
+                            tile: 0,
+                        });
                     }
                 }
             } else if t.sites.values().any(|ty| ty == "PS7") {
                 for (site, ty) in &t.sites {
                     if ty == "PS7" {
-                        s.ps7.push(HardSite { x: t.grid_x, y: t.grid_y, rel: rel(site), tile: 0 });
+                        s.ps7.push(HardSite {
+                            x: t.grid_x,
+                            y: t.grid_y,
+                            rel: rel(site),
+                            tile: 0,
+                        });
                     }
                 }
             }
         }
         // Carry continuation: the same slice position one CLB row up
         // (grid y - 1), or two when the row between is an HCLK / break row.
-        let row_ty: HashMap<(i32, i32), &str> = dev.tiles.values().map(|t| ((t.grid_x, t.grid_y), t.ty.as_str())).collect();
+        let row_ty: HashMap<(i32, i32), &str> = dev
+            .tiles
+            .values()
+            .map(|t| ((t.grid_x, t.grid_y), t.ty.as_str()))
+            .collect();
         for (i, sl) in s.slices.iter().enumerate() {
             if let Some(&j) = by_pos.get(&(sl.x, sl.y - 1, sl.rel.clone())) {
                 s.up.insert(i, j);
-            } else if row_ty.get(&(sl.x, sl.y - 1)).is_some_and(|t| t.starts_with("HCLK") || t.starts_with("BRKH"))
+            } else if row_ty
+                .get(&(sl.x, sl.y - 1))
+                .is_some_and(|t| t.starts_with("HCLK") || t.starts_with("BRKH"))
                 && let Some(&j) = by_pos.get(&(sl.x, sl.y - 2, sl.rel.clone()))
             {
                 s.up.insert(i, j);
@@ -177,7 +214,10 @@ fn ctrl_of(p: &Packer, ff: CellId) -> Ctrl {
         ce: c.net("CE"),
         sr: c.net("SR"),
         clk_inv: inv("IS_C_INVERTED"),
-        sr_inv: inv("IS_R_INVERTED") || inv("IS_S_INVERTED") || inv("IS_CLR_INVERTED") || inv("IS_PRE_INVERTED"),
+        sr_inv: inv("IS_R_INVERTED")
+            || inv("IS_S_INVERTED")
+            || inv("IS_CLR_INVERTED")
+            || inv("IS_PRE_INVERTED"),
         sync: c.attrs.contains_key("X_FFSYNC"),
     }
 }
@@ -194,7 +234,13 @@ fn bel_name(z: i32) -> Option<String> {
         slot::FF => format!("{l}FF"),
         slot::FF2 => format!("{l}5FF"),
         slot::CARRY4 => "CARRY4".into(),
-        slot::F7MUX => if z >> 4 < 2 { "F7AMUX".into() } else { "F7BMUX".into() },
+        slot::F7MUX => {
+            if z >> 4 < 2 {
+                "F7AMUX".into()
+            } else {
+                "F7BMUX".into()
+            }
+        }
         slot::F8MUX => "F8MUX".into(),
         _ => return None,
     })
@@ -287,8 +333,14 @@ pub fn fill(p: &Packer, opts: &FillOptions) -> (Vec<Macro>, FillStats) {
             st.chains += 1;
             st.chain_slices += slices.len();
             macros.push(Macro { slices });
-        } else if rty == "SLICE_LUTX" && is_memory(p, root) && p.nl.cell(root).attrs.contains_key("X_LUT_AS_DRAM") {
-            let mut f = Fill { need_m: true, ..Fill::default() };
+        } else if rty == "SLICE_LUTX"
+            && is_memory(p, root)
+            && p.nl.cell(root).attrs.contains_key("X_LUT_AS_DRAM")
+        {
+            let mut f = Fill {
+                need_m: true,
+                ..Fill::default()
+            };
             f.cells.push((root, bel_name(rz).expect("lut slot")));
             done.insert(root);
             for (m, o) in &cl.members {
@@ -321,9 +373,18 @@ pub fn fill(p: &Packer, opts: &FillOptions) -> (Vec<Macro>, FillStats) {
         let ff = p
             .clusters
             .get(&c)
-            .and_then(|cl| cl.members.iter().find(|(m, _)| p.nl.cell(*m).ty == "SLICE_FFX" && !done.contains(m)).map(|(m, _)| *m))
+            .and_then(|cl| {
+                cl.members
+                    .iter()
+                    .find(|(m, _)| p.nl.cell(*m).ty == "SLICE_FFX" && !done.contains(m))
+                    .map(|(m, _)| *m)
+            })
             .filter(|&f| !is_memory(p, c) || p.nl.cell(f).net("CK") == p.nl.cell(c).net("CLK"));
-        let u = Unit { lut: Some(c), lut5: None, ff };
+        let u = Unit {
+            lut: Some(c),
+            lut5: None,
+            ff,
+        };
         done.insert(c);
         if let Some(f) = ff {
             done.insert(f);
@@ -336,7 +397,11 @@ pub fn fill(p: &Packer, opts: &FillOptions) -> (Vec<Macro>, FillStats) {
     }
     for c in p.nl.cell_ids() {
         if !done.contains(&c) && p.nl.cell(c).ty == "SLICE_FFX" {
-            units.push(Unit { lut: None, lut5: None, ff: Some(c) });
+            units.push(Unit {
+                lut: None,
+                lut5: None,
+                ff: Some(c),
+            });
             done.insert(c);
         }
     }
@@ -349,15 +414,23 @@ pub fn fill(p: &Packer, opts: &FillOptions) -> (Vec<Macro>, FillStats) {
 
     // SRLs: SLICEM, one write clock and write enable per slice, flops on the
     // same clock.
-    let mut srl_groups: BTreeMap<(Option<NetId>, Option<NetId>, Option<Ctrl>), Vec<Unit>> = BTreeMap::new();
+    let mut srl_groups: BTreeMap<(Option<NetId>, Option<NetId>, Option<Ctrl>), Vec<Unit>> =
+        BTreeMap::new();
     for u in srl_units {
         let l = u.lut.expect("srl");
-        let key = (p.nl.cell(l).net("CLK"), p.nl.cell(l).net("WE"), u.ff.map(|f| ctrl_of(p, f)));
+        let key = (
+            p.nl.cell(l).net("CLK"),
+            p.nl.cell(l).net("WE"),
+            u.ff.map(|f| ctrl_of(p, f)),
+        );
         srl_groups.entry(key).or_default().push(u);
     }
     for (_, us) in srl_groups {
         for chunk in us.chunks(4) {
-            let mut f = Fill { need_m: true, ..Fill::default() };
+            let mut f = Fill {
+                need_m: true,
+                ..Fill::default()
+            };
             for (i, u) in chunk.iter().enumerate() {
                 let l = letter(i as i32);
                 f.cells.push((u.lut.expect("srl"), format!("{l}6LUT")));
@@ -434,22 +507,37 @@ pub fn fill(p: &Packer, opts: &FillOptions) -> (Vec<Macro>, FillStats) {
             let mut slice = vec![seed];
             used.insert(seed);
             let mut gain: HashMap<usize, usize> = HashMap::new();
-            let grow = |members: &Vec<usize>, gain: &mut HashMap<usize, usize>, used: &HashSet<usize>| {
-                for j in neighbours(*members.last().expect("non-empty")) {
-                    if in_set.contains(&j) && !used.contains(&j) {
-                        *gain.entry(j).or_default() += 1;
+            let grow =
+                |members: &Vec<usize>, gain: &mut HashMap<usize, usize>, used: &HashSet<usize>| {
+                    for j in neighbours(*members.last().expect("non-empty")) {
+                        if in_set.contains(&j) && !used.contains(&j) {
+                            *gain.entry(j).or_default() += 1;
+                        }
                     }
-                }
-            };
+                };
             grow(&slice, &mut gain, &used);
             while slice.len() < 8 {
                 let luts = slice.iter().filter(|&&i| units[i].lut.is_some()).count();
                 let lones = slice.len() - luts;
-                let fits = |j: usize| if units[j].lut.is_some() { luts < 4 } else { lones < max_lone };
-                let best = gain.iter().filter(|(j, _)| !used.contains(*j) && fits(**j)).max_by_key(|(j, g)| (**g, std::cmp::Reverse(**j))).map(|(j, _)| *j);
+                let fits = |j: usize| {
+                    if units[j].lut.is_some() {
+                        luts < 4
+                    } else {
+                        lones < max_lone
+                    }
+                };
+                let best = gain
+                    .iter()
+                    .filter(|(j, _)| !used.contains(*j) && fits(**j))
+                    .max_by_key(|(j, g)| (**g, std::cmp::Reverse(**j)))
+                    .map(|(j, _)| *j);
                 let next = match best {
                     Some(j) => j,
-                    None => match list.iter().copied().find(|&j| !used.contains(&j) && fits(j)) {
+                    None => match list
+                        .iter()
+                        .copied()
+                        .find(|&j| !used.contains(&j) && fits(j))
+                    {
                         Some(j) => j,
                         None => break,
                     },
@@ -485,7 +573,10 @@ pub fn fill(p: &Packer, opts: &FillOptions) -> (Vec<Macro>, FillStats) {
                 *score.entry(si).or_default() += 1;
             }
         }
-        match score.into_iter().max_by_key(|&(si, sc)| (sc, std::cmp::Reverse(si))) {
+        match score
+            .into_iter()
+            .max_by_key(|&(si, sc)| (sc, std::cmp::Reverse(si)))
+        {
             Some((si, _)) => {
                 free[si] -= 1;
                 extra[si].push(i);
@@ -531,9 +622,12 @@ pub fn fill(p: &Packer, opts: &FillOptions) -> (Vec<Macro>, FillStats) {
         let mut ranked: Vec<(usize, usize)> = score.into_iter().collect();
         ranked.sort_by_key(|&(si, sc)| (std::cmp::Reverse(sc), si));
         let fits = |h: usize, ff5: &HashMap<usize, CellId>| {
-            !ff5.contains_key(&h) && lut_nets(p, units[h].lut.expect("lut")).union(&mine).count() <= 5
+            !ff5.contains_key(&h)
+                && lut_nets(p, units[h].lut.expect("lut")).union(&mine).count() <= 5
         };
-        let mut pick = ranked.iter().find_map(|&(si, _)| hosts_of[si].iter().copied().find(|&h| fits(h, &ff5)));
+        let mut pick = ranked
+            .iter()
+            .find_map(|&(si, _)| hosts_of[si].iter().copied().find(|&h| fits(h, &ff5)));
         // no neighbour slice has room: scan on from where the last scan stopped
         if pick.is_none() {
             for k in 0..logic.len() {
@@ -570,7 +664,11 @@ pub fn fill(p: &Packer, opts: &FillOptions) -> (Vec<Macro>, FillStats) {
                     *gain.entry(j).or_default() += 1;
                 }
             }
-            let best = gain.iter().filter(|(j, _)| !taken.contains(*j)).max_by_key(|(j, g)| (**g, std::cmp::Reverse(**j))).map(|(j, _)| *j);
+            let best = gain
+                .iter()
+                .filter(|(j, _)| !taken.contains(*j))
+                .max_by_key(|(j, g)| (**g, std::cmp::Reverse(**j)))
+                .map(|(j, _)| *j);
             let next = match best {
                 Some(j) => j,
                 None => match unplaced_lone.iter().copied().find(|j| !taken.contains(j)) {
@@ -586,13 +684,25 @@ pub fn fill(p: &Packer, opts: &FillOptions) -> (Vec<Macro>, FillStats) {
 
     let mut fills: Vec<Fill> = Vec::new();
     for (si, slice) in logic.iter().enumerate() {
-        let mut f = Fill { logic: true, ..Fill::default() };
-        let lut_units: Vec<usize> = slice.iter().copied().filter(|&i| units[i].lut.is_some()).collect();
-        let lone_ffs: Vec<usize> = slice.iter().copied().filter(|&i| units[i].lut.is_none()).collect();
+        let mut f = Fill {
+            logic: true,
+            ..Fill::default()
+        };
+        let lut_units: Vec<usize> = slice
+            .iter()
+            .copied()
+            .filter(|&i| units[i].lut.is_some())
+            .collect();
+        let lone_ffs: Vec<usize> = slice
+            .iter()
+            .copied()
+            .filter(|&i| units[i].lut.is_none())
+            .collect();
         let mut letter_i = 0;
         for &i in &lut_units {
             let l = letter(letter_i);
-            f.cells.push((units[i].lut.expect("lut"), format!("{l}6LUT")));
+            f.cells
+                .push((units[i].lut.expect("lut"), format!("{l}6LUT")));
             if let Some(l5) = units[i].lut5.or(ff5.get(&i).copied()) {
                 f.cells.push((l5, format!("{l}5LUT")));
             }
@@ -618,7 +728,8 @@ pub fn fill(p: &Packer, opts: &FillOptions) -> (Vec<Macro>, FillStats) {
         let mut lone = extra[si].iter();
         for li in letter_i..4 {
             if let Some(&i) = lone.next() {
-                f.cells.push((units[i].lut.expect("lut"), format!("{}6LUT", letter(li))));
+                f.cells
+                    .push((units[i].lut.expect("lut"), format!("{}6LUT", letter(li))));
                 if let Some(l5) = units[i].lut5 {
                     f.cells.push((l5, format!("{}5LUT", letter(li))));
                 }
@@ -628,9 +739,15 @@ pub fn fill(p: &Packer, opts: &FillOptions) -> (Vec<Macro>, FillStats) {
         fills.push(f);
     }
     for g in &lone_groups {
-        let mut f = Fill { logic: true, ..Fill::default() };
+        let mut f = Fill {
+            logic: true,
+            ..Fill::default()
+        };
         for (k, &i) in g.iter().enumerate() {
-            f.cells.push((units[i].lut.expect("lut"), format!("{}6LUT", letter(k as i32))));
+            f.cells.push((
+                units[i].lut.expect("lut"),
+                format!("{}6LUT", letter(k as i32)),
+            ));
             if let Some(l5) = units[i].lut5 {
                 f.cells.push((l5, format!("{}5LUT", letter(k as i32))));
             }
@@ -656,16 +773,29 @@ fn mux_busy(p: &Packer, f: &Fill, k: usize, l: char) -> bool {
         .filter(|(_, b)| *b == format!("{l}FF") || *b == format!("{l}5FF"))
         .map(|(c, _)| *c)
         .collect();
-    let names = [format!("O{k}"), format!("O[{k}]"), format!("CO{k}"), format!("CO[{k}]")];
+    let names = [
+        format!("O{k}"),
+        format!("O[{k}]"),
+        format!("CO{k}"),
+        format!("CO[{k}]"),
+    ];
     names.iter().any(|port| {
-        let Some(n) = p.nl.cell(carry).net(port) else { return false };
-        p.nl.net(n).users.iter().any(|(u, _)| !own.contains(u) && p.nl.cell(*u).ty != "CARRY4")
+        let Some(n) = p.nl.cell(carry).net(port) else {
+            return false;
+        };
+        p.nl.net(n)
+            .users
+            .iter()
+            .any(|(u, _)| !own.contains(u) && p.nl.cell(*u).ty != "CARRY4")
     })
 }
 
 /// Distinct nets on a LUT's inputs (as `legalise` counts them).
 fn lut_nets(p: &Packer, c: CellId) -> BTreeSet<NetId> {
-    crate::place::lut_inputs(p, c).into_iter().map(|(_, n)| n).collect()
+    crate::place::lut_inputs(p, c)
+        .into_iter()
+        .map(|(_, n)| n)
+        .collect()
 }
 
 /// Nets on any port of `c`, skipping constants and very wide nets.
@@ -681,7 +811,13 @@ fn local_nets(p: &Packer, c: CellId) -> Vec<NetId> {
 /// Lone LUTs into 5LUT positions: beside carry-chain 6LUTs, then beside
 /// each other. Returns the units left (a LUT placed in a chain slice
 /// leaves; a paired LUT rides on its partner's unit).
-fn fracture(p: &Packer, macros: &mut [Macro], units: Vec<Unit>, lut5: Lut5Fill, st: &mut FillStats) -> Vec<Unit> {
+fn fracture(
+    p: &Packer,
+    macros: &mut [Macro],
+    units: Vec<Unit>,
+    lut5: Lut5Fill,
+    st: &mut FillStats,
+) -> Vec<Unit> {
     let lone = |u: &Unit| -> Option<CellId> {
         match (u.lut, u.lut5, u.ff) {
             (Some(c), None, None) if !is_memory(p, c) => Some(c),
@@ -709,7 +845,10 @@ fn fracture(p: &Packer, macros: &mut [Macro], units: Vec<Unit>, lut5: Lut5Fill, 
     let mut hosts: Vec<Host> = Vec::new();
     let mut slice_of: HashMap<CellId, (usize, usize)> = HashMap::new();
     for (mi, m) in macros.iter().enumerate() {
-        let chain = m.slices.iter().any(|f| f.cells.iter().any(|(_, b)| b == "CARRY4"));
+        let chain = m
+            .slices
+            .iter()
+            .any(|f| f.cells.iter().any(|(_, b)| b == "CARRY4"));
         if !chain {
             continue;
         }
@@ -718,7 +857,11 @@ fn fracture(p: &Packer, macros: &mut [Macro], units: Vec<Unit>, lut5: Lut5Fill, 
                 slice_of.insert(*c, (mi, si));
             }
             for (k, l) in ['A', 'B', 'C', 'D'].into_iter().enumerate() {
-                let six = f.cells.iter().find(|(_, b)| *b == format!("{l}6LUT")).map(|(c, _)| *c);
+                let six = f
+                    .cells
+                    .iter()
+                    .find(|(_, b)| *b == format!("{l}6LUT"))
+                    .map(|(c, _)| *c);
                 let five = f.cells.iter().any(|(_, b)| *b == format!("{l}5LUT"));
                 let Some(six) = six else { continue };
                 // The 5LUT's output leaves on the letter's MUX pin, which a
@@ -728,7 +871,13 @@ fn fracture(p: &Packer, macros: &mut [Macro], units: Vec<Unit>, lut5: Lut5Fill, 
                 }
                 let n = lut_nets(p, six);
                 if n.len() <= 5 {
-                    hosts.push(Host { mi, si, letter: l, nets: n, free: true });
+                    hosts.push(Host {
+                        mi,
+                        si,
+                        letter: l,
+                        nets: n,
+                        free: true,
+                    });
                 }
             }
         }
@@ -737,12 +886,20 @@ fn fracture(p: &Packer, macros: &mut [Macro], units: Vec<Unit>, lut5: Lut5Fill, 
         // why chain letters are not hosts: (no 6LUT, 5LUT used, memory, mux busy, > 5 inputs)
         let mut why = [0usize; 5];
         for m in macros.iter() {
-            if !m.slices.iter().any(|f| f.cells.iter().any(|(_, b)| b == "CARRY4")) {
+            if !m
+                .slices
+                .iter()
+                .any(|f| f.cells.iter().any(|(_, b)| b == "CARRY4"))
+            {
                 continue;
             }
             for f in &m.slices {
                 for (k, l) in ['A', 'B', 'C', 'D'].into_iter().enumerate() {
-                    let six = f.cells.iter().find(|(_, b)| *b == format!("{l}6LUT")).map(|(c, _)| *c);
+                    let six = f
+                        .cells
+                        .iter()
+                        .find(|(_, b)| *b == format!("{l}6LUT"))
+                        .map(|(c, _)| *c);
                     let five = f.cells.iter().any(|(_, b)| *b == format!("{l}5LUT"));
                     match six {
                         None => why[0] += 1,
@@ -755,7 +912,12 @@ fn fracture(p: &Packer, macros: &mut [Macro], units: Vec<Unit>, lut5: Lut5Fill, 
                 }
             }
         }
-        eprintln!("fill debug: chain hosts {} lone candidates {} not-host {:?}", hosts.len(), nets.len(), why);
+        eprintln!(
+            "fill debug: chain hosts {} lone candidates {} not-host {:?}",
+            hosts.len(),
+            nets.len(),
+            why
+        );
     }
     let mut hosts_in: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
     for (h, host) in hosts.iter().enumerate() {
@@ -778,12 +940,18 @@ fn fracture(p: &Packer, macros: &mut [Macro], units: Vec<Unit>, lut5: Lut5Fill, 
         let mut ranked: Vec<((usize, usize), usize)> = score.into_iter().collect();
         ranked.sort_by_key(|&(s, sc)| (std::cmp::Reverse(sc), s));
         let pick = ranked.iter().find_map(|(s, _)| {
-            hosts_in.get(s)?.iter().copied().find(|&h| hosts[h].free && hosts[h].nets.union(mine).count() <= 5)
+            hosts_in
+                .get(s)?
+                .iter()
+                .copied()
+                .find(|&h| hosts[h].free && hosts[h].nets.union(mine).count() <= 5)
         });
         if let Some(h) = pick {
             let host = &mut hosts[h];
             host.free = false;
-            macros[host.mi].slices[host.si].cells.push((c, format!("{}5LUT", host.letter)));
+            macros[host.mi].slices[host.si]
+                .cells
+                .push((c, format!("{}5LUT", host.letter)));
             st.chain_5luts += 1;
             gone.insert(i);
         }
@@ -808,7 +976,11 @@ fn fracture(p: &Packer, macros: &mut [Macro], units: Vec<Unit>, lut5: Lut5Fill, 
     let mut partner: HashMap<usize, usize> = HashMap::new(); // 6LUT unit -> 5LUT unit
     let mut taken: HashSet<usize> = HashSet::new();
     let mut order: Vec<usize> = (0..units.len())
-        .filter(|i| lut5.pairs && !gone.contains(i) && lone(&units[*i]).is_some_and(|c| nets.contains_key(&c)))
+        .filter(|i| {
+            lut5.pairs
+                && !gone.contains(i)
+                && lone(&units[*i]).is_some_and(|c| nets.contains_key(&c))
+        })
         .collect();
     order.sort_by_key(|&i| std::cmp::Reverse(nets[&units[i].lut.expect("lut")].len()));
     for &i in &order {
@@ -835,12 +1007,19 @@ fn fracture(p: &Packer, macros: &mut [Macro], units: Vec<Unit>, lut5: Lut5Fill, 
         }
     }
     // Unshared leftovers: smallest with largest, while the sum fits.
-    let mut rest: Vec<usize> = order.iter().copied().filter(|i| !taken.contains(i)).collect();
+    let mut rest: Vec<usize> = order
+        .iter()
+        .copied()
+        .filter(|i| !taken.contains(i))
+        .collect();
     rest.sort_by_key(|&i| nets[&units[i].lut.expect("lut")].len());
     let (mut lo, mut hi) = (0usize, rest.len());
     while lo + 1 < hi {
         let (a, b) = (rest[lo], rest[hi - 1]);
-        let fit = nets[&units[a].lut.expect("lut")].union(&nets[&units[b].lut.expect("lut")]).count() <= 5;
+        let fit = nets[&units[a].lut.expect("lut")]
+            .union(&nets[&units[b].lut.expect("lut")])
+            .count()
+            <= 5;
         if fit {
             partner.insert(b, a);
             lo += 1;
@@ -888,6 +1067,8 @@ struct Obj {
 #[derive(Debug, Default)]
 pub struct PlaceStats {
     pub objects: usize,
+    /// Labels, held objects and box capacity, when there is a floorplan.
+    pub floorplan: Option<FloorplanStats>,
     pub chains_placed: usize,
     pub chain_failures: usize,
     pub hpwl_start: f64,
@@ -963,6 +1144,8 @@ pub struct Options {
     pub bypass: PinCost,
     /// Used slices per region over a target share of its slice sites.
     pub density: DensityCost,
+    /// Region constraints: objects held to boxes of the die.
+    pub floorplan: Floorplan,
 }
 
 /// Slice density per region: the die cut into `bin` x `bin` tile bins,
@@ -977,7 +1160,11 @@ pub struct DensityCost {
 }
 
 impl DensityCost {
-    pub const OFF: DensityCost = DensityCost { bin: 8, target: 1.0, weight: 0.0 };
+    pub const OFF: DensityCost = DensityCost {
+        bin: 8,
+        target: 1.0,
+        weight: 0.0,
+    };
 
     pub fn on(&self) -> bool {
         self.weight != 0.0
@@ -993,8 +1180,14 @@ pub struct PinCost {
 }
 
 impl PinCost {
-    pub const OFF_PINS: PinCost = PinCost { cap: 48, weight: 0.0 };
-    pub const OFF_BYPASS: PinCost = PinCost { cap: 8, weight: 0.0 };
+    pub const OFF_PINS: PinCost = PinCost {
+        cap: 48,
+        weight: 0.0,
+    };
+    pub const OFF_BYPASS: PinCost = PinCost {
+        cap: 8,
+        weight: 0.0,
+    };
 
     pub fn excess(&self, load: u32) -> u32 {
         load.saturating_sub(self.cap)
@@ -1021,40 +1214,74 @@ struct Delta {
 impl std::ops::Add for Load {
     type Output = Load;
     fn add(self, o: Load) -> Load {
-        Load { all: self.all + o.all, x: self.x + o.x }
+        Load {
+            all: self.all + o.all,
+            x: self.x + o.x,
+        }
     }
 }
 
 impl Load {
     fn delta(new: Load, old: Load) -> Delta {
-        Delta { all: i64::from(new.all) - i64::from(old.all), x: i64::from(new.x) - i64::from(old.x) }
+        Delta {
+            all: i64::from(new.all) - i64::from(old.all),
+            x: i64::from(new.x) - i64::from(old.x),
+        }
     }
 
     fn apply(self, d: Delta) -> Load {
-        Load { all: (i64::from(self.all) + d.all).max(0) as u32, x: (i64::from(self.x) + d.x).max(0) as u32 }
+        Load {
+            all: (i64::from(self.all) + d.all).max(0) as u32,
+            x: (i64::from(self.x) + d.x).max(0) as u32,
+        }
     }
 }
 
 impl From<Load> for Delta {
     fn from(l: Load) -> Delta {
-        Delta { all: l.all.into(), x: l.x.into() }
+        Delta {
+            all: l.all.into(),
+            x: l.x.into(),
+        }
     }
 }
 
 impl std::ops::Neg for Delta {
     type Output = Delta;
     fn neg(self) -> Delta {
-        Delta { all: -self.all, x: -self.x }
+        Delta {
+            all: -self.all,
+            x: -self.x,
+        }
     }
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { seed: 1, inner: 20, max_fanout: 200, max_moves_per_obj: 3000, t0_scale: 24.0, unit_frac: 0.5, unit_window: 4.0, polish: 0, pins: PinCost::OFF_PINS, bypass: PinCost::OFF_BYPASS, density: DensityCost::OFF }
+        Options {
+            seed: 1,
+            inner: 20,
+            max_fanout: 200,
+            max_moves_per_obj: 3000,
+            t0_scale: 24.0,
+            unit_frac: 0.5,
+            unit_window: 4.0,
+            polish: 0,
+            pins: PinCost::OFF_PINS,
+            bypass: PinCost::OFF_BYPASS,
+            density: DensityCost::OFF,
+            floorplan: Floorplan::default(),
+        }
     }
 }
 
-pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, opts: &Options) -> Result<PlaceStats, String> {
+pub fn place(
+    p: &mut Packer,
+    dev: &Device,
+    sites: &Sites,
+    macros: Vec<Macro>,
+    opts: &Options,
+) -> Result<PlaceStats, String> {
     let t0 = std::time::Instant::now();
     let mut st = PlaceStats::default();
     let mut rng = Rng(opts.seed.max(1) ^ 0x9E37_79B9_7F4A_7C15);
@@ -1066,8 +1293,17 @@ pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, op
     let mut fills: Vec<Vec<Fill>> = Vec::new();
     for m in macros {
         let need_m = m.slices.iter().any(|f| f.need_m);
-        let cells = m.slices.iter().flat_map(|f| f.cells.iter().map(|(c, _)| *c)).collect();
-        objs.push(Obj { kind: Kind::Slice, need_m, cells, sites: Vec::new() });
+        let cells = m
+            .slices
+            .iter()
+            .flat_map(|f| f.cells.iter().map(|(c, _)| *c))
+            .collect();
+        objs.push(Obj {
+            kind: Kind::Slice,
+            need_m,
+            cells,
+            sites: Vec::new(),
+        });
         fills.push(m.slices);
     }
     for c in p.nl.cell_ids() {
@@ -1080,11 +1316,76 @@ pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, op
             "RAMB18E1_RAMB18E1" => Kind::Ramb18,
             _ => continue,
         };
-        objs.push(Obj { kind: k, need_m: false, cells: vec![c], sites: Vec::new() });
+        objs.push(Obj {
+            kind: k,
+            need_m: false,
+            cells: vec![c],
+            sites: Vec::new(),
+        });
         fills.push(Vec::new());
     }
     st.objects = objs.len();
     let n = objs.len().max(1);
+
+    // Region constraints: an object is held to a rule's box when at least
+    // three quarters of its labelled cells carry that rule's label; any
+    // other object is free.
+    let fp = &opts.floorplan;
+    let mut oreg: Vec<Option<u8>> = vec![None; n];
+    if !fp.is_empty() {
+        let (labels, mut fs) = crate::floorplan::label_cells(p, fp, 8, 8);
+        let k = fp.rules.len();
+        for (o, ob) in objs.iter().enumerate() {
+            let mut cnt = vec![0usize; k];
+            for c in &ob.cells {
+                if let Some(&r) = labels.get(c) {
+                    cnt[r as usize] += 1;
+                }
+            }
+            let all: usize = cnt.iter().sum();
+            if all == 0 {
+                fs.objects_free += 1;
+                continue;
+            }
+            let (r, top) = cnt
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, v)| **v)
+                .map(|(r, v)| (r, *v))
+                .unwrap_or((0, 0));
+            if top * 4 < all * 3 {
+                fs.objects_mixed += 1;
+                continue;
+            }
+            oreg[o] = Some(r as u8);
+            let rs = &mut fs.rules[r];
+            rs.objects += 1;
+            if ob.kind == Kind::Slice {
+                rs.slices += fills[o].len();
+                rs.slices_m += fills[o].iter().filter(|f| f.need_m).count();
+            }
+        }
+        for (r, rule) in fp.rules.iter().enumerate() {
+            let rs = &mut fs.rules[r];
+            rs.sites = sites
+                .slices
+                .iter()
+                .filter(|s| rule.region.contains(s.x, s.y))
+                .count();
+            rs.sites_m = sites
+                .slices
+                .iter()
+                .filter(|s| s.m && rule.region.contains(s.x, s.y))
+                .count();
+            if rs.slices > rs.sites || rs.slices_m > rs.sites_m {
+                return Err(format!(
+                    "floorplan {}: {} slices ({} SLICEM) held to a box of {} sites ({} SLICEM)",
+                    rule.prefix, rs.slices, rs.slices_m, rs.sites, rs.sites_m
+                ));
+            }
+        }
+        st.floorplan = Some(fs);
+    }
 
     let pool_len = |k: Kind| match k {
         Kind::Slice => sites.slices.len(),
@@ -1114,9 +1415,24 @@ pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, op
             at.entry((kidx(k), x, y)).or_default().push(s);
         }
     }
-    let mut owner: Vec<Vec<Option<usize>>> = kinds.iter().map(|&k| vec![None; pool_len(k)]).collect();
+    let mut owner: Vec<Vec<Option<usize>>> =
+        kinds.iter().map(|&k| vec![None; pool_len(k)]).collect();
     let mut b36: HashMap<usize, bool> = HashMap::new();
     let mut b18: HashMap<usize, usize> = HashMap::new();
+
+    // Whether `run` (sites of kind `k`) lies in object `o`'s box.
+    let in_reg = |o: usize, k: Kind, run: &[usize]| -> bool {
+        match oreg[o] {
+            None => true,
+            Some(r) => {
+                let b = fp.rules[r as usize].region;
+                run.iter().all(|&s| {
+                    let (x, y) = site_xy(k, s);
+                    b.contains(x, y)
+                })
+            }
+        }
+    };
 
     // The run of slice sites a chain of `len` would occupy from `base`.
     let run_from = |base: usize, len: usize| -> Option<Vec<usize>> {
@@ -1128,14 +1444,27 @@ pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, op
         }
         Some(v)
     };
-    let fits = |o: &Obj, f: &Vec<Fill>, run: &[usize], owner: &Vec<Vec<Option<usize>>>, me: usize| -> bool {
-        run.iter().zip(f).all(|(&s, fl)| owner[0][s].is_none_or(|w| w == me) && (!fl.need_m || sites.slices[s].m)) && o.kind == Kind::Slice
+    let fits = |o: &Obj,
+                f: &Vec<Fill>,
+                run: &[usize],
+                owner: &Vec<Vec<Option<usize>>>,
+                me: usize|
+     -> bool {
+        run.iter().zip(f).all(|(&s, fl)| {
+            owner[0][s].is_none_or(|w| w == me) && (!fl.need_m || sites.slices[s].m)
+        }) && o.kind == Kind::Slice
     };
 
     // Initial placement: chains longest first, then the rest, each on the
     // first free legal spot in a shuffled scan.
     let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by_key(|&o| (objs[o].kind != Kind::Slice, std::cmp::Reverse(fills[o].len())));
+    order.sort_by_key(|&o| {
+        (
+            objs[o].kind != Kind::Slice,
+            std::cmp::Reverse(fills[o].len()),
+            oreg[o].is_none(),
+        )
+    });
     let mut scans: Vec<Vec<usize>> = kinds
         .iter()
         .map(|&k| {
@@ -1156,11 +1485,17 @@ pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, op
         for step in 0..list.len() {
             let s = list[(cursor[ki] + step) % list.len()];
             let cand = match k {
-                Kind::Slice => run_from(s, fills[o].len()).filter(|r| fits(&objs[o], &fills[o], r, &owner, usize::MAX)),
+                Kind::Slice => run_from(s, fills[o].len())
+                    .filter(|r| fits(&objs[o], &fills[o], r, &owner, usize::MAX)),
                 Kind::Dsp => owner[ki][s].is_none().then(|| vec![s]),
-                Kind::Ramb36 => (owner[ki][s].is_none() && b18.get(&sites.ramb36[s].tile).copied().unwrap_or(0) == 0).then(|| vec![s]),
-                Kind::Ramb18 => (owner[ki][s].is_none() && !b36.get(&sites.ramb18[s].tile).copied().unwrap_or(false)).then(|| vec![s]),
+                Kind::Ramb36 => (owner[ki][s].is_none()
+                    && b18.get(&sites.ramb36[s].tile).copied().unwrap_or(0) == 0)
+                    .then(|| vec![s]),
+                Kind::Ramb18 => (owner[ki][s].is_none()
+                    && !b36.get(&sites.ramb18[s].tile).copied().unwrap_or(false))
+                .then(|| vec![s]),
             };
+            let cand = cand.filter(|r| in_reg(o, k, r));
             if let Some(r) = cand {
                 cursor[ki] = (cursor[ki] + step + 1) % list.len();
                 placed = Some(r);
@@ -1169,7 +1504,10 @@ pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, op
         }
         scans[ki] = list;
         let Some(run) = placed else {
-            return Err(format!("no free site for a {k:?} object of {} slice(s)", fills[o].len().max(1)));
+            return Err(format!(
+                "no free site for a {k:?} object of {} slice(s)",
+                fills[o].len().max(1)
+            ));
         };
         for &s in &run {
             owner[ki][s] = Some(o);
@@ -1196,7 +1534,10 @@ pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, op
         let list: Vec<(usize, CellId)> = if f.is_empty() {
             vec![(0, objs[o].cells[0])]
         } else {
-            f.iter().enumerate().flat_map(|(k, fl)| fl.cells.iter().map(move |(c, _)| (k, *c))).collect()
+            f.iter()
+                .enumerate()
+                .flat_map(|(k, fl)| fl.cells.iter().map(move |(c, _)| (k, *c)))
+                .collect()
         };
         for (k, c) in list {
             let ci = cells.len() as u32;
@@ -1273,7 +1614,13 @@ pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, op
     let live = |c: CellId, port: &str| p.nl.cell(c).net(port).is_some_and(|n| !p.nl.is_const(n));
     let lut_pins: Vec<u32> = cells
         .iter()
-        .map(|&c| if p.nl.cell(c).ty == "SLICE_LUTX" { (1..=6).filter(|i| live(c, &format!("A{i}"))).count() as u32 } else { 0 })
+        .map(|&c| {
+            if p.nl.cell(c).ty == "SLICE_LUTX" {
+                (1..=6).filter(|i| live(c, &format!("A{i}"))).count() as u32
+            } else {
+                0
+            }
+        })
         .collect();
     let logic_pins = |lt: &[[u32; 4]; 4]| -> Load {
         lt.iter()
@@ -1306,7 +1653,10 @@ pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, op
             }
         }
         let x = crate::slice::bypass_claims(p, &f.cells).0.used();
-        Load { all: pins.len() as u32 + x, x }
+        Load {
+            all: pins.len() as u32 + x,
+            x,
+        }
     };
     let mut tile_ids: HashMap<(i32, i32), u32> = HashMap::new();
     let site_tile: Vec<u32> = sites
@@ -1361,11 +1711,19 @@ pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, op
             }
         }
     }
-    let bin_excess = |b: usize, load: u32| -> f64 { (f64::from(load) - dens.target * f64::from(bin_cap[b])).max(0.0) };
-    let total_dens = |bl: &[u32]| -> f64 { bl.iter().enumerate().map(|(b, &l)| bin_excess(b, l)).sum() };
+    let bin_excess = |b: usize, load: u32| -> f64 {
+        (f64::from(load) - dens.target * f64::from(bin_cap[b])).max(0.0)
+    };
+    let total_dens =
+        |bl: &[u32]| -> f64 { bl.iter().enumerate().map(|(b, &l)| bin_excess(b, l)).sum() };
     st.density_excess_start = total_dens(&bin_load);
     let total_excess = |tl: &[Load]| -> (u64, u64) {
-        tl.iter().fold((0, 0), |(a, b), l| (a + u64::from(pin_cost.excess(l.all)), b + u64::from(byp_cost.excess(l.x))))
+        tl.iter().fold((0, 0), |(a, b), l| {
+            (
+                a + u64::from(pin_cost.excess(l.all)),
+                b + u64::from(byp_cost.excess(l.x)),
+            )
+        })
     };
     (st.pin_excess_start, st.bypass_excess_start) = total_excess(&tile_load);
     // The cost change of `changes` (tile, pins added) to the tile loads.
@@ -1388,8 +1746,10 @@ pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, op
             .map(|&(t, d)| {
                 let old = tile_load[t as usize];
                 let new = old.apply(d);
-                (f64::from(pin_cost.excess(new.all)) - f64::from(pin_cost.excess(old.all))) * pin_cost.weight
-                    + (f64::from(byp_cost.excess(new.x)) - f64::from(byp_cost.excess(old.x))) * byp_cost.weight
+                (f64::from(pin_cost.excess(new.all)) - f64::from(pin_cost.excess(old.all)))
+                    * pin_cost.weight
+                    + (f64::from(byp_cost.excess(new.x)) - f64::from(byp_cost.excess(old.x)))
+                        * byp_cost.weight
             })
             .sum::<f64>()
     };
@@ -1416,7 +1776,12 @@ pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, op
                     continue;
                 }
                 let net = p.nl.net(net_id);
-                if net.users.iter().any(|(_, port)| port == "CK" || port == "CLK" || port.starts_with("CLKARDCLK") || port.starts_with("CLKBWRCLK")) {
+                if net.users.iter().any(|(_, port)| {
+                    port == "CK"
+                        || port == "CLK"
+                        || port.starts_with("CLKARDCLK")
+                        || port.starts_with("CLKBWRCLK")
+                }) {
                     continue;
                 }
                 let mut pins = Vec::new();
@@ -1431,7 +1796,10 @@ pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, op
                     continue;
                 }
                 let ni = net_pins.len() as u32;
-                let mut cs: Vec<u32> = pins.iter().filter_map(|p| if let Pin::Cell(c) = p { Some(*c) } else { None }).collect();
+                let mut cs: Vec<u32> = pins
+                    .iter()
+                    .filter_map(|p| if let Pin::Cell(c) = p { Some(*c) } else { None })
+                    .collect();
                 cs.sort_unstable();
                 cs.dedup();
                 for c in cs {
@@ -1441,7 +1809,10 @@ pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, op
             }
         }
     }
-    let mut pos: Vec<Vec<(i32, i32)>> = objs.iter().map(|o| o.sites.iter().map(|&s| site_xy(o.kind, s)).collect()).collect();
+    let mut pos: Vec<Vec<(i32, i32)>> = objs
+        .iter()
+        .map(|o| o.sites.iter().map(|&s| site_xy(o.kind, s)).collect())
+        .collect();
     let cost_of = |pins: &[Pin], pos: &Vec<Vec<(i32, i32)>>, cell_at: &Vec<(u32, u32)>| -> f64 {
         let (mut x0, mut x1, mut y0, mut y1) = (i32::MAX, i32::MIN, i32::MAX, i32::MIN);
         for p in pins {
@@ -1459,13 +1830,19 @@ pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, op
         }
         ((x1 - x0) + (y1 - y0)) as f64
     };
-    let mut net_cost: Vec<f64> = net_pins.iter().map(|ps| cost_of(ps, &pos, &cell_at)).collect();
+    let mut net_cost: Vec<f64> = net_pins
+        .iter()
+        .map(|ps| cost_of(ps, &pos, &cell_at))
+        .collect();
     let mut total: f64 = net_cost.iter().sum();
     st.hpwl_start = total;
 
     // Annealing: object moves (a slice, a chain, a hard block) and unit
     // moves (a LUT, or a LUT with its flop, between logic slices).
-    let (w, h) = sites.slices.iter().fold((0, 0), |(w, h), s| (w.max(s.x), h.max(s.y)));
+    let (w, h) = sites
+        .slices
+        .iter()
+        .fold((0, 0), |(w, h), s| (w.max(s.x), h.max(s.y)));
     let maxwin = w.max(h) as f64;
     let mut window = maxwin;
     let avg0 = total / net_pins.len().max(1) as f64;
@@ -1481,8 +1858,15 @@ pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, op
         let mut accepted = 0usize;
         let mut evaluated = 0usize;
         for _ in 0..moves {
-            let unit_move = polish > 0 || (!logic_objs.is_empty() && window <= opts.unit_window && rng.unit() < opts.unit_frac);
-            let oi = if unit_move { logic_objs[rng.below(logic_objs.len())] } else { rng.below(n) };
+            let unit_move = polish > 0
+                || (!logic_objs.is_empty()
+                    && window <= opts.unit_window
+                    && rng.unit() < opts.unit_frac);
+            let oi = if unit_move {
+                logic_objs[rng.below(logic_objs.len())]
+            } else {
+                rng.below(n)
+            };
             let k = objs[oi].kind;
             let ki = kidx(k);
             let (ox, oy) = pos[oi][0];
@@ -1493,7 +1877,7 @@ pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, op
                 let ty = oy + rng.below((2 * win + 1) as usize) as i32 - win;
                 if let Some(list) = at.get(&(ki, tx, ty)) {
                     let s = list[rng.below(list.len())];
-                    if s != objs[oi].sites[0] {
+                    if s != objs[oi].sites[0] && (unit_move || in_reg(oi, k, &[s])) {
                         target = Some(s);
                         break;
                     }
@@ -1510,7 +1894,7 @@ pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, op
                 }
                 let pair_a = fed_by(lut_a, ff_a);
                 let Some(oj) = owner[0][ts] else { continue };
-                if !is_logic[oj] || oj == oi {
+                if !is_logic[oj] || oj == oi || oreg[oj] != oreg[oi] {
                     continue;
                 }
                 let lb = rng.below(4);
@@ -1527,12 +1911,19 @@ pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, op
                 } else if pair_b {
                     ctrl_of_cell[&ff_a] == ctrl_of_cell[&ff_b]
                 } else {
-                    lut_b == NONE && ff_b == NONE && (slice_ffs[oj].1 == 0 || slice_ffs[oj].0 == ctrl_of_cell[&ff_a]) && (ff2_b == NONE || true)
+                    lut_b == NONE
+                        && ff_b == NONE
+                        && (slice_ffs[oj].1 == 0 || slice_ffs[oj].0 == ctrl_of_cell[&ff_a])
+                        && (ff2_b == NONE || true)
                 };
                 if !ok {
                     continue;
                 }
-                let moving_a: Vec<u32> = if pair_a { vec![lut_a, ff_a] } else { vec![lut_a] };
+                let moving_a: Vec<u32> = if pair_a {
+                    vec![lut_a, ff_a]
+                } else {
+                    vec![lut_a]
+                };
                 let moving_b: Vec<u32> = if pair_a {
                     if pair_b { vec![lut_b, ff_b] } else { vec![] }
                 } else if lut_b != NONE {
@@ -1570,7 +1961,11 @@ pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, op
                 }
                 // The two slices' letters after the move, and their pins.
                 let (mut na, mut nb) = (letters[oi], letters[oj]);
-                na[la][0] = if pair_a { if pair_b { lut_b } else { NONE } } else { if lut_b != NONE { lut_b } else { NONE } };
+                na[la][0] = if pair_a {
+                    if pair_b { lut_b } else { NONE }
+                } else {
+                    if lut_b != NONE { lut_b } else { NONE }
+                };
                 nb[lb][0] = lut_a;
                 if pair_a {
                     na[la][1] = if pair_b { ff_b } else { NONE };
@@ -1578,8 +1973,14 @@ pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, op
                 }
                 let (pins_a, pins_b) = (logic_pins(&na), logic_pins(&nb));
                 let changes = [
-                    (site_tile[objs[oi].sites[0]], Load::delta(pins_a, slice_pins[oi][0])),
-                    (site_tile[objs[oj].sites[0]], Load::delta(pins_b, slice_pins[oj][0])),
+                    (
+                        site_tile[objs[oi].sites[0]],
+                        Load::delta(pins_a, slice_pins[oi][0]),
+                    ),
+                    (
+                        site_tile[objs[oj].sites[0]],
+                        Load::delta(pins_b, slice_pins[oj][0]),
+                    ),
                 ];
                 let dpin = pin_delta(&tile_load, &changes);
                 if delta + dpin <= 0.0 || rng.unit() < (-(delta + dpin) / temp).exp() {
@@ -1633,7 +2034,10 @@ pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, op
                     if objs[oj].sites.len() > 1 {
                         continue;
                     }
-                    if k == Kind::Slice && ((objs[oi].need_m && !sites.slices[ts].m) || (objs[oj].need_m && !sites.slices[objs[oi].sites[0]].m)) {
+                    if k == Kind::Slice
+                        && ((objs[oi].need_m && !sites.slices[ts].m)
+                            || (objs[oj].need_m && !sites.slices[objs[oi].sites[0]].m))
+                    {
                         continue;
                     }
                 } else {
@@ -1642,7 +2046,8 @@ pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, op
                         Kind::Dsp => true,
                         Kind::Ramb36 => {
                             let t = sites.ramb36[ts].tile;
-                            b18.get(&t).copied().unwrap_or(0) == 0 && !b36.get(&t).copied().unwrap_or(false)
+                            b18.get(&t).copied().unwrap_or(0) == 0
+                                && !b36.get(&t).copied().unwrap_or(false)
                         }
                         Kind::Ramb18 => !b36.get(&sites.ramb18[ts].tile).copied().unwrap_or(false),
                     };
@@ -1652,6 +2057,11 @@ pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, op
                 }
                 (vec![ts], other)
             };
+            if !in_reg(oi, k, &new_run)
+                || other.is_some_and(|oj| !in_reg(oj, k, &objs[oi].sites[..1]))
+            {
+                continue;
+            }
             let old_run = objs[oi].sites.clone();
             let old_pos_i = pos[oi].clone();
             pos[oi] = new_run.iter().map(|&s| site_xy(k, s)).collect();
@@ -1660,7 +2070,10 @@ pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, op
             }
             epoch = epoch.wrapping_add(1);
             touched.clear();
-            for &c in obj_cells[oi].iter().chain(other.map(|oj| &obj_cells[oj]).into_iter().flatten()) {
+            for &c in obj_cells[oi]
+                .iter()
+                .chain(other.map(|oj| &obj_cells[oj]).into_iter().flatten())
+            {
                 for &ni in &cell_nets[c as usize] {
                     if stamp[ni as usize] != epoch {
                         stamp[ni as usize] = epoch;
@@ -1722,7 +2135,8 @@ pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, op
                     .iter()
                     .map(|&(b, d)| {
                         let l = bin_load[b as usize];
-                        bin_excess(b as usize, (i64::from(l) + i64::from(d)).max(0) as u32) - bin_excess(b as usize, l)
+                        bin_excess(b as usize, (i64::from(l) + i64::from(d)).max(0) as u32)
+                            - bin_excess(b as usize, l)
                     })
                     .sum::<f64>()
                     * dens.weight
@@ -1733,7 +2147,8 @@ pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, op
                 total += delta;
                 apply(&mut tile_load, &changes);
                 for &(b, d) in &dchg {
-                    bin_load[b as usize] = (i64::from(bin_load[b as usize]) + i64::from(d)).max(0) as u32;
+                    bin_load[b as usize] =
+                        (i64::from(bin_load[b as usize]) + i64::from(d)).max(0) as u32;
                 }
                 for &s in &old_run {
                     owner[ki][s] = None;
@@ -1790,7 +2205,9 @@ pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, op
         }
         temp *= alpha;
         window = (window * (1.0 - 0.44 + rate)).clamp(1.0, maxwin);
-        if temp < 0.005 * total / net_pins.len().max(1) as f64 || st.moves > opts.max_moves_per_obj * n {
+        if temp < 0.005 * total / net_pins.len().max(1) as f64
+            || st.moves > opts.max_moves_per_obj * n
+        {
             if opts.polish == 0 || logic_objs.is_empty() {
                 break;
             }
@@ -1803,7 +2220,11 @@ pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, op
     st.hpwl_end = total;
     (st.pin_excess_end, st.bypass_excess_end) = total_excess(&tile_load);
     st.density_excess_end = total_dens(&bin_load);
-    st.density_bins_over = bin_load.iter().enumerate().filter(|&(b, &l)| bin_excess(b, l) > 0.0).count();
+    st.density_bins_over = bin_load
+        .iter()
+        .enumerate()
+        .filter(|&(b, &l)| bin_excess(b, l) > 0.0)
+        .count();
     st.tiles_over_cap = tile_load.iter().filter(|l| l.all > pin_cost.cap).count();
     st.tile_pins_max = tile_load.iter().map(|l| l.all).max().unwrap_or(0);
     st.bypass_tiles_over_cap = tile_load.iter().filter(|l| l.x > byp_cost.cap).count();
@@ -1819,8 +2240,17 @@ pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, op
                         if ci == NONE {
                             continue;
                         }
-                        let bel = format!("{}{}", letter(l as i32), ["6LUT", "FF", "5FF", "5LUT"][slot]);
-                        p.nl.cell_mut(cells[ci as usize]).bel = Some(Loc::Grid { x: s.x, y: s.y, site: s.rel.clone(), bel });
+                        let bel = format!(
+                            "{}{}",
+                            letter(l as i32),
+                            ["6LUT", "FF", "5FF", "5LUT"][slot]
+                        );
+                        p.nl.cell_mut(cells[ci as usize]).bel = Some(Loc::Grid {
+                            x: s.x,
+                            y: s.y,
+                            site: s.rel.clone(),
+                            bel,
+                        });
                     }
                 }
             }
@@ -1828,22 +2258,46 @@ pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, op
                 for (fl, &si) in fills[o].iter().zip(&ob.sites) {
                     let s = &sites.slices[si];
                     for (c, b) in &fl.cells {
-                        p.nl.cell_mut(*c).bel = Some(Loc::Grid { x: s.x, y: s.y, site: s.rel.clone(), bel: b.clone() });
+                        p.nl.cell_mut(*c).bel = Some(Loc::Grid {
+                            x: s.x,
+                            y: s.y,
+                            site: s.rel.clone(),
+                            bel: b.clone(),
+                        });
                     }
                 }
             }
             Kind::Dsp => {
                 let s = &sites.dsp[ob.sites[0]];
-                p.nl.cell_mut(ob.cells[0]).bel = Some(Loc::Grid { x: s.x, y: s.y, site: s.rel.clone(), bel: "DSP48E1".into() });
+                p.nl.cell_mut(ob.cells[0]).bel = Some(Loc::Grid {
+                    x: s.x,
+                    y: s.y,
+                    site: s.rel.clone(),
+                    bel: "DSP48E1".into(),
+                });
             }
             Kind::Ramb36 => {
                 let s = &sites.ramb36[ob.sites[0]];
-                p.nl.cell_mut(ob.cells[0]).bel = Some(Loc::Grid { x: s.x, y: s.y, site: s.rel.clone(), bel: "RAMB36E1~RAMB36E1".into() });
+                p.nl.cell_mut(ob.cells[0]).bel = Some(Loc::Grid {
+                    x: s.x,
+                    y: s.y,
+                    site: s.rel.clone(),
+                    bel: "RAMB36E1~RAMB36E1".into(),
+                });
             }
             Kind::Ramb18 => {
                 let s = &sites.ramb18[ob.sites[0]];
-                let bel = if s.rel.ends_with("Y0") { "RAMB18E1~RAMB18E1" } else { "RAMB18E1" };
-                p.nl.cell_mut(ob.cells[0]).bel = Some(Loc::Grid { x: s.x, y: s.y, site: s.rel.clone(), bel: bel.into() });
+                let bel = if s.rel.ends_with("Y0") {
+                    "RAMB18E1~RAMB18E1"
+                } else {
+                    "RAMB18E1"
+                };
+                p.nl.cell_mut(ob.cells[0]).bel = Some(Loc::Grid {
+                    x: s.x,
+                    y: s.y,
+                    site: s.rel.clone(),
+                    bel: bel.into(),
+                });
             }
         }
     }
@@ -1852,7 +2306,12 @@ pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, op
         if p.nl.cell(c).bel.is_none()
             && let Some(s) = bufg.next()
         {
-            p.nl.cell_mut(c).bel = Some(Loc::Grid { x: s.x, y: s.y, site: s.rel.clone(), bel: "BUFGCTRL".into() });
+            p.nl.cell_mut(c).bel = Some(Loc::Grid {
+                x: s.x,
+                y: s.y,
+                site: s.rel.clone(),
+                bel: "BUFGCTRL".into(),
+            });
         }
     }
     // MMCMs: MMCME2_ADV_X0Y0 first (nextpnr's choice for a clock it feeds
@@ -1864,17 +2323,33 @@ pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, op
         if p.nl.cell(c).bel.is_none()
             && let Some(s) = mmcm.next()
         {
-            p.nl.cell_mut(c).bel = Some(Loc::Grid { x: s.x, y: s.y, site: s.rel.clone(), bel: "MMCME2_ADV".into() });
+            p.nl.cell_mut(c).bel = Some(Loc::Grid {
+                x: s.x,
+                y: s.y,
+                site: s.rel.clone(),
+                bel: "MMCME2_ADV".into(),
+            });
         }
     }
     for c in p.nl.cells_of("PS7_PS7") {
         if let Some(s) = sites.ps7.first() {
-            p.nl.cell_mut(c).bel = Some(Loc::Grid { x: s.x, y: s.y, site: s.rel.clone(), bel: "PS7".into() });
+            p.nl.cell_mut(c).bel = Some(Loc::Grid {
+                x: s.x,
+                y: s.y,
+                site: s.rel.clone(),
+                bel: "PS7".into(),
+            });
         }
     }
-    for (c, b) in [("$PACKER_GND_DRV", "PSEUDO_GND"), ("$PACKER_VCC_DRV", "PSEUDO_VCC")] {
+    for (c, b) in [
+        ("$PACKER_GND_DRV", "PSEUDO_GND"),
+        ("$PACKER_VCC_DRV", "PSEUDO_VCC"),
+    ] {
         if let Some(id) = p.nl.cell_id(c) {
-            p.nl.cell_mut(id).bel = Some(Loc::Site { site: "X0Y0".into(), bel: b.into() });
+            p.nl.cell_mut(id).bel = Some(Loc::Site {
+                site: "X0Y0".into(),
+                bel: b.into(),
+            });
         }
     }
     st.seconds = t0.elapsed().as_secs_f64();
@@ -1897,15 +2372,29 @@ pub fn hpwl(p: &Packer, max_fanout: usize) -> f64 {
                 continue;
             }
             let net = p.nl.net(n);
-            if net.users.iter().any(|(_, port)| port == "CK" || port == "CLK" || port.starts_with("CLKARDCLK") || port.starts_with("CLKBWRCLK")) {
+            if net.users.iter().any(|(_, port)| {
+                port == "CK"
+                    || port == "CLK"
+                    || port.starts_with("CLKARDCLK")
+                    || port.starts_with("CLKBWRCLK")
+            }) {
                 continue;
             }
-            let pts: Vec<(i32, i32)> = net.driver.iter().chain(net.users.iter()).filter_map(|(c, _)| pos(*c)).collect();
+            let pts: Vec<(i32, i32)> = net
+                .driver
+                .iter()
+                .chain(net.users.iter())
+                .filter_map(|(c, _)| pos(*c))
+                .collect();
             if pts.len() < 2 || pts.len() > max_fanout {
                 continue;
             }
-            let (x0, x1) = pts.iter().fold((i32::MAX, i32::MIN), |(a, b), &(x, _)| (a.min(x), b.max(x)));
-            let (y0, y1) = pts.iter().fold((i32::MAX, i32::MIN), |(a, b), &(_, y)| (a.min(y), b.max(y)));
+            let (x0, x1) = pts
+                .iter()
+                .fold((i32::MAX, i32::MIN), |(a, b), &(x, _)| (a.min(x), b.max(x)));
+            let (y0, y1) = pts
+                .iter()
+                .fold((i32::MAX, i32::MIN), |(a, b), &(_, y)| (a.min(y), b.max(y)));
             total += ((x1 - x0) + (y1 - y0)) as f64;
         }
     }

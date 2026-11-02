@@ -15,12 +15,20 @@ use crate::policy::CarryFf;
 /// `X_FFSYNC`.
 pub fn pack_ffs(p: &mut Packer) {
     let mut rules = BTreeMap::new();
-    for (ty, sr, sync) in [("FDCE", "CLR", false), ("FDPE", "PRE", false), ("FDRE", "R", true), ("FDSE", "S", true)] {
+    for (ty, sr, sync) in [
+        ("FDCE", "CLR", false),
+        ("FDPE", "PRE", false),
+        ("FDRE", "R", true),
+        ("FDSE", "S", true),
+    ] {
         let mut r = Rule::to("SLICE_FFX").port("C", "CK").port(sr, "SR");
         if sync {
             r = r.attr("X_FFSYNC", json!("1"));
         }
-        rules.insert(format!("{ty}_1"), r.clone().param("IS_C_INVERTED", prop32(1)));
+        rules.insert(
+            format!("{ty}_1"),
+            r.clone().param("IS_C_INVERTED", prop32(1)),
+        );
         rules.insert(ty.to_string(), r);
     }
     let n = p.generic_xform(&rules);
@@ -29,9 +37,14 @@ pub fn pack_ffs(p: &mut Packer) {
 
 fn inverted_sr(p: &Packer, c: CellId) -> bool {
     let cell = p.nl.cell(c);
-    ["IS_R_INVERTED", "IS_S_INVERTED", "IS_CLR_INVERTED", "IS_PRE_INVERTED"]
-        .iter()
-        .any(|k| cell.int_param(k).unwrap_or(0) != 0)
+    [
+        "IS_R_INVERTED",
+        "IS_S_INVERTED",
+        "IS_CLR_INVERTED",
+        "IS_PRE_INVERTED",
+    ]
+    .iter()
+    .any(|k| cell.int_param(k).unwrap_or(0) != 0)
 }
 
 /// The control set a slice half holding `ff` would need.
@@ -110,7 +123,12 @@ fn offset_of(p: &Packer, c: CellId) -> Offset {
             abs: p.clusters[&root].root_abs_z.is_some(),
         };
     }
-    p.clusters[&root].members.iter().find(|(m, _)| *m == c).map(|(_, o)| *o).expect("member")
+    p.clusters[&root]
+        .members
+        .iter()
+        .find(|(m, _)| *m == c)
+        .map(|(_, o)| *o)
+        .expect("member")
 }
 
 /// Pair each flop with the LUT (or carry output) driving its D, as nextpnr
@@ -127,7 +145,9 @@ pub fn pack_lutffs(p: &mut Packer, carry_ff: CarryFf) {
         if p.nl.cell(ff).ty != "SLICE_FFX" || p.is_constrained(ff) {
             continue;
         }
-        let Some(d) = p.nl.cell(ff).net("D") else { continue };
+        let Some(d) = p.nl.cell(ff).net("D") else {
+            continue;
+        };
         let Some((drv, port)) = p.nl.driver(d).map(|(c, s)| (c, s.to_string())) else {
             continue;
         };
@@ -167,13 +187,20 @@ pub fn pack_lutffs(p: &mut Packer, carry_ff: CarryFf) {
             }
             pairs += 1;
         } else if dty == "CARRY4" && p.is_constrained(drv) {
-            let Some(z) = port.strip_prefix('O').filter(|s| s.len() == 1).and_then(|s| s.parse::<i32>().ok()) else {
+            let Some(z) = port
+                .strip_prefix('O')
+                .filter(|s| s.len() == 1)
+                .and_then(|s| s.parse::<i32>().ok())
+            else {
                 continue;
             };
             let o = offset_of(p, drv);
             let fz = o.z + (slot::at(z, slot::FF) - slot::CARRY4);
             let root = p.cluster_of[&drv];
-            let taken = p.clusters[&root].members.iter().any(|(_, m)| m.dx == o.dx && m.dy == o.dy && m.z == fz && m.abs == o.abs);
+            let taken = p.clusters[&root]
+                .members
+                .iter()
+                .any(|(_, m)| m.dx == o.dx && m.dy == o.dy && m.z == fz && m.abs == o.abs);
             let allowed = sole_user || carry_ff == CarryFf::Shared;
             if !allowed || taken || !can_add_ff_to_cluster(p, drv, (o.dx, o.dy), ff) {
                 continue;

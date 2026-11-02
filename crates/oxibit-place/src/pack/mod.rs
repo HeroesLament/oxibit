@@ -153,16 +153,21 @@ impl Packer {
                     if let Some(n) = old.net {
                         self.nl.connect(c, t, n);
                     }
-                    self.nl.cell_mut(c).attrs.insert(format!("X_ORIG_PORT_{t}"), json!(p));
+                    self.nl
+                        .cell_mut(c)
+                        .attrs
+                        .insert(format!("X_ORIG_PORT_{t}"), json!(p));
                 }
             } else {
-                let new = rule
-                    .port
-                    .get(&p)
-                    .cloned()
-                    .unwrap_or_else(|| p.chars().filter(|&ch| ch != '[' && ch != ']').collect());
+                let new =
+                    rule.port.get(&p).cloned().unwrap_or_else(|| {
+                        p.chars().filter(|&ch| ch != '[' && ch != ']').collect()
+                    });
                 self.nl.rename_port(c, &p, &new);
-                self.nl.cell_mut(c).attrs.insert(format!("X_ORIG_PORT_{new}"), json!(p));
+                self.nl
+                    .cell_mut(c)
+                    .attrs
+                    .insert(format!("X_ORIG_PORT_{new}"), json!(p));
             }
         }
         let cell = self.nl.cell_mut(c);
@@ -192,7 +197,13 @@ impl Packer {
     }
 
     /// A `LUT<k>` cell named `name` reading `inputs`, driving `output`.
-    pub fn create_lut(&mut self, name: &str, inputs: &[NetId], output: Option<NetId>, init: Value) -> CellId {
+    pub fn create_lut(
+        &mut self,
+        name: &str,
+        inputs: &[NetId],
+        output: Option<NetId>,
+        init: Value,
+    ) -> CellId {
         let c = self.nl.add_cell(name, &format!("LUT{}", inputs.len()));
         for (i, &n) in inputs.iter().enumerate() {
             let p = format!("I{i}");
@@ -212,7 +223,9 @@ impl Packer {
     pub fn feed_through_lut(&mut self, net: NetId, users: &[(CellId, String)]) -> CellId {
         let base = self.nl.net(net).name.clone();
         self.autoidx += 1;
-        let feed = self.nl.add_net_unique(&format!("{base}$legal{}", self.autoidx));
+        let feed = self
+            .nl
+            .add_net_unique(&format!("{base}$legal{}", self.autoidx));
         self.autoidx += 1;
         let name = format!("{base}$LUT{}", self.autoidx);
         let lut = self.create_lut(&name, &[net], Some(feed), constants::prop32(2));
@@ -226,10 +239,17 @@ impl Packer {
     /// zero becomes VCC and `IS_<port>_INVERTED`.
     pub fn tie_port(&mut self, c: CellId, port: &str, value: bool, inv: bool) {
         self.nl.add_port(c, port, Dir::Input);
-        let n = if value || inv { self.nl.vcc } else { self.nl.gnd };
+        let n = if value || inv {
+            self.nl.vcc
+        } else {
+            self.nl.gnd
+        };
         self.nl.connect(c, port, n);
         if !value && inv {
-            self.nl.cell_mut(c).params.insert(format!("IS_{port}_INVERTED"), json!(1));
+            self.nl
+                .cell_mut(c)
+                .params
+                .insert(format!("IS_{port}_INVERTED"), json!(1));
         }
     }
 
@@ -245,7 +265,11 @@ impl Packer {
     /// Add `c` to `root`'s cluster at `off`.
     pub fn add_member(&mut self, root: CellId, c: CellId, off: Offset) {
         self.make_root(root, None);
-        self.clusters.get_mut(&root).expect("root").members.push((c, off));
+        self.clusters
+            .get_mut(&root)
+            .expect("root")
+            .members
+            .push((c, off));
         self.cluster_of.insert(c, root);
     }
 
@@ -258,13 +282,22 @@ impl Packer {
 /// Run the passes implemented so far, in nextpnr's order. Not yet: other
 /// IOLOGIC (IDDR, SERDES, ODELAY), PLL/MMCM, user MUXF trees, SRL cascades.
 /// Under the exploration policy.
-pub fn pack(nl: Netlist, dev: &crate::device::Device, props: &crate::xdc::PortProps) -> Result<Packer, String> {
+pub fn pack(
+    nl: Netlist,
+    dev: &crate::device::Device,
+    props: &crate::xdc::PortProps,
+) -> Result<Packer, String> {
     let plan = crate::policy::PackPolicy::exploration().plan(&crate::policy::xc7z020())?;
     pack_with(nl, dev, props, &plan)
 }
 
 /// `pack` under a checked plan (`policy::PackPolicy::plan`).
-pub fn pack_with(nl: Netlist, dev: &crate::device::Device, props: &crate::xdc::PortProps, plan: &crate::policy::PackPlan) -> Result<Packer, String> {
+pub fn pack_with(
+    nl: Netlist,
+    dev: &crate::device::Device,
+    props: &crate::xdc::PortProps,
+    plan: &crate::policy::PackPlan,
+) -> Result<Packer, String> {
     let mut p = Packer::new(nl);
     constants::pack_constants(&mut p);
     luts::pack_inverters(&mut p);

@@ -86,7 +86,8 @@ pub fn import(p: &mut Packer, theirs: &Design) -> ImportStats {
         }
     }
     // Cluster members still unplaced: root's tile shifted, slot from z.
-    let clusters: Vec<(CellId, crate::pack::Cluster)> = p.clusters.iter().map(|(r, cl)| (*r, cl.clone())).collect();
+    let clusters: Vec<(CellId, crate::pack::Cluster)> =
+        p.clusters.iter().map(|(r, cl)| (*r, cl.clone())).collect();
     for (root, cl) in clusters {
         let (root_z, members) = (cl.root_abs_z, cl.members);
         let Some(Loc::Grid { x, y, site, bel }) = p.nl.cell(root).bel.clone() else {
@@ -114,12 +115,15 @@ pub fn import(p: &mut Packer, theirs: &Design) -> ImportStats {
     for c in p.nl.cell_ids() {
         let cell = p.nl.cell(c);
         match &cell.bel {
-            None if !matches!(cell.ty.as_str(), "PSEUDO_GND" | "PSEUDO_VCC") => st.unplaced.push(cell.name.clone()),
+            None if !matches!(cell.ty.as_str(), "PSEUDO_GND" | "PSEUDO_VCC") => {
+                st.unplaced.push(cell.name.clone())
+            }
             Some(l) => {
                 if let Some(prev) = used.insert(l.text(), cell.name.clone())
                     && st.collisions.len() < 20
                 {
-                    st.collisions.push(format!("{} and {} on {}", prev, cell.name, l.text()));
+                    st.collisions
+                        .push(format!("{} and {} on {}", prev, cell.name, l.text()));
                 }
             }
             None => {}
@@ -159,7 +163,11 @@ fn place_leftover_luts(p: &mut Packer, st: &mut ImportStats) {
         let Some((ax, ay)) = anchor else { continue };
         let best = slices
             .iter()
-            .flat_map(|(x, y, s)| ['A', 'B', 'C', 'D'].into_iter().map(move |l| (*x, *y, s.clone(), l)))
+            .flat_map(|(x, y, s)| {
+                ['A', 'B', 'C', 'D']
+                    .into_iter()
+                    .map(move |l| (*x, *y, s.clone(), l))
+            })
             .filter(|k| !taken.contains(k))
             .min_by_key(|(x, y, s, l)| ((x - ax).abs() + (y - ay).abs(), s.clone(), *l));
         if let Some((x, y, site, l)) = best {
@@ -257,18 +265,26 @@ pub fn legalise(p: &mut Packer, ps7_inputs: &[String]) -> LegaliseStats {
             let pin = format!("A{}", idx + 1);
             for (c, ins) in [(Some(l5), &i5), (l6, &i6)] {
                 let Some(c) = c else { continue };
-                let names: Vec<String> = ins.iter().filter(|(_, x)| x == n).map(|(i, _)| format!("I{i}")).collect();
+                let names: Vec<String> = ins
+                    .iter()
+                    .filter(|(_, x)| x == n)
+                    .map(|(i, _)| format!("I{i}"))
+                    .collect();
                 if names.is_empty() {
                     continue;
                 }
                 p.nl.add_port(c, &pin, Dir::Input);
                 p.nl.connect(c, &pin, *n);
-                p.nl.cell_mut(c).attrs.insert(format!("X_ORIG_PORT_{pin}"), json!(names.join(" ")));
+                p.nl.cell_mut(c)
+                    .attrs
+                    .insert(format!("X_ORIG_PORT_{pin}"), json!(names.join(" ")));
             }
         }
         p.nl.rename_port(l5, "O6", "O5");
         p.nl.cell_mut(l5).attrs.remove("X_ORIG_PORT_O6");
-        p.nl.cell_mut(l5).attrs.insert("X_ORIG_PORT_O5".into(), json!("O"));
+        p.nl.cell_mut(l5)
+            .attrs
+            .insert("X_ORIG_PORT_O5".into(), json!("O"));
         if let Some(l6) = l6 {
             p.nl.add_port(l6, "A6", Dir::Input);
             p.nl.connect(l6, "A6", vcc);
@@ -278,10 +294,17 @@ pub fn legalise(p: &mut Packer, ps7_inputs: &[String]) -> LegaliseStats {
     let gnd = p.nl.gnd;
     for c in p.nl.cells_of("PS7_PS7") {
         for pin in ps7_inputs {
-            if pin.contains("_PAD_") || ["TEST", "DEBUGSELECT", "MIO", "DDR"].iter().any(|s| pin.starts_with(s)) {
+            if pin.contains("_PAD_")
+                || ["TEST", "DEBUGSELECT", "MIO", "DDR"]
+                    .iter()
+                    .any(|s| pin.starts_with(s))
+            {
                 continue;
             }
-            let driven = p.nl.cell(c).net(pin).is_some_and(|n| p.nl.driver(n).is_some());
+            let driven =
+                p.nl.cell(c)
+                    .net(pin)
+                    .is_some_and(|n| p.nl.driver(n).is_some());
             if driven {
                 continue;
             }
@@ -296,8 +319,10 @@ pub fn legalise(p: &mut Packer, ps7_inputs: &[String]) -> LegaliseStats {
 /// The PS7 bel's input pins from a nextpnr-xilinx-meta site type file.
 pub fn ps7_inputs(meta_dir: &std::path::Path) -> Result<Vec<String>, String> {
     let path = meta_dir.join("site_type_PS7.json");
-    let v: Value =
-        serde_json::from_str(&std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?).map_err(|e| e.to_string())?;
+    let v: Value = serde_json::from_str(
+        &std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?,
+    )
+    .map_err(|e| e.to_string())?;
     Ok(v["PS7"]["bels"]["PS7"]["pins"]
         .as_object()
         .into_iter()
