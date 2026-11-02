@@ -8,6 +8,7 @@ use serde_json::json;
 use super::constants::prop32;
 use super::{Offset, Packer, Rule, slot};
 use crate::netlist::{CellId, NetId};
+use crate::policy::CarryFf;
 
 /// `FDRE`/`FDSE`/`FDCE`/`FDPE` (and the `_1` clock-inverted forms) ->
 /// `SLICE_FFX`: `C` on `CK`, the reset or set on `SR`; synchronous ones get
@@ -116,8 +117,12 @@ fn offset_of(p: &Packer, c: CellId) -> Offset {
 /// does: a LUT not yet in a cluster takes the first flop it drives,
 /// whatever its fanout; a LUT or CARRY4 already in a cluster takes a flop
 /// only when the flop is the net's sole user and the control set fits.
-pub fn pack_lutffs(p: &mut Packer) {
+/// With `CarryFf::Shared` a carry output takes its flop whatever else it
+/// drives (the output also leaves through the letter's output mux), when
+/// that letter's flop slot is free and the control set fits.
+pub fn pack_lutffs(p: &mut Packer, carry_ff: CarryFf) {
     let mut pairs = 0;
+    let mut shared = 0;
     for ff in p.nl.cell_ids() {
         if p.nl.cell(ff).ty != "SLICE_FFX" || p.is_constrained(ff) {
             continue;
@@ -166,22 +171,29 @@ pub fn pack_lutffs(p: &mut Packer) {
                 continue;
             };
             let o = offset_of(p, drv);
-            if !sole_user || !can_add_ff_to_cluster(p, drv, (o.dx, o.dy), ff) {
+            let fz = o.z + (slot::at(z, slot::FF) - slot::CARRY4);
+            let root = p.cluster_of[&drv];
+            let taken = p.clusters[&root].members.iter().any(|(_, m)| m.dx == o.dx && m.dy == o.dy && m.z == fz && m.abs == o.abs);
+            let allowed = sole_user || carry_ff == CarryFf::Shared;
+            if !allowed || taken || !can_add_ff_to_cluster(p, drv, (o.dx, o.dy), ff) {
                 continue;
             }
-            let root = p.cluster_of[&drv];
             p.add_member(
                 root,
                 ff,
                 Offset {
                     dx: o.dx,
                     dy: o.dy,
-                    z: o.z + (slot::at(z, slot::FF) - slot::CARRY4),
+                    z: fz,
                     abs: o.abs,
                 },
             );
             pairs += 1;
+            if !sole_user {
+                shared += 1;
+            }
         }
     }
     p.count("lutff_pairs", pairs);
+    p.count("carry_ff_shared", shared);
 }

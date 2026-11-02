@@ -29,6 +29,9 @@ pub enum PackMode {
     /// Two LUTs on one letter: O6 and O5, at most five distinct inputs, A6
     /// tied high.
     FracturedLetter,
+    /// A flop on a carry output's own letter (FFMUX = XOR) while the output
+    /// also leaves the slice (OUTMUX = XOR).
+    CarryOutFfShared,
 }
 
 pub type PlaceCaps = Caps<PackMode>;
@@ -53,6 +56,11 @@ pub fn xc7z020() -> PlaceCaps {
                 PackMode::CarryDiBypass,
                 Modeled,
                 "placed.rs leaves ACY0 at AX, placer counts the X pin; never routed on a design",
+            ),
+            (
+                PackMode::CarryOutFfShared,
+                PnrSupported,
+                "FFMUX and OUTMUX are separate site pips from CARRY4_XOR in oxibit-pnr; the pair not yet compared with a reference FASM",
             ),
         ],
     )
@@ -82,6 +90,25 @@ impl CarryDi {
             "lut5" => Some(CarryDi::Lut5),
             "bypass" => Some(CarryDi::Bypass),
             _ => None,
+        }
+    }
+}
+
+/// Which flops fed by a carry output go on that output's letter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CarryFf {
+    /// Only a flop that is the output's sole user (nextpnr's packing).
+    SoleUser,
+    /// Also when the output has other users: it leaves the slice through
+    /// the letter's output mux as well.
+    Shared,
+}
+
+impl CarryFf {
+    pub fn emits(self) -> &'static [PackMode] {
+        match self {
+            CarryFf::SoleUser => &[],
+            CarryFf::Shared => &[PackMode::CarryOutFfShared],
         }
     }
 }
@@ -116,6 +143,7 @@ pub struct PackPolicy {
     /// Every mode a strategy produces must be at least this well established.
     pub floor: Level,
     pub carry_di: CarryDi,
+    pub carry_ff: CarryFf,
     pub lut5: Lut5Fill,
     /// Constant folding nextpnr-xilinx does not do (off for a like-for-like
     /// comparison with nextpnr's packing).
@@ -150,6 +178,7 @@ impl PackPolicy {
         PackPolicy {
             floor: Level::PnrSupported,
             carry_di: CarryDi::Lut5,
+            carry_ff: CarryFf::Shared,
             lut5: Lut5Fill::ALL,
             fold: true,
             bypass_ffs_per_slice: FillOptions::default().bypass_ffs_per_slice,
@@ -169,6 +198,7 @@ impl PackPolicy {
     pub fn nextpnr_reference() -> Self {
         PackPolicy {
             fold: false,
+            carry_ff: CarryFf::SoleUser,
             ..PackPolicy::exploration()
         }
     }
@@ -201,6 +231,7 @@ impl PackPolicy {
             ran
         };
         let bypass = gate("carry_di_bypass", "pack", self.carry_di == CarryDi::Bypass, CarryDi::Bypass.emits());
+        let carry_ff = gate("carry_ff_shared", "pack", self.carry_ff == CarryFf::Shared, CarryFf::Shared.emits());
         let frac = [PackMode::FracturedLetter];
         let lut5 = Lut5Fill {
             chain: gate("lut5_chain", "fill", self.lut5.chain, &frac),
@@ -209,6 +240,7 @@ impl PackPolicy {
         };
         Ok(PackPlan {
             carry_di: if bypass { CarryDi::Bypass } else { CarryDi::Lut5 },
+            carry_ff: if carry_ff { CarryFf::Shared } else { CarryFf::SoleUser },
             fold: self.fold,
             fill: FillOptions {
                 bypass_ffs_per_slice: self.bypass_ffs_per_slice,
@@ -230,6 +262,7 @@ impl Default for PackPolicy {
 #[derive(Clone, Debug)]
 pub struct PackPlan {
     carry_di: CarryDi,
+    carry_ff: CarryFf,
     fold: bool,
     fill: FillOptions,
     objective: PlaceObjective,
@@ -239,6 +272,9 @@ pub struct PackPlan {
 impl PackPlan {
     pub fn carry_di(&self) -> CarryDi {
         self.carry_di
+    }
+    pub fn carry_ff(&self) -> CarryFf {
+        self.carry_ff
     }
     pub fn fold(&self) -> bool {
         self.fold
@@ -254,7 +290,7 @@ impl PackPlan {
     }
     pub fn json(&self) -> Value {
         let by_name: BTreeMap<&str, Value> = self.records.iter().map(|r| (r.name, r.json())).collect();
-        json!({"carry_di": format!("{:?}", self.carry_di), "fold": self.fold,
+        json!({"carry_di": format!("{:?}", self.carry_di), "carry_ff": format!("{:?}", self.carry_ff), "fold": self.fold,
                "bypass_ffs_per_slice": self.fill.bypass_ffs_per_slice, "strategies": by_name,
                "objective": {"pins": [self.objective.pins.cap, self.objective.pins.weight],
                              "bypass": [self.objective.bypass.cap, self.objective.bypass.weight]}})
@@ -278,6 +314,16 @@ mod tests {
         assert!(matches!(&r.outcome, Outcome::Refused(w) if w.contains("CarryDiBypass is Modeled")));
         pol.floor = Level::Modeled;
         assert_eq!(pol.plan(&caps).expect("plan").carry_di(), CarryDi::Bypass);
+    }
+
+    #[test]
+    fn carry_ff_shared_by_default_not_for_nextpnr() {
+        let caps = xc7z020();
+        assert_eq!(PackPolicy::exploration().plan(&caps).expect("plan").carry_ff(), CarryFf::Shared);
+        let plan = PackPolicy::nextpnr_reference().plan(&caps).expect("plan");
+        assert_eq!(plan.carry_ff(), CarryFf::SoleUser);
+        let r = plan.records().iter().find(|r| r.name == "carry_ff_shared").expect("recorded");
+        assert_eq!(r.outcome, Outcome::Disabled);
     }
 
     #[test]

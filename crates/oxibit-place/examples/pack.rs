@@ -6,7 +6,7 @@
 //!
 //! stdout: JSON lines (pack stats, comparison, placement).
 
-use oxibit_place::policy::{CarryDi, Level, Lut5Fill, PackPolicy};
+use oxibit_place::policy::{CarryDi, CarryFf, Level, Lut5Fill, PackPolicy};
 use oxibit_place::{compare, netlist::Netlist, pack, place};
 use oxibit_pnr::packed::Design;
 use serde_json::{Value, json};
@@ -19,6 +19,7 @@ fn read(path: &str) -> Result<Value, String> {
 ///   OXIBIT_PACK_POLICY  exploration (default) | production | nextpnr
 ///   OXIBIT_PACK_FLOOR   unsupported | modeled | pnr | fasm | silicon
 ///   OXIBIT_CARRY_DI     lut5 | bypass
+///   OXIBIT_CARRY_FF     sole | shared
 ///   OXIBIT_LUT5_FILL    none, or a comma list of chain, ff_letter, pairs
 ///   OXIBIT_PACK_FOLD    0 | 1
 ///   OXIBIT_FILL_BYPASS  flops on bypass pins per slice, 1..4
@@ -37,6 +38,13 @@ fn pack_policy() -> Result<PackPolicy, String> {
     }
     if let Some(v) = var("OXIBIT_CARRY_DI") {
         pol.carry_di = CarryDi::parse(&v).ok_or_else(|| format!("OXIBIT_CARRY_DI={v}: expected lut5 or bypass"))?;
+    }
+    if let Some(v) = var("OXIBIT_CARRY_FF") {
+        pol.carry_ff = match v.as_str() {
+            "sole" => CarryFf::SoleUser,
+            "shared" => CarryFf::Shared,
+            o => return Err(format!("OXIBIT_CARRY_FF={o}: expected sole or shared")),
+        };
     }
     if let Some(v) = var("OXIBIT_LUT5_FILL") {
         pol.lut5 = Lut5Fill::NONE;

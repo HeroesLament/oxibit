@@ -288,7 +288,7 @@ pub fn pack_with(nl: Netlist, dev: &crate::device::Device, props: &crate::xdc::P
     dsp::pack_dsps(&mut p);
     ffs::pack_ffs(&mut p);
     muxf::finalise_muxfs(&mut p);
-    ffs::pack_lutffs(&mut p);
+    ffs::pack_lutffs(&mut p, plan.carry_ff());
     p.nl.sweep_nets();
     Ok(p)
 }
