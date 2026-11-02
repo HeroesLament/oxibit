@@ -18,8 +18,14 @@ use oxibit_report::{Event, Human, HumanStyle, JsonLines, Progress, Reporter, Sin
 static CANCEL: AtomicBool = AtomicBool::new(false);
 
 fn reporter() -> Reporter {
-    let tty = std::io::stderr().is_terminal() && std::env::var_os("CI").is_none() && std::env::var("TERM").map_or(true, |t| t != "dumb");
-    let style = if tty { HumanStyle::Live } else { HumanStyle::Plain };
+    let tty = std::io::stderr().is_terminal()
+        && std::env::var_os("CI").is_none()
+        && std::env::var("TERM").map_or(true, |t| t != "dumb");
+    let style = if tty {
+        HumanStyle::Live
+    } else {
+        HumanStyle::Plain
+    };
     let mut sinks: Vec<Box<dyn Sink>> = vec![Box::new(Human::new(std::io::stderr(), style))];
     if let Some(p) = std::env::var_os("OXIBIT_EVENTS") {
         match std::fs::File::create(&p) {
@@ -41,7 +47,12 @@ fn main() -> ExitCode {
         return ExitCode::from(3);
     }
     let arg = |i: usize, d: u64| args.get(i).and_then(|s| s.parse().ok()).unwrap_or(d);
-    let threads = arg(3, std::thread::available_parallelism().map(|n| n.get() as u64).unwrap_or(4)) as usize;
+    let threads = arg(
+        3,
+        std::thread::available_parallelism()
+            .map(|n| n.get() as u64)
+            .unwrap_or(4),
+    ) as usize;
     let r = reporter();
     r.emit(Event::Start {
         cmd: "cec".into(),
@@ -61,9 +72,32 @@ fn main() -> ExitCode {
     };
     let names = aiger::output_names(&std::fs::read_to_string(&args[2]).unwrap_or_default());
     r.end("read");
+    // OXIBIT_CEC_SIM_ONLY: list the outputs random simulation refutes, each
+    // with the inputs and latches that are 1 in a refuting pattern, and stop.
+    if std::env::var_os("OXIBIT_CEC_SIM_ONLY").is_some() {
+        let fails = sweep::sim_failures(&g, true);
+        println!("sim_failed {}", fails.len());
+        for (i, pat) in fails {
+            let name = names.get(&i).cloned().unwrap_or_else(|| format!("out{i}"));
+            let ones: Vec<usize> = pat
+                .iter()
+                .enumerate()
+                .filter(|(_, b)| **b)
+                .map(|(k, _)| k + 1)
+                .collect();
+            println!("FAIL {name} vars_set {}", ones.len());
+        }
+        println!("inputs {} latches {}", g.inputs, g.latches);
+        r.finish();
+        return ExitCode::SUCCESS;
+    }
     let (verdict, st) = sweep::prove(&g, true, threads, arg(4, 1000), arg(5, 10_000), &r);
     let count = |v| verdict.iter().filter(|x| **x == v).count();
-    let (p, f, o) = (count(sweep::Verdict::Proven), count(sweep::Verdict::Failed), count(sweep::Verdict::Open));
+    let (p, f, o) = (
+        count(sweep::Verdict::Proven),
+        count(sweep::Verdict::Failed),
+        count(sweep::Verdict::Open),
+    );
     println!("proven {p} failed {f} unproven {o}");
     for (i, v) in verdict.iter().enumerate() {
         let name = names.get(&i).cloned().unwrap_or_else(|| format!("out{i}"));

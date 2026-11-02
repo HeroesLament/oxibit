@@ -26,7 +26,11 @@ impl Aig {
     }
     pub fn fanins(&self, v: u32) -> Option<(u32, u32)> {
         let f = self.first_and();
-        if v >= f { Some(self.ands[(v - f) as usize]) } else { None }
+        if v >= f {
+            Some(self.ands[(v - f) as usize])
+        } else {
+            None
+        }
     }
 }
 
@@ -106,7 +110,14 @@ pub fn output_names(map: &str) -> std::collections::HashMap<usize, String> {
         let f: Vec<&str> = line.split_whitespace().collect();
         if f.len() == 4 && f[0] == "output" {
             if let Ok(i) = f[1].parse() {
-                out.insert(i, if f[2] == "0" { f[3].to_string() } else { format!("{}[{}]", f[3], f[2]) });
+                out.insert(
+                    i,
+                    if f[2] == "0" {
+                        f[3].to_string()
+                    } else {
+                        format!("{}[{}]", f[3], f[2])
+                    },
+                );
             }
         }
     }

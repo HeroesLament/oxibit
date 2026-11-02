@@ -10,6 +10,15 @@
 //! Equal nodes collapse, so an output that is constant collapses to a
 //! constant or is proven by one cheap final call.
 //!
+//! A refuted SAT call leaves a counterexample: an input vector on which
+//! the two nodes differ. Each thread writes its counterexamples, one bit
+//! each, into `XW` extra signature words and simulates them in batches,
+//! which splits the classes they refute. Without that, nodes random
+//! simulation never sets (one-hot decodes, wide compares against
+//! constants) stay in one class and every new one is checked against all
+//! the others. The ring holds fewer patterns than such a design has
+//! never-set nodes, so failed candidate checks per node are capped too.
+//!
 //! Outputs go out in small groups to a pool of threads; each thread has its
 //! own solver and keeps what it has swept across groups.
 //!
@@ -37,6 +46,21 @@ pub const W: usize = 16;
 /// SAT calls per solver before it is recycled.
 const RECYCLE: u64 = 64;
 
+/// Counterexample signature words per variable (`XW` x 64 patterns, reused
+/// round robin).
+pub const XW: usize = 8;
+
+/// Counterexamples gathered before they are simulated.
+const BATCH: u32 = 64;
+
+/// Candidate checks per node that may fail (refuted or out of budget)
+/// before the node joins its class unmerged. Counterexample words are a
+/// ring, so a design with more never-set nodes than patterns keeps them in
+/// one class; without the cap each new one is checked against all the
+/// others. A missed merge costs proving power, never soundness: each
+/// output still gets its own final SAT call.
+const MAX_FAILED: u32 = 8;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
     Proven,
@@ -62,13 +86,39 @@ pub fn simulate(g: &Aig, seed: u64) -> Vec<u64> {
     for (k, &(a, b)) in g.ands.iter().enumerate() {
         let v = first + k;
         let (va, vb) = ((a >> 1) as usize, (b >> 1) as usize);
-        let (ma, mb) = (if a & 1 == 1 { !0 } else { 0 }, if b & 1 == 1 { !0 } else { 0 });
+        let (ma, mb) = (
+            if a & 1 == 1 { !0 } else { 0 },
+            if b & 1 == 1 { !0 } else { 0 },
+        );
         for w in 0..W {
             sig[v * W + w] = (sig[va * W + w] ^ ma) & (sig[vb * W + w] ^ mb);
         }
     }
     sig
 }
+
+/// Outputs random simulation already shows are not constant `want`, with
+/// one refuting pattern each: the value of every input and latch.
+pub fn sim_failures(g: &Aig, want: bool) -> Vec<(usize, Vec<bool>)> {
+    let sig = simulate(g, SEED);
+    let mut out = Vec::new();
+    for (i, &o) in g.outputs.iter().enumerate() {
+        let target = if want { !0 } else { 0 };
+        if let Some((w, bad)) = (0..W)
+            .map(|w| (w, lit_sig(&sig, o, w) ^ target))
+            .find(|(_, b)| *b != 0)
+        {
+            let bit = bad.trailing_zeros();
+            let pat = (1..g.first_and() as usize)
+                .map(|v| (sig[v * W + w] >> bit) & 1 == 1)
+                .collect();
+            out.push((i, pat));
+        }
+    }
+    out
+}
+
+const SEED: u64 = 0x2545_f491_4f6c_dd1d;
 
 fn lit_sig(sig: &[u64], l: u32, w: usize) -> u64 {
     let s = sig[(l >> 1) as usize * W + w];
@@ -106,12 +156,23 @@ struct Sweeper<'a> {
     /// first pattern bit is 0).
     classes: HashMap<u64, Vec<u32>>,
     sat_var: Vec<Option<SLit>>,
+    /// Counterexample signatures: `xsig[v * XW .. (v + 1) * XW]`, inputs
+    /// seeded at random and overwritten bit by bit by counterexamples.
+    xsig: Vec<u64>,
+    /// AND variables visited, in visit (topological) order.
+    order: Vec<u32>,
+    /// Next counterexample bit, and the words written since the last flush.
+    next_bit: usize,
+    dirty: u8,
+    pending: u32,
     solver: Solver,
     /// SAT calls since the solver was last recycled.
     since_reset: u64,
     budget: u64,
     pub sat_calls: u64,
     pub merges: u64,
+    pub refuted: u64,
+    pub flushes: u64,
 }
 
 impl<'a> Sweeper<'a> {
@@ -125,14 +186,104 @@ impl<'a> Sweeper<'a> {
             strash: HashMap::new(),
             classes: HashMap::new(),
             sat_var: vec![None; n],
+            xsig: vec![0; n * XW],
+            order: Vec::new(),
+            next_bit: 0,
+            dirty: 0,
+            pending: 0,
             solver: Self::fresh_solver(),
             since_reset: 0,
             budget,
             sat_calls: 0,
             merges: 0,
+            refuted: 0,
+            flushes: 0,
         };
+        let mut r: u64 = 0x9e37_79b9_7f4a_7c15;
+        for v in 1..g.first_and() as usize {
+            for w in 0..XW {
+                r ^= r << 13;
+                r ^= r >> 7;
+                r ^= r << 17;
+                s.xsig[v * XW + w] = r;
+            }
+        }
         s.reset_solver();
         s
+    }
+
+    /// Every signature word of `v`: random patterns, then counterexamples.
+    fn words(&self, v: u32) -> impl Iterator<Item = u64> + '_ {
+        let v = v as usize;
+        self.sig[v * W..(v + 1) * W]
+            .iter()
+            .chain(&self.xsig[v * XW..(v + 1) * XW])
+            .copied()
+    }
+
+    /// Counterexample words of AND variable `v` from its fanins'.
+    fn xsim(&mut self, v: u32, word: Option<usize>) {
+        let Some((a, b)) = self.g.fanins(v) else {
+            return;
+        };
+        let (va, vb) = ((a >> 1) as usize, (b >> 1) as usize);
+        let (ma, mb) = (
+            if a & 1 == 1 { !0 } else { 0 },
+            if b & 1 == 1 { !0 } else { 0 },
+        );
+        let v = v as usize;
+        let ws = match word {
+            Some(w) => w..w + 1,
+            None => 0..XW,
+        };
+        for w in ws {
+            self.xsig[v * XW + w] = (self.xsig[va * XW + w] ^ ma) & (self.xsig[vb * XW + w] ^ mb);
+        }
+    }
+
+    /// Write the model of the last satisfiable call into the next
+    /// counterexample bit of every input it assigns.
+    fn record_cex(&mut self) {
+        let j = self.next_bit;
+        self.next_bit = (j + 1) % (XW * 64);
+        let (w, bit) = (j / 64, 1u64 << (j % 64));
+        for x in 1..self.g.first_and() as usize {
+            if let Some(l) = self.sat_var[x] {
+                let word = &mut self.xsig[x * XW + w];
+                if SolverInterface::value_lit(&self.solver, l) == lbool::TRUE {
+                    *word |= bit;
+                } else {
+                    *word &= !bit;
+                }
+            }
+        }
+        self.dirty |= 1 << w;
+        self.pending += 1;
+    }
+
+    /// Simulate the counterexamples gathered so far over every visited
+    /// variable and re-sort the classes by the new signatures.
+    fn flush(&mut self) {
+        if self.pending == 0 {
+            return;
+        }
+        let order = std::mem::take(&mut self.order);
+        for w in 0..XW {
+            if self.dirty & (1 << w) != 0 {
+                for &v in &order {
+                    self.xsim(v, Some(w));
+                }
+            }
+        }
+        self.order = order;
+        let members: Vec<u32> = self.classes.drain().flat_map(|(_, m)| m).collect();
+        for m in members {
+            let (h, _) = self.norm(m);
+            self.classes.entry(h).or_default().push(m);
+        }
+        self.dirty = 0;
+        self.pending = 0;
+        self.flushes += 1;
     }
 
     fn fresh_solver() -> Solver {
@@ -163,21 +314,17 @@ impl<'a> Sweeper<'a> {
     fn norm(&self, v: u32) -> (u64, bool) {
         let first = self.sig[v as usize * W] & 1 == 1;
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-        for w in 0..W {
-            let s = self.sig[v as usize * W + w] ^ if first { !0 } else { 0 };
+        for s in self.words(v) {
+            let s = s ^ if first { !0 } else { 0 };
             h = (h ^ s).wrapping_mul(0x0100_0000_01b3);
         }
         (h, first)
     }
 
     fn same_sig(&self, a: u32, b: u32) -> Option<bool> {
-        let (sa, sb) = (
-            &self.sig[a as usize * W..(a as usize + 1) * W],
-            &self.sig[b as usize * W..(b as usize + 1) * W],
-        );
-        if sa == sb {
+        if self.words(a).eq(self.words(b)) {
             Some(false)
-        } else if sa.iter().zip(sb).all(|(x, y)| *x == !*y) {
+        } else if self.words(a).zip(self.words(b)).all(|(x, y)| x == !y) {
             Some(true)
         } else {
             None
@@ -252,6 +399,10 @@ impl<'a> Sweeper<'a> {
         self.solver.cb_mut().limit.set(budget);
         self.sat_calls += 1;
         let r = self.solver.solve_limited(&[t]);
+        if r == lbool::TRUE {
+            self.refuted += 1;
+            self.record_cex();
+        }
         // Retire the activation literal either way.
         self.solver.add_clause_reuse(&mut vec![!t]);
         if r == lbool::FALSE {
@@ -284,9 +435,11 @@ impl<'a> Sweeper<'a> {
             return;
         }
         self.strash.insert((a, b), v << 1);
+        self.xsim(v, None);
+        self.order.push(v);
         // Constant by simulation: try to prove it.
-        let all0 = (0..W).all(|w| self.sig[v as usize * W + w] == 0);
-        let all1 = (0..W).all(|w| self.sig[v as usize * W + w] == !0);
+        let all0 = self.words(v).all(|s| s == 0);
+        let all1 = self.words(v).all(|s| s == !0);
         if all0 || all1 {
             let c = u32::from(all1);
             if self.equal(v << 1, c, self.budget) == Some(true) {
@@ -295,9 +448,18 @@ impl<'a> Sweeper<'a> {
                 return;
             }
         }
+        if self.pending >= BATCH {
+            self.flush();
+        }
         let (h, _) = self.norm(v);
         let cands = self.classes.get(&h).cloned().unwrap_or_default();
+        let mut failed = 0;
         for c in cands {
+            if failed >= MAX_FAILED {
+                break;
+            }
+            // A flush mid-loop changes signatures: candidates the new
+            // counterexamples split off fail this check.
             if let Some(neg) = self.same_sig(v, c) {
                 let cl = (c << 1) | u32::from(neg);
                 if self.equal(v << 1, cl, self.budget) == Some(true) {
@@ -305,8 +467,13 @@ impl<'a> Sweeper<'a> {
                     self.merges += 1;
                     return;
                 }
+                failed += 1;
+                if self.pending >= BATCH {
+                    self.flush();
+                }
             }
         }
+        let (h, _) = self.norm(v);
         self.classes.entry(h).or_default().push(v);
     }
 }
@@ -328,6 +495,10 @@ struct Counters {
     open: AtomicU64,
     sat_calls: AtomicU64,
     merges: AtomicU64,
+    /// Variables swept, refuted SAT calls, counterexample batches.
+    nodes: AtomicU64,
+    refuted: AtomicU64,
+    flushes: AtomicU64,
     last: Mutex<Instant>,
 }
 
@@ -348,6 +519,7 @@ impl Counters {
                 "outputs": l(&self.outputs), "outputs_total": self.outputs_total,
                 "proven": l(&self.proven), "failed": l(&self.failed), "open": l(&self.open),
                 "sat_calls": l(&self.sat_calls), "merges": l(&self.merges),
+                "nodes": l(&self.nodes), "refuted": l(&self.refuted), "flushes": l(&self.flushes),
             }),
         ));
     }
@@ -358,7 +530,14 @@ impl Counters {
 /// "sweep" through `rep`, and stops early when it is cancelled (outputs not
 /// reached stay open).
 #[hot]
-pub fn prove(g: &Aig, want: bool, threads: usize, sweep_budget: u64, final_budget: u64, rep: &dyn Progress) -> (Vec<Verdict>, Stats) {
+pub fn prove(
+    g: &Aig,
+    want: bool,
+    threads: usize,
+    sweep_budget: u64,
+    final_budget: u64,
+    rep: &dyn Progress,
+) -> (Vec<Verdict>, Stats) {
     rep.emit(Event::Phase {
         phase: "simulate".into(),
         state: oxibit_report::PhaseState::Begin,
@@ -376,7 +555,11 @@ pub fn prove(g: &Aig, want: bool, threads: usize, sweep_budget: u64, final_budge
     let mut todo = Vec::new();
     for (i, &o) in g.outputs.iter().enumerate() {
         let ok = (0..W).all(|w| lit_sig(&sig, o, w) == if want { !0 } else { 0 });
-        if ok { todo.push(i) } else { verdict[i] = Verdict::Failed }
+        if ok {
+            todo.push(i)
+        } else {
+            verdict[i] = Verdict::Failed
+        }
     }
     // Small groups of neighbouring outputs (they tend to share logic),
     // handed out to threads as they free up. Each thread keeps its sweeper
@@ -396,6 +579,9 @@ pub fn prove(g: &Aig, want: bool, threads: usize, sweep_budget: u64, final_budge
         open: AtomicU64::new(0),
         sat_calls: AtomicU64::new(0),
         merges: AtomicU64::new(0),
+        nodes: AtomicU64::new(0),
+        refuted: AtomicU64::new(0),
+        flushes: AtomicU64::new(0),
         last: Mutex::new(Instant::now()),
     };
     rep.emit(Event::Phase {
@@ -403,6 +589,7 @@ pub fn prove(g: &Aig, want: bool, threads: usize, sweep_budget: u64, final_budge
         state: oxibit_report::PhaseState::Begin,
         ms: None,
     });
+    ctr.report(rep, true);
     let results: Vec<(Vec<(usize, Verdict)>, u64, u64)> = std::thread::scope(|sc| {
         let hs: Vec<_> = (0..threads)
             .map(|_| {
@@ -411,6 +598,18 @@ pub fn prove(g: &Aig, want: bool, threads: usize, sweep_budget: u64, final_budge
                     let mut sw = Sweeper::new(g, sig, sweep_budget);
                     let mut out = Vec::new();
                     let mut mark = vec![false; g.num_vars()];
+                    // Counter values already added to `ctr`.
+                    let mut seen = (0u64, 0u64, 0u64, 0u64);
+                    let publish = |sw: &Sweeper, seen: &mut (u64, u64, u64, u64)| {
+                        ctr.sat_calls
+                            .fetch_add(sw.sat_calls - seen.0, Ordering::Relaxed);
+                        ctr.merges.fetch_add(sw.merges - seen.1, Ordering::Relaxed);
+                        ctr.refuted
+                            .fetch_add(sw.refuted - seen.2, Ordering::Relaxed);
+                        ctr.flushes
+                            .fetch_add(sw.flushes - seen.3, Ordering::Relaxed);
+                        *seen = (sw.sat_calls, sw.merges, sw.refuted, sw.flushes);
+                    };
                     loop {
                         if rep.cancelled() {
                             break;
@@ -422,7 +621,9 @@ pub fn prove(g: &Aig, want: bool, threads: usize, sweep_budget: u64, final_budge
                         let mut cone = Vec::new();
                         let mut stack: Vec<u32> = grp.iter().map(|&i| g.outputs[i] >> 1).collect();
                         while let Some(v) = stack.pop() {
-                            if sw.visited[v as usize] || std::mem::replace(&mut mark[v as usize], true) {
+                            if sw.visited[v as usize]
+                                || std::mem::replace(&mut mark[v as usize], true)
+                            {
                                 continue;
                             }
                             cone.push(v);
@@ -432,13 +633,20 @@ pub fn prove(g: &Aig, want: bool, threads: usize, sweep_budget: u64, final_budge
                             }
                         }
                         cone.sort_unstable();
-                        let (c0, m0) = (sw.sat_calls, sw.merges);
                         hot_block!("cec.sweep_group", {
-                            for &v in &cone {
+                            for (k, &v) in cone.iter().enumerate() {
                                 sw.visit(v);
                                 mark[v as usize] = false;
+                                if k % 4096 == 4095 {
+                                    ctr.nodes.fetch_add(4096, Ordering::Relaxed);
+                                    publish(&sw, &mut seen);
+                                    ctr.report(rep, false);
+                                }
                             }
                         });
+                        ctr.nodes
+                            .fetch_add((cone.len() % 4096) as u64, Ordering::Relaxed);
+                        sw.flush();
                         for &i in grp {
                             let o = sw.map(g.outputs[i]);
                             let c = u32::from(want);
@@ -464,8 +672,7 @@ pub fn prove(g: &Aig, want: bool, threads: usize, sweep_budget: u64, final_budge
                             ctr.report(rep, false);
                         }
                         ctr.groups.fetch_add(1, Ordering::Relaxed);
-                        ctr.sat_calls.fetch_add(sw.sat_calls - c0, Ordering::Relaxed);
-                        ctr.merges.fetch_add(sw.merges - m0, Ordering::Relaxed);
+                        publish(&sw, &mut seen);
                         ctr.report(rep, false);
                     }
                     (out, sw.sat_calls, sw.merges)
@@ -480,7 +687,10 @@ pub fn prove(g: &Aig, want: bool, threads: usize, sweep_budget: u64, final_budge
         state: oxibit_report::PhaseState::End,
         ms: None,
     });
-    let mut st = Stats { sat_calls: 0, merges: 0 };
+    let mut st = Stats {
+        sat_calls: 0,
+        merges: 0,
+    };
     for (out, c, m) in results {
         st.sat_calls += c;
         st.merges += m;
@@ -494,6 +704,51 @@ pub fn prove(g: &Aig, want: bool, threads: usize, sweep_budget: u64, final_budge
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `k` chains of 24-input ANDs, each with its own input polarities:
+    /// past ten or so inputs no node is ever 1 under random simulation,
+    /// none is constant and no two are equal, so all land in one class.
+    /// Checking each new node against the whole class takes 3.7M SAT
+    /// calls here (815 per AND).
+    #[test]
+    fn counterexamples_split_rare_nodes() {
+        let (n_in, k) = (24u32, 200u32);
+        let mut ands: Vec<(u32, u32)> = Vec::new();
+        let mut outputs = Vec::new();
+        for j in 0..k {
+            let lit = |i: u32| ((i + 1) << 1) | ((j >> (i % 8)) & 1 ^ (i / 8) & 1);
+            let mut acc = lit(0);
+            for i in 1..n_in {
+                let v = n_in + 1 + ands.len() as u32;
+                ands.push((acc, lit(i)));
+                acc = v << 1;
+            }
+            outputs.push(acc ^ 1);
+        }
+        let g = Aig {
+            inputs: n_in,
+            latches: 0,
+            ands,
+            outputs,
+        };
+        let sig = simulate(&g, 7);
+        let mut sw = Sweeper::new(&g, &sig, 1000);
+        for v in 1..g.num_vars() as u32 {
+            sw.visit(v);
+        }
+        sw.flush();
+        eprintln!(
+            "{} SAT calls, {} refuted, {} flushes",
+            sw.sat_calls, sw.refuted, sw.flushes
+        );
+        // At most a constant check and MAX_FAILED candidates per node.
+        let n = g.ands.len() as u64;
+        assert!(
+            sw.sat_calls <= (1 + MAX_FAILED as u64) * n,
+            "{} SAT calls for {n} ANDs",
+            sw.sat_calls
+        );
+    }
 
     /// a & b vs !(!a | !b) built separately: equal; and a & b vs a: not.
     #[test]
