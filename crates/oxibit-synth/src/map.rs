@@ -2,9 +2,12 @@
 //!
 //! Per node, keep the `C` best K-feasible cuts built from the fanins'
 //! cuts. Pass 1 picks for depth; later passes pick for area flow under the
-//! required times of the previous cover, so depth never grows. The cover
-//! is extracted from the outputs, and each chosen cut's function is
-//! computed by simulating its cone over the leaves.
+//! required times of the previous cover, so depth never grows. Then exact
+//! local area passes (ABC's `if -a`): with the cover's exact reference
+//! counts, each covered node takes the candidate whose maximum fanout-free
+//! cone adds the fewest LUTs, still under its required time. The cover is
+//! extracted from the outputs, and each chosen cut's function is computed
+//! by simulating its cone over the leaves.
 
 use oxibit_prof::{hot, hot_block};
 
@@ -109,9 +112,104 @@ struct Mapper<'a> {
     af: Vec<f32>,
     refs: Vec<f32>,
     req: Vec<u32>,
+    /// Exact references of the current cover: LUT leaves plus outputs.
+    nref: Vec<u32>,
+    /// Levels the area passes may add to the depth-optimal cover (0: depth
+    /// never grows). Required times start from the first cover's depth plus
+    /// this, and stay there.
+    slack: u32,
+    target: Option<u32>,
 }
 
 impl<'a> Mapper<'a> {
+    /// The best cut of `l` when `l` is an AND node (a LUT root if used).
+    fn gate(&self, l: usize) -> Option<Cut> {
+        match self.g.nodes[l] {
+            Node::And(..) => self.best[l],
+            _ => None,
+        }
+    }
+
+    /// Reference `c`: the LUTs it brings into the cover (itself and every
+    /// cut its leaves newly need).
+    fn cut_ref(&mut self, c: Cut) -> u32 {
+        let mut area = 0;
+        let mut stack = vec![c];
+        while let Some(c) = stack.pop() {
+            area += 1;
+            for &l in c.leaves() {
+                let li = l as usize;
+                if self.nref[li] == 0
+                    && let Some(b) = self.gate(li)
+                {
+                    stack.push(b);
+                }
+                self.nref[li] += 1;
+            }
+        }
+        area
+    }
+
+    /// Dereference `c`: the LUTs that leave the cover with it.
+    fn cut_deref(&mut self, c: Cut) -> u32 {
+        let mut area = 0;
+        let mut stack = vec![c];
+        while let Some(c) = stack.pop() {
+            area += 1;
+            for &l in c.leaves() {
+                let li = l as usize;
+                self.nref[li] = self.nref[li].checked_sub(1).expect("cover references consistent");
+                if self.nref[li] == 0
+                    && let Some(b) = self.gate(li)
+                {
+                    stack.push(b);
+                }
+            }
+        }
+        area
+    }
+
+    fn arr_of(&self, c: &Cut) -> u32 {
+        c.leaves().iter().map(|&l| self.arr[l as usize]).max().unwrap_or(0) + 1
+    }
+
+    /// Exact local area over the current cover (see the module doc).
+    fn exact_area(&mut self) {
+        for i in 0..self.g.nodes.len() {
+            if !matches!(self.g.nodes[i], Node::And(..)) {
+                continue;
+            }
+            let Some(old) = self.best[i] else { continue };
+            if self.nref[i] == 0 {
+                self.arr[i] = self.arr_of(&old);
+                continue;
+            }
+            self.cut_deref(old);
+            let req = self.req[i];
+            let mut best = old;
+            let mut best_arr = self.arr_of(&old);
+            let mut best_area = u32::MAX;
+            let cands: Vec<Cut> = self.cuts[i].iter().copied().chain(std::iter::once(old)).collect();
+            for c in cands {
+                let a = self.arr_of(&c);
+                if a > req {
+                    continue;
+                }
+                let area = self.cut_ref(c);
+                self.cut_deref(c);
+                if area < best_area || (area == best_area && a < best_arr) {
+                    best = c;
+                    best_area = area;
+                    best_arr = a;
+                }
+            }
+            self.cut_ref(best);
+            best.arr = best_arr;
+            self.best[i] = Some(best);
+            self.arr[i] = best_arr;
+        }
+    }
+
     fn pass(&mut self, goal: Goal) {
         let g = self.g;
         for (i, node) in g.nodes.iter().enumerate() {
@@ -197,8 +295,11 @@ impl<'a> Mapper<'a> {
         }
         // Required times, in reverse topological order.
         self.req.iter_mut().for_each(|r| *r = u32::MAX);
+        // The output requirement: the first (depth-optimal) cover's depth
+        // plus the slack, fixed for every later pass.
+        let target = *self.target.get_or_insert(depth + self.slack);
         for o in outs {
-            self.req[o.node() as usize] = depth;
+            self.req[o.node() as usize] = target;
         }
         for k in (0..n).rev() {
             if !used[k] {
@@ -212,6 +313,12 @@ impl<'a> Mapper<'a> {
                 }
             }
         }
+        // Exact references for the exact-area pass.
+        let mut exact = nrefs.clone();
+        for o in outs {
+            exact[o.node() as usize] += 1;
+        }
+        self.nref = exact;
         // Blend the cover's references into the estimate (as in ABC's if).
         for k in 0..n {
             self.refs[k] = (self.refs[k] + 2.0 * nrefs[k] as f32) / 3.0;
@@ -271,6 +378,9 @@ pub fn map(g: &Aig, outs: &[Lit], area_passes: usize, rep: &dyn oxibit_report::P
         af: vec![0.0; n],
         refs,
         req: vec![u32::MAX; n],
+        nref: vec![0; n],
+        slack: std::env::var("OXIBIT_DEPTH_SLACK").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
+        target: None,
     };
     hot_block!("map.depth", { m.pass(Goal::Depth) });
     let (mut used, mut depth) = m.cover(outs);
@@ -286,6 +396,12 @@ pub fn map(g: &Aig, outs: &[Lit], area_passes: usize, rep: &dyn oxibit_report::P
         hot_block!("map.area", { m.pass(Goal::Area) });
         (used, depth) = m.cover(outs);
         report(&format!("area{}", k + 1), &m.best, &used, depth);
+    }
+    let exact_passes = std::env::var("OXIBIT_EXACT_PASSES").ok().and_then(|v| v.parse().ok()).unwrap_or(0usize);
+    for k in 0..exact_passes {
+        hot_block!("map.exact", { m.exact_area() });
+        (used, depth) = m.cover(outs);
+        report(&format!("exact{}", k + 1), &m.best, &used, depth);
     }
     m.cuts = Vec::new();
     hot_block!("map.tt", {

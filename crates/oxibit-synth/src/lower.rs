@@ -717,6 +717,11 @@ fn add(g: &mut Aig, a: &[Lit], b: &[Lit], mut c: Lit) -> (Vec<Lit>, Lit) {
         let s: Vec<Lit> = (i..j).map(|m| g.xor(a[m], b[m])).collect();
         // DI is the carry when a == b: either operand; prefer a constant.
         let di: Vec<Lit> = (i..j).map(|m| if b[m].is_const() { b[m] } else { a[m] }).collect();
+        if std::env::var_os("OXIBIT_CHAIN_DEBUG").is_some() {
+            let ka = (i..j).filter(|&m| a[m].is_const()).count();
+            let kb = (i..j).filter(|&m| b[m].is_const()).count();
+            eprintln!("chain add len {} a_const {ka} b_const {kb} cin_const {}", j - i, c.is_const());
+        }
         let (o, co) = g.chain(s, di, c);
         out.extend(o);
         c = co;
@@ -801,6 +806,9 @@ fn ult(g: &mut Aig, a: &[Lit], b: &[Lit]) -> Lit {
     if hi - lo >= 3 {
         let s: Vec<Lit> = chunks[lo..hi].iter().map(|p| p.0).collect();
         let di: Vec<Lit> = chunks[lo..hi].iter().map(|p| p.1).collect();
+        if std::env::var_os("OXIBIT_CHAIN_DEBUG").is_some() {
+            eprintln!("chain cmp len {} bits {}", hi - lo, a.len());
+        }
         let (_, co) = g.chain(s, di, c);
         c = co;
     } else {
