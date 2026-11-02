@@ -25,6 +25,7 @@ fn read(path: &str) -> Result<Value, String> {
 ///   OXIBIT_FILL_BYPASS  flops on bypass pins per slice, 1..4
 ///   OXIBIT_PLACE_PIN_CAP / _PIN_WEIGHT  input pins per CLB tile over which each costs WEIGHT
 ///   OXIBIT_PLACE_BYP_CAP / _BYP_WEIGHT  the same for bypass pins (8 per tile)
+///   OXIBIT_PLACE_DENSITY / _DENSITY_WEIGHT / _DENSITY_BIN  used-slice share per bin over which each slice costs WEIGHT
 fn pack_policy() -> Result<PackPolicy, String> {
     let var = |k: &str| std::env::var(k).ok();
     let mut pol = match var("OXIBIT_PACK_POLICY").as_deref() {
@@ -75,6 +76,15 @@ fn pack_policy() -> Result<PackPolicy, String> {
     }
     if let Some(w) = num("OXIBIT_PLACE_BYP_WEIGHT")? {
         pol.objective.bypass.weight = w;
+    }
+    if let Some(t) = num("OXIBIT_PLACE_DENSITY")? {
+        pol.objective.density.target = t;
+    }
+    if let Some(w) = num("OXIBIT_PLACE_DENSITY_WEIGHT")? {
+        pol.objective.density.weight = w;
+    }
+    if let Some(b) = num("OXIBIT_PLACE_DENSITY_BIN")? {
+        pol.objective.density.bin = b as i32;
     }
     Ok(pol)
 }
@@ -136,6 +146,7 @@ fn run() -> Result<bool, String> {
         }
         opts.pins = plan.objective().pins;
         opts.bypass = plan.objective().bypass;
+        opts.density = plan.objective().density;
         let ps = oxibit_place::placer::place(&mut p, &dev, &sites, macros, &opts)?;
         println!("{}", json!({"hpwl_measured": oxibit_place::placer::hpwl(&p, 200)}));
         let lg = place::legalise(&mut p, &place::ps7_inputs(std::path::Path::new(meta))?);
@@ -156,6 +167,8 @@ fn run() -> Result<bool, String> {
                                        "tiles_over_cap": ps.tiles_over_cap, "tile_max": ps.tile_pins_max, "bypass_ffs_per_slice": fopts.bypass_ffs_per_slice},
                               "bypass": {"cap": opts.bypass.cap, "weight": opts.bypass.weight, "excess_start": ps.bypass_excess_start, "excess_end": ps.bypass_excess_end,
                                          "tiles_over_cap": ps.bypass_tiles_over_cap, "tile_max": ps.bypass_tile_max, "fill_clashes": ps.bypass_clashes},
+                              "density": {"bin": opts.density.bin, "target": opts.density.target, "weight": opts.density.weight,
+                                          "excess_start": ps.density_excess_start, "excess_end": ps.density_excess_end, "bins_over": ps.density_bins_over},
                               "steps": ps.trace.len(), "trace": ps.trace.iter().step_by((ps.trace.len() / 25).max(1)).map(|t| json!([(t.0 * 100.0).round() / 100.0, t.1.round(), (t.2 * 1000.0).round() / 1000.0, t.3])).collect::<Vec<_>>(), "unplaced": unplaced.len(),
                               "unplaced_examples": unplaced.iter().take(6).collect::<Vec<_>>(), "fractured": lg.fractured, "over_five": lg.over_five.len()}})
         );

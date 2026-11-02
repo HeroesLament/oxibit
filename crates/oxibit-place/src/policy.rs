@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 pub use oxibit_policy::{Caps, Level, Outcome, PassRecord, Status};
 use serde_json::{Value, json};
 
-use crate::placer::{FillOptions, PinCost};
+use crate::placer::{DensityCost, FillOptions, PinCost};
 
 /// A slice configuration packing can produce.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -162,6 +162,8 @@ pub struct PlaceObjective {
     pub pins: PinCost,
     /// Bypass pins per CLB tile (AX..DX of both slices, 8).
     pub bypass: PinCost,
+    /// Used slices per region.
+    pub density: DensityCost,
 }
 
 impl PlaceObjective {
@@ -169,6 +171,7 @@ impl PlaceObjective {
     pub const WIRELENGTH: PlaceObjective = PlaceObjective {
         pins: PinCost::OFF_PINS,
         bypass: PinCost::OFF_BYPASS,
+        density: DensityCost::OFF,
     };
 }
 
@@ -293,7 +296,8 @@ impl PackPlan {
         json!({"carry_di": format!("{:?}", self.carry_di), "carry_ff": format!("{:?}", self.carry_ff), "fold": self.fold,
                "bypass_ffs_per_slice": self.fill.bypass_ffs_per_slice, "strategies": by_name,
                "objective": {"pins": [self.objective.pins.cap, self.objective.pins.weight],
-                             "bypass": [self.objective.bypass.cap, self.objective.bypass.weight]}})
+                             "bypass": [self.objective.bypass.cap, self.objective.bypass.weight],
+                             "density": [self.objective.density.bin as f64, self.objective.density.target, self.objective.density.weight]}})
     }
 }
 

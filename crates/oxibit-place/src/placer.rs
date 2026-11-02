@@ -13,7 +13,8 @@
 //!    content and hard block (DSP, block RAM) by simulated annealing on
 //!    half-perimeter wirelength, moves within a shrinking window, plus a
 //!    cost on each CLB tile's input pins over `Options::pins` and on its
-//!    bypass pins over `Options::bypass`.
+//!    bypass pins over `Options::bypass`, and on each region's used
+//!    slices over `Options::density`.
 //! 3. Bels written to the netlist (`Cell::bel`), ready for `place::legalise`.
 //!
 //!    A lone LUT (no flop of its own) shares a letter with another LUT when
@@ -909,6 +910,11 @@ pub struct PlaceStats {
     pub bypass_tile_max: u32,
     /// Fills that ask two nets of one bypass pin (a packing bug if not 0).
     pub bypass_clashes: usize,
+    /// Used slices over the density target, summed over bins, before and
+    /// after; bins over the target after.
+    pub density_excess_start: f64,
+    pub density_excess_end: f64,
+    pub density_bins_over: usize,
 }
 
 /// A small, fast, seeded PRNG (xorshift64*).
@@ -955,6 +961,27 @@ pub struct Options {
     /// Bypass pins (AX..DX of both slices, 8) per CLB tile: the pin class
     /// the router's plateau is made of (BYP, BYP_ALT, BYP_BOUNCE).
     pub bypass: PinCost,
+    /// Used slices per region over a target share of its slice sites.
+    pub density: DensityCost,
+}
+
+/// Slice density per region: the die cut into `bin` x `bin` tile bins,
+/// each used slice above `target` of a bin's slice sites costs `weight`
+/// tiles of wirelength; `weight` 0 is off. Wirelength alone pulls the
+/// design into one block at the centre of the die; this spreads it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DensityCost {
+    pub bin: i32,
+    pub target: f64,
+    pub weight: f64,
+}
+
+impl DensityCost {
+    pub const OFF: DensityCost = DensityCost { bin: 8, target: 1.0, weight: 0.0 };
+
+    pub fn on(&self) -> bool {
+        self.weight != 0.0
+    }
 }
 
 /// One class of a tile's input pins: each pin over `cap` costs `weight`
@@ -1023,7 +1050,7 @@ impl std::ops::Neg for Delta {
 
 impl Default for Options {
     fn default() -> Self {
-        Options { seed: 1, inner: 20, max_fanout: 200, max_moves_per_obj: 3000, t0_scale: 24.0, unit_frac: 0.5, unit_window: 4.0, polish: 0, pins: PinCost::OFF_PINS, bypass: PinCost::OFF_BYPASS }
+        Options { seed: 1, inner: 20, max_fanout: 200, max_moves_per_obj: 3000, t0_scale: 24.0, unit_frac: 0.5, unit_window: 4.0, polish: 0, pins: PinCost::OFF_PINS, bypass: PinCost::OFF_BYPASS, density: DensityCost::OFF }
     }
 }
 
@@ -1310,6 +1337,33 @@ pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, op
         .map(|f| crate::slice::bypass_claims(p, &f.cells).1.len())
         .sum();
     let (pin_cost, byp_cost) = (opts.pins, opts.bypass);
+    // Slice density per bin.
+    let dens = opts.density;
+    let bsz = dens.bin.max(1);
+    let mut bin_ids: HashMap<(i32, i32), u32> = HashMap::new();
+    let site_bin: Vec<u32> = sites
+        .slices
+        .iter()
+        .map(|s| {
+            let next = bin_ids.len() as u32;
+            *bin_ids.entry((s.x / bsz, s.y / bsz)).or_insert(next)
+        })
+        .collect();
+    let mut bin_cap = vec![0u32; bin_ids.len()];
+    for &b in &site_bin {
+        bin_cap[b as usize] += 1;
+    }
+    let mut bin_load = vec![0u32; bin_ids.len()];
+    for o in 0..n {
+        if objs[o].kind == Kind::Slice {
+            for &s in &objs[o].sites {
+                bin_load[site_bin[s] as usize] += 1;
+            }
+        }
+    }
+    let bin_excess = |b: usize, load: u32| -> f64 { (f64::from(load) - dens.target * f64::from(bin_cap[b])).max(0.0) };
+    let total_dens = |bl: &[u32]| -> f64 { bl.iter().enumerate().map(|(b, &l)| bin_excess(b, l)).sum() };
+    st.density_excess_start = total_dens(&bin_load);
     let total_excess = |tl: &[Load]| -> (u64, u64) {
         tl.iter().fold((0, 0), |(a, b), l| (a + u64::from(pin_cost.excess(l.all)), b + u64::from(byp_cost.excess(l.x))))
     };
@@ -1639,11 +1693,48 @@ pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, op
                     changes.push((site_tile[old_run[0]], pins));
                 }
             }
+            // Bin loads: this object's slices leave their bins for the new
+            // run's; a swapped slice goes the other way.
+            let mut dchg: Vec<(u32, i32)> = Vec::new();
+            if k == Kind::Slice && dens.on() {
+                for &s in &old_run {
+                    dchg.push((site_bin[s], -1));
+                }
+                for &s in &new_run {
+                    dchg.push((site_bin[s], 1));
+                }
+                if other.is_some() {
+                    dchg.push((site_bin[new_run[0]], -1));
+                    dchg.push((site_bin[old_run[0]], 1));
+                }
+            }
+            let ddens = if dchg.is_empty() {
+                0.0
+            } else {
+                let mut merged: Vec<(u32, i32)> = Vec::new();
+                for &(b, d) in &dchg {
+                    match merged.iter_mut().find(|m| m.0 == b) {
+                        Some(m) => m.1 += d,
+                        None => merged.push((b, d)),
+                    }
+                }
+                merged
+                    .iter()
+                    .map(|&(b, d)| {
+                        let l = bin_load[b as usize];
+                        bin_excess(b as usize, (i64::from(l) + i64::from(d)).max(0) as u32) - bin_excess(b as usize, l)
+                    })
+                    .sum::<f64>()
+                    * dens.weight
+            };
             let dpin = pin_delta(&tile_load, &changes);
-            if delta + dpin <= 0.0 || rng.unit() < (-(delta + dpin) / temp).exp() {
+            if delta + dpin + ddens <= 0.0 || rng.unit() < (-(delta + dpin + ddens) / temp).exp() {
                 accepted += 1;
                 total += delta;
                 apply(&mut tile_load, &changes);
+                for &(b, d) in &dchg {
+                    bin_load[b as usize] = (i64::from(bin_load[b as usize]) + i64::from(d)).max(0) as u32;
+                }
                 for &s in &old_run {
                     owner[ki][s] = None;
                 }
@@ -1711,6 +1802,8 @@ pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, op
     }
     st.hpwl_end = total;
     (st.pin_excess_end, st.bypass_excess_end) = total_excess(&tile_load);
+    st.density_excess_end = total_dens(&bin_load);
+    st.density_bins_over = bin_load.iter().enumerate().filter(|&(b, &l)| bin_excess(b, l) > 0.0).count();
     st.tiles_over_cap = tile_load.iter().filter(|l| l.all > pin_cost.cap).count();
     st.tile_pins_max = tile_load.iter().map(|l| l.all).max().unwrap_or(0);
     st.bypass_tiles_over_cap = tile_load.iter().filter(|l| l.x > byp_cost.cap).count();
