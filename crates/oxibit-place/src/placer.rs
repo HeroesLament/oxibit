@@ -2405,21 +2405,7 @@ pub fn place_with(
             }
         }
     }
-    let mut bufg = sites.bufg.iter();
-    for c in p.nl.cells_of("BUFGCTRL") {
-        if p.nl.cell(c).bel.is_none()
-            && let Some(s) = bufg.next()
-        {
-            p.nl.cell_mut(c).bel = Some(Loc::Grid {
-                x: s.x,
-                y: s.y,
-                site: s.rel.clone(),
-                bel: "BUFGCTRL".into(),
-            });
-        }
-    }
-    // MMCMs: MMCME2_ADV_X0Y0 first (nextpnr's choice for a clock it feeds
-    // to the BUFGs above it), then the rest in device order.
+    // MMCMs: MMCME2_ADV_X0Y0 first, then the rest in device order.
     let mut mmcm: Vec<&HardSite> = sites.mmcm.iter().collect();
     mmcm.sort_by_key(|s| (s.rel != "MMCME2_ADV_X0Y0", s.rel.clone()));
     let mut mmcm = mmcm.into_iter();
@@ -2434,6 +2420,43 @@ pub fn place_with(
                 bel: "MMCME2_ADV".into(),
             });
         }
+    }
+    // BUFGs. An MMCM reaches only the BUFG bank of its own half of the die
+    // (through its clock region's HROW), so a BUFG an MMCM output feeds goes
+    // in the bank nearest that MMCM; any other BUFG takes a free site. With
+    // the BUFGs in device order, picoBEAM's pb_clk BUFG sat in the top bank
+    // and its MMCM (X0Y0) in the bottom half: no route existed.
+    let mut free: Vec<&HardSite> = sites.bufg.iter().collect();
+    let mut bufgs = p.nl.cells_of("BUFGCTRL");
+    // Those an MMCM feeds first, so they get their bank.
+    let mmcm_y = |p: &Packer, c: CellId| -> Option<i32> {
+        ["I0", "I1"].iter().find_map(|port| {
+            let n = p.nl.cell(c).net(port)?;
+            let (d, _) = p.nl.driver(n)?;
+            match &p.nl.cell(d).bel {
+                Some(Loc::Grid { y, .. }) if p.nl.cell(d).ty == "MMCME2_ADV_MMCME2_ADV" => Some(*y),
+                _ => None,
+            }
+        })
+    };
+    bufgs.sort_by_key(|&c| mmcm_y(p, c).is_none());
+    for c in bufgs {
+        if p.nl.cell(c).bel.is_some() || free.is_empty() {
+            continue;
+        }
+        let k = match mmcm_y(p, c) {
+            Some(y) => (0..free.len())
+                .min_by_key(|&k| ((free[k].y - y).abs(), k))
+                .expect("non-empty"),
+            None => 0,
+        };
+        let s = free.remove(k);
+        p.nl.cell_mut(c).bel = Some(Loc::Grid {
+            x: s.x,
+            y: s.y,
+            site: s.rel.clone(),
+            bel: "BUFGCTRL".into(),
+        });
     }
     for c in p.nl.cells_of("PS7_PS7") {
         if let Some(s) = sites.ps7.first() {
