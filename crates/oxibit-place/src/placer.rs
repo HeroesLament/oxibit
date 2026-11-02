@@ -62,6 +62,7 @@ pub struct Sites {
     pub ramb18: Vec<HardSite>,
     pub bufg: Vec<HardSite>,
     pub ps7: Vec<HardSite>,
+    pub mmcm: Vec<HardSite>,
 }
 
 impl Sites {
@@ -104,6 +105,12 @@ impl Sites {
                 for (site, ty) in &t.sites {
                     if ty == "BUFGCTRL" {
                         s.bufg.push(HardSite { x: t.grid_x, y: t.grid_y, rel: rel(site), tile: 0 });
+                    }
+                }
+            } else if t.sites.values().any(|ty| ty == "MMCME2_ADV") {
+                for (site, ty) in &t.sites {
+                    if ty == "MMCME2_ADV" {
+                        s.mmcm.push(HardSite { x: t.grid_x, y: t.grid_y, rel: rel(site), tile: 0 });
                     }
                 }
             } else if t.sites.values().any(|ty| ty == "PS7") {
@@ -1094,9 +1101,11 @@ pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, op
         }
     }
 
-    // Logic slices as letters: [6LUT, FF, 5FF] per letter.
+    // Logic slices as letters: [6LUT, FF, 5FF, 5LUT] per letter. A letter
+    // holding a 5LUT stays where the fill put it (its two LUTs share the
+    // A pins); unit moves leave it alone.
     const NONE: u32 = u32::MAX;
-    let mut letters: Vec<[[u32; 3]; 4]> = vec![[[NONE; 3]; 4]; n];
+    let mut letters: Vec<[[u32; 4]; 4]> = vec![[[NONE; 4]; 4]; n];
     let mut is_logic: Vec<bool> = vec![false; n];
     for (o, f) in fills.iter().enumerate() {
         if f.len() != 1 || !f[0].logic {
@@ -1109,6 +1118,7 @@ pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, op
                 "6LUT" => 0,
                 "FF" => 1,
                 "5FF" => 2,
+                "5LUT" => 3,
                 _ => continue,
             };
             letters[o][l][slot] = cidx[c];
@@ -1159,9 +1169,18 @@ pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, op
         .iter()
         .map(|&c| if p.nl.cell(c).ty == "SLICE_LUTX" { (1..=6).filter(|i| live(c, &format!("A{i}"))).count() as u32 } else { 0 })
         .collect();
-    let logic_pins = |lt: &[[u32; 3]; 4]| -> u32 {
+    let logic_pins = |lt: &[[u32; 4]; 4]| -> u32 {
         lt.iter()
-            .map(|&[lut, ff, ff2]| (if lut != NONE { lut_pins[lut as usize] } else { 0 }) + u32::from(ff != NONE && !fed_by(lut, ff)) + u32::from(ff2 != NONE))
+            .map(|&[lut, ff, ff2, l5]| {
+                // two LUTs on one letter share A1..A5
+                let luts = match (lut != NONE, l5 != NONE) {
+                    (true, true) => (lut_pins[lut as usize] + lut_pins[l5 as usize]).min(5),
+                    (true, false) => lut_pins[lut as usize],
+                    (false, true) => lut_pins[l5 as usize],
+                    (false, false) => 0,
+                };
+                luts + u32::from(ff != NONE && !fed_by(lut, ff)) + u32::from(ff2 != NONE)
+            })
             .sum()
     };
     let fill_pins = |f: &Fill| -> u32 {
@@ -1375,8 +1394,8 @@ pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, op
             if unit_move {
                 // Source letter and what moves.
                 let la = rng.below(4);
-                let [lut_a, ff_a, _] = letters[oi][la];
-                if lut_a == NONE {
+                let [lut_a, ff_a, _, l5_a] = letters[oi][la];
+                if lut_a == NONE || l5_a != NONE {
                     continue;
                 }
                 let pair_a = fed_by(lut_a, ff_a);
@@ -1385,7 +1404,10 @@ pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, op
                     continue;
                 }
                 let lb = rng.below(4);
-                let [lut_b, ff_b, ff2_b] = letters[oj][lb];
+                let [lut_b, ff_b, ff2_b, l5_b] = letters[oj][lb];
+                if l5_b != NONE {
+                    continue;
+                }
                 let pair_b = fed_by(lut_b, ff_b);
                 // Legal shapes: lone LUT <-> lone LUT or empty LUT slot; pair
                 // <-> pair of the same control set, or pair -> empty letter
@@ -1646,7 +1668,7 @@ pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, op
                         if ci == NONE {
                             continue;
                         }
-                        let bel = format!("{}{}", letter(l as i32), ["6LUT", "FF", "5FF"][slot]);
+                        let bel = format!("{}{}", letter(l as i32), ["6LUT", "FF", "5FF", "5LUT"][slot]);
                         p.nl.cell_mut(cells[ci as usize]).bel = Some(Loc::Grid { x: s.x, y: s.y, site: s.rel.clone(), bel });
                     }
                 }
@@ -1680,6 +1702,18 @@ pub fn place(p: &mut Packer, dev: &Device, sites: &Sites, macros: Vec<Macro>, op
             && let Some(s) = bufg.next()
         {
             p.nl.cell_mut(c).bel = Some(Loc::Grid { x: s.x, y: s.y, site: s.rel.clone(), bel: "BUFGCTRL".into() });
+        }
+    }
+    // MMCMs: MMCME2_ADV_X0Y0 first (nextpnr's choice for a clock it feeds
+    // to the BUFGs above it), then the rest in device order.
+    let mut mmcm: Vec<&HardSite> = sites.mmcm.iter().collect();
+    mmcm.sort_by_key(|s| (s.rel != "MMCME2_ADV_X0Y0", s.rel.clone()));
+    let mut mmcm = mmcm.into_iter();
+    for c in p.nl.cells_of("MMCME2_ADV_MMCME2_ADV") {
+        if p.nl.cell(c).bel.is_none()
+            && let Some(s) = mmcm.next()
+        {
+            p.nl.cell_mut(c).bel = Some(Loc::Grid { x: s.x, y: s.y, site: s.rel.clone(), bel: "MMCME2_ADV".into() });
         }
     }
     for c in p.nl.cells_of("PS7_PS7") {
