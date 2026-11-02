@@ -7,6 +7,7 @@
 //!     DB_ROOT PART META_DIR PLACED.json OUT.fasm
 //!
 //! OXIBIT_DELAY_WEIGHT=w (0..=1): the router's `Opts::delay_weight`.
+//! OXIBIT_REGIONS=RXxRY / OXIBIT_THREADS=n: `Opts::regions` / `Opts::threads`.
 //! OXIBIT_BBOX_MARGIN=m: the router's `Opts::bbox_margin` (negative: no box).
 //! OXIBIT_ASTAR=a: the router's `Estimate::per_tile`.
 //! OXIBIT_PRES_FAC / OXIBIT_PRES_GROWTH / OXIBIT_PRES_MAX: the router's
@@ -81,6 +82,16 @@ fn run() -> Result<bool, String> {
     }
     if let Some(n) = std::env::var("OXIBIT_MAX_ITERS").ok().and_then(|n| n.parse().ok()) {
         opts.max_iters = n;
+    }
+    // OXIBIT_REGIONS=RXxRY: parallel routing over an RX x RY grid (needs
+    // OXIBIT_BBOX_MARGIN >= 0); OXIBIT_THREADS: its workers (0 = all cores).
+    if let Ok(v) = std::env::var("OXIBIT_REGIONS") {
+        let (rx, ry) = v.split_once('x').ok_or_else(|| format!("OXIBIT_REGIONS={v}: want RXxRY"))?;
+        let parse = |t: &str| t.parse::<u16>().map_err(|e| format!("OXIBIT_REGIONS={v}: {e}"));
+        opts.regions = Some((parse(rx)?, parse(ry)?));
+    }
+    if let Some(t) = std::env::var("OXIBIT_THREADS").ok().and_then(|t| t.parse().ok()) {
+        opts.threads = t;
     }
     let envf = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<f32>().ok());
     let oxibit_pnr::router::Schedule::Geometric { mut p0, mut growth, mut cap } = opts.schedule;
