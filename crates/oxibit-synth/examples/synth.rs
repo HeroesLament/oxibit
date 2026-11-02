@@ -130,6 +130,7 @@ fn main() -> ExitCode {
     p.srl = env_on("OXIBIT_SRL", p.srl);
     p.balance = env_on("OXIBIT_BALANCE", p.balance);
     p.muxpack = env_on("OXIBIT_MUXPACK", p.muxpack);
+    p.onehot = env_on("OXIBIT_ONEHOT", p.onehot);
     p.iopad = env_on("OXIBIT_IOPAD", p.iopad);
     p.ffmerge = env_on("OXIBIT_FFMERGE", p.ffmerge);
     let caps = DeviceCaps::xc7z020();

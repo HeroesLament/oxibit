@@ -16,6 +16,7 @@ pub use oxibit_policy::{EvidenceLevel, PostCheckEvidence};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PassSet {
     pub memports: bool,
+    pub onehot: bool,
     pub muxpack: bool,
     pub dsp: bool,
     pub balance: bool,
@@ -28,6 +29,7 @@ pub struct PassSet {
 impl PassSet {
     pub const ALL: PassSet = PassSet {
         memports: true,
+        onehot: true,
         muxpack: true,
         dsp: true,
         balance: true,
