@@ -237,6 +237,83 @@ pub fn outmux_check(p: &Packer) -> Vec<String> {
         .collect()
 }
 
+/// A slice's flops share one clock, one CE and one SR (and their
+/// inversions, latch mode and SR synchronism): what a flop needs of them.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct FfCtrl {
+    clk: Option<u32>,
+    ce: Option<u32>,
+    sr: Option<u32>,
+    clk_inv: bool,
+    sr_inv: bool,
+    latch: bool,
+    sync: bool,
+}
+
+fn ff_ctrl(p: &Packer, c: CellId) -> FfCtrl {
+    let cell = p.nl.cell(c);
+    let inv = |k: &str| cell.int_param(k).unwrap_or(0) != 0;
+    FfCtrl {
+        clk: cell.net("CK").map(|n| n.0),
+        ce: cell.net("CE").map(|n| n.0),
+        sr: cell.net("SR").map(|n| n.0),
+        clk_inv: inv("IS_C_INVERTED"),
+        sr_inv: inv("IS_R_INVERTED")
+            || inv("IS_S_INVERTED")
+            || inv("IS_CLR_INVERTED")
+            || inv("IS_PRE_INVERTED"),
+        latch: cell.attrs.contains_key("X_FF_AS_LATCH"),
+        sync: cell.attrs.contains_key("X_FFSYNC"),
+    }
+}
+
+/// Every slice in a placed design whose flops need more than one control
+/// set, as `X{x}Y{y}/{site}: n sets (which fields differ)`. Routing cannot
+/// fix one: the slice's CE or SR pin would carry two nets (or a net and a
+/// tie), which the router reports as a node it never clears.
+pub fn ctrl_check(p: &Packer) -> Vec<String> {
+    let mut by_site: BTreeMap<(i32, i32, String), Vec<CellId>> = BTreeMap::new();
+    for c in p.nl.cell_ids() {
+        if let Some(Loc::Grid { x, y, site, .. }) = &p.nl.cell(c).bel
+            && site.starts_with("SLICE")
+            && p.nl.cell(c).ty == "SLICE_FFX"
+        {
+            by_site.entry((*x, *y, site.clone())).or_default().push(c);
+        }
+    }
+    let mut out = Vec::new();
+    for ((x, y, site), ffs) in by_site {
+        let mut sets: Vec<FfCtrl> = ffs.iter().map(|&c| ff_ctrl(p, c)).collect();
+        sets.sort();
+        sets.dedup();
+        if sets.len() > 1 {
+            let a = &sets[0];
+            let differ: Vec<&str> = sets[1..]
+                .iter()
+                .flat_map(|b| {
+                    [
+                        (a.clk != b.clk, "clk"),
+                        (a.ce != b.ce, "ce"),
+                        (a.sr != b.sr, "sr"),
+                        (a.clk_inv != b.clk_inv, "clk_inv"),
+                        (a.sr_inv != b.sr_inv, "sr_inv"),
+                        (a.latch != b.latch, "latch"),
+                        (a.sync != b.sync, "sync"),
+                    ]
+                })
+                .filter(|(d, _)| *d)
+                .map(|(_, n)| n)
+                .collect();
+            out.push(format!(
+                "X{x}Y{y}/{site}: {} sets ({})",
+                sets.len(),
+                differ.join(",")
+            ));
+        }
+    }
+    out
+}
+
 /// Every slice in a placed design whose cells ask two nets of one bypass
 /// pin, by site (`X{x}Y{y}/{site}`).
 pub fn check(p: &Packer) -> Vec<(String, Clash)> {

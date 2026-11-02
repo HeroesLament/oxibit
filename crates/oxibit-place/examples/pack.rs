@@ -268,6 +268,11 @@ fn run_with(args: &[String], r: &oxibit_report::Reporter) -> Result<bool, String
                 .collect();
         let clashes = oxibit_place::slice::check(&p);
         let outmux = oxibit_place::slice::outmux_check(&p);
+        let ctrl = oxibit_place::slice::ctrl_check(&p);
+        println!(
+            "{}",
+            json!({"ctrl_check": {"clashes": ctrl.len(), "examples": ctrl.iter().take(6).collect::<Vec<_>>()}})
+        );
         println!(
             "{}",
             json!({"outmux_check": {"clashes": outmux.len(), "examples": outmux.iter().take(6).collect::<Vec<_>>()}})
@@ -275,7 +280,8 @@ fn run_with(args: &[String], r: &oxibit_report::Reporter) -> Result<bool, String
         ok = unplaced.is_empty()
             && lg.over_five.is_empty()
             && clashes.is_empty()
-            && outmux.is_empty();
+            && outmux.is_empty()
+            && ctrl.is_empty();
         let shown: Vec<String> = clashes
             .iter()
             .take(6)
