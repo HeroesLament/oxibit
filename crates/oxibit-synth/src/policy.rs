@@ -17,6 +17,7 @@ pub use oxibit_policy::{EvidenceLevel, PostCheckEvidence};
 pub struct PassSet {
     pub memports: bool,
     pub onehot: bool,
+    pub regbank: bool,
     pub muxpack: bool,
     pub dsp: bool,
     pub balance: bool,
@@ -30,6 +31,7 @@ impl PassSet {
     pub const ALL: PassSet = PassSet {
         memports: true,
         onehot: true,
+        regbank: true,
         muxpack: true,
         dsp: true,
         balance: true,
@@ -63,7 +65,9 @@ impl Policy {
     /// Development: anything oxibit-pnr can place, any tested pass.
     pub fn exploration() -> Self {
         Policy {
-            passes: PassSet::ALL,
+            // regbank has no equivalence check yet (the check view holds
+            // memories where the source holds registers): opt in.
+            passes: PassSet { regbank: false, ..PassSet::ALL },
             floor: Level::PnrSupported,
             evidence: EvidenceLevel::Inspection,
             area_passes: 2,

@@ -31,6 +31,7 @@ pub mod memports;
 pub mod muxchain;
 pub mod onehot;
 pub mod policy;
+pub mod regbank;
 pub mod srl;
 pub mod stage;
 
@@ -64,6 +65,7 @@ pub struct Report {
     pub muxpack: muxchain::MuxChainStats,
     pub memports: memports::MemPortsStats,
     pub onehot: onehot::OneHotStats,
+    pub regbank: regbank::RegBankStats,
     /// Every optional pass: ran, disabled or refused, with its evidence.
     pub passes: Vec<PassRecord>,
     pub lower_ms: u64,
@@ -105,9 +107,10 @@ pub fn synth(m: &Module, dirs: &lib_ports::PrimPorts, caps: &DeviceCaps, policy:
 
     rep.emit(phase("prepare", true));
     let mut rtl = Rtl::new(m.clone());
+    let oh = flow.rtl(&onehot::OneHotSums, &mut rtl);
+    let rb = flow.rtl(&regbank::RegBank, &mut rtl);
     let mem_rd_ff = flow.rtl(&memdff::MemDff, &mut rtl);
     let memp = flow.rtl(&memports::MemPorts, &mut rtl);
-    let oh = flow.rtl(&onehot::OneHotSums, &mut rtl);
     let mc = flow.rtl(&muxchain::MuxPack, &mut rtl);
     let ds = flow.rtl(
         &dsp::Dsp {
@@ -200,6 +203,7 @@ pub fn synth(m: &Module, dirs: &lib_ports::PrimPorts, caps: &DeviceCaps, policy:
         muxpack: mc,
         memports: memp,
         onehot: oh,
+        regbank: rb,
         passes: flow.records,
         lower_ms: (t1 - t0).as_millis() as u64,
         map_ms: (t2 - t1).as_millis() as u64,
