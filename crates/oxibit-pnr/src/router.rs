@@ -117,14 +117,8 @@ pub struct Opts {
     /// so a net that stays congested soon searches unbounded. Negative:
     /// no box.
     pub bbox_margin: i32,
-    /// Aim the A* heuristic at where a sink is entered from the routing
-    /// (the configurable muxes its fixed chain leads back to), not at the
-    /// sink node's own tile: a PS7 pin's node runs across the PSS tiles,
-    /// tens of tiles from its interconnect.
-    /// Off by default: on the PHY placement it cut iteration time 6-12%
-    /// but left the single-sink floods; on spi_probe it doubled the pops of
-    /// iteration 1.
-    pub entry_aim: bool,
+    /// Where the A* heuristic aims for a sink (`EntryAim`).
+    pub entry_aim: EntryAim,
     /// After routing, write the nodes still used by two or more nets
     /// (name, occupancy, history) to this file.
     pub overuse_dump: Option<String>,
@@ -153,12 +147,33 @@ impl Default for Opts {
             delay_norm: 100.0,
             astar_delay: 0.3,
             bbox_margin: -1,
-            entry_aim: false,
+            entry_aim: EntryAim::Ps7Pins,
             overuse_dump: None,
             regions: None,
             threads: 0,
         }
     }
+}
+
+/// Where the A* heuristic aims for a sink: at the sink node's own tile, or
+/// at where the routing enters it (the configurable muxes its fixed chain
+/// leads back to, `Core::aims`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryAim {
+    /// The sink node's own tile, for every sink.
+    Own,
+    /// The entry for PS7 pins (a node with a wire in a PSS tile), the own
+    /// tile for every other sink. A PS7 pin's node runs across the PSS
+    /// tiles, tens of tiles from the interconnect that drives it, so aiming
+    /// at its anchor sends the search the wrong way: on the mimohalow board
+    /// top the AXI HP address nets (`hp_awaddr`, `hp_araddr`) flooded 3-5M
+    /// pops per one-sink search. There, iteration 1: pops 177.6M -> 161.3M,
+    /// top-100 nets 117.8M -> 91.8M, worst search 5.4M -> 0.9M.
+    Ps7Pins,
+    /// The entry for every sink. On the OcuSync PHY placement it cut
+    /// iteration time 6-12% but on spi_probe it doubled the pops of
+    /// iteration 1.
+    All,
 }
 
 /// One routed edge.
@@ -263,6 +278,8 @@ struct Core<'g> {
     grid: Option<Grid>,
     /// `Opts::threads` resolved.
     threads: usize,
+    /// Sink nodes that are PS7 pins (`EntryAim::Ps7Pins`), filled per run.
+    ps7_pins: HashSet<u32>,
 }
 
 /// One search's scratch, sized to the graph.
@@ -441,6 +458,7 @@ impl<'g> Core<'g> {
             dump_net: std::env::var("OXIBIT_DUMP_NET").map(|v| v.split(',').filter_map(|x| x.parse().ok()).collect()).unwrap_or_default(),
             grid,
             threads,
+            ps7_pins: HashSet::new(),
             opts,
         }
     }
@@ -578,7 +596,12 @@ impl<'g> Core<'g> {
     /// Where a target set is entered: the muxed nodes its fixed in-edges
     /// lead back to (the target itself when it is muxed), at most 16.
     fn aims(&self, set: &[u32]) -> Vec<(i16, i16)> {
-        if !self.opts.entry_aim {
+        let entry = match self.opts.entry_aim {
+            EntryAim::Own => false,
+            EntryAim::Ps7Pins => set.iter().any(|t| self.ps7_pins.contains(t)),
+            EntryAim::All => true,
+        };
+        if !entry {
             return vec![self.g.node_xy(set[0])];
         }
         let mut out: Vec<(i16, i16)> = Vec::new();
@@ -1116,6 +1139,10 @@ impl<'g> Router<'g> {
         let t0 = Instant::now();
         let mut stats = Stats::default();
         let routed: Vec<bool> = nets.iter().map(|n| matches!(n.class, NetClass::Signal | NetClass::Constant | NetClass::GlobalClock)).collect();
+        if self.core.opts.entry_aim == EntryAim::Ps7Pins {
+            let sinks: HashSet<u32> = nets.iter().zip(&routed).filter(|(_, r)| **r).flat_map(|(n, _)| n.sinks.iter().chain(n.pin_groups.iter().flatten()).copied()).collect();
+            self.core.ps7_pins = self.core.g.node_wires(&sinks).into_iter().filter(|(_, w)| w.iter().any(|(tile, _)| tile.starts_with("PSS"))).map(|(n, _)| n).collect();
+        }
 
         // Kept nets reserve their nodes; routed nets own their terminals.
         for (net, &r) in nets.iter().zip(&routed) {

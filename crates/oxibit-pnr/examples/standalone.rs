@@ -77,8 +77,14 @@ fn run() -> Result<bool, String> {
     if let Some(a) = std::env::var("OXIBIT_ASTAR").ok().and_then(|a| a.parse().ok()) {
         opts.estimate.per_tile = a;
     }
+    // OXIBIT_ENTRY_AIM=own|ps7|all (0 = own, 1 = all): `Opts::entry_aim`.
     if let Ok(v) = std::env::var("OXIBIT_ENTRY_AIM") {
-        opts.entry_aim = v != "0";
+        opts.entry_aim = match v.as_str() {
+            "0" | "own" => oxibit_pnr::router::EntryAim::Own,
+            "ps7" => oxibit_pnr::router::EntryAim::Ps7Pins,
+            "1" | "all" => oxibit_pnr::router::EntryAim::All,
+            _ => return Err(format!("OXIBIT_ENTRY_AIM={v}: own, ps7 or all")),
+        };
     }
     if let Some(n) = std::env::var("OXIBIT_MAX_ITERS").ok().and_then(|n| n.parse().ok()) {
         opts.max_iters = n;
