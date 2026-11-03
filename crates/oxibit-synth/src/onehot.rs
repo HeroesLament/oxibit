@@ -27,6 +27,12 @@
 //! leaves is an `$or` when its two operands' guard sets are proven never 1
 //! together (`exclusive::Exclusive`, SAT over their cones; unproven stays an
 //! `$add`).
+//!
+//! A third rule needs no select at all: an `$add` whose operands have no bit
+//! position where both may be 1 never carries (`K + qe * 2**28 + qr`, word
+//! packing by sum). `MayOne` tracks which output bits of a cell can be 1,
+//! through `$and`/`$or`/`$xor`/`$mux`/unsigned `$mul`/`$add`; any other
+//! driver may set every bit.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -46,6 +52,121 @@ pub struct OneHotStats {
     pub guarded: usize,
     pub sat_calls: usize,
     pub sat_proven: usize,
+    pub sat_refuted: usize,
+    pub sat_unknown: usize,
+    /// Adds the guard rule skipped: an operand with no guard set.
+    pub unguarded: usize,
+    /// Of `adds`, those rewritten because no bit position is shared.
+    pub disjoint: usize,
+}
+
+/// Which bits of a value may be 1.
+struct MayOne<'a> {
+    m: &'a Module,
+    cn: &'a mut Canon,
+    /// canonical net -> (driving cell, bit of its output)
+    at: HashMap<usize, (usize, usize)>,
+    memo: HashMap<usize, Vec<bool>>,
+}
+
+impl<'a> MayOne<'a> {
+    fn new(m: &'a Module, cn: &'a mut Canon) -> Self {
+        let mut at = HashMap::new();
+        for (ci, c) in m.cells.iter().enumerate() {
+            let y = match c {
+                Cell::Binary { y, .. } | Cell::Unary { y, .. } | Cell::Mux { y, .. } => y,
+                _ => continue,
+            };
+            for (i, b) in y.0.iter().enumerate() {
+                if let K::Net(n) = cn.k(*b) {
+                    at.entry(n).or_insert((ci, i));
+                }
+            }
+        }
+        MayOne { m, cn, at, memo: HashMap::new() }
+    }
+
+    fn bit(&mut self, b: Bit) -> bool {
+        match kb(self.cn.k(b)) {
+            Kb::Zero => false,
+            Kb::Net(n) => match self.at.get(&n).copied() {
+                Some((ci, i)) => self.cell(ci)[i],
+                None => true,
+            },
+            _ => true,
+        }
+    }
+
+    /// `s` zero-extended (or truncated) to `w` bits.
+    fn word(&mut self, s: &SigSpec, w: usize) -> Vec<bool> {
+        (0..w).map(|i| s.0.get(i).is_some_and(|b| self.bit(*b))).collect()
+    }
+
+    fn cell(&mut self, ci: usize) -> Vec<bool> {
+        if let Some(v) = self.memo.get(&ci) {
+            return v.clone();
+        }
+        let m = self.m;
+        let w = match &m.cells[ci] {
+            Cell::Binary { y, .. } | Cell::Unary { y, .. } | Cell::Mux { y, .. } => y.0.len(),
+            _ => 0,
+        };
+        // Cycles (and anything not handled) may set every bit.
+        self.memo.insert(ci, vec![true; w]);
+        let v = match &m.cells[ci] {
+            Cell::Binary { op, a, b, signed: false, .. } => {
+                let x = self.word(a, w);
+                let z = self.word(b, w);
+                match op {
+                    Op::And => x.iter().zip(&z).map(|(p, q)| *p && *q).collect(),
+                    Op::Or | Op::Xor => x.iter().zip(&z).map(|(p, q)| *p || *q).collect(),
+                    Op::Mul => mul(&x, &z),
+                    Op::Add => add(&x, &z),
+                    _ => vec![true; w],
+                }
+            }
+            Cell::Mux { a, b, .. } => {
+                let x = self.word(a, w);
+                let z = self.word(b, w);
+                x.iter().zip(&z).map(|(p, q)| *p || *q).collect()
+            }
+            _ => vec![true; w],
+        };
+        self.memo.insert(ci, v.clone());
+        v
+    }
+}
+
+/// May-one bits of a product: one side a single bit `p` shifts the other
+/// by `p`; otherwise everything from the sum of the lowest bits up to one
+/// past the sum of the highest.
+fn mul(x: &[bool], z: &[bool]) -> Vec<bool> {
+    let w = x.len();
+    let ones = |v: &[bool]| v.iter().enumerate().filter(|(_, b)| **b).map(|(i, _)| i).collect::<Vec<_>>();
+    let (ox, oz) = (ones(x), ones(z));
+    if ox.is_empty() || oz.is_empty() {
+        return vec![false; w];
+    }
+    let shift = |p: usize, v: &[bool]| (0..w).map(|i| i >= p && v[i - p]).collect::<Vec<_>>();
+    if ox.len() == 1 {
+        return shift(ox[0], z);
+    }
+    if oz.len() == 1 {
+        return shift(oz[0], x);
+    }
+    let lo = ox[0] + oz[0];
+    let hi = ox[ox.len() - 1] + oz[oz.len() - 1] + 1;
+    (0..w).map(|i| i >= lo && i <= hi).collect()
+}
+
+/// May-one bits of a sum: no shared position means no carry (the union);
+/// otherwise from the lowest bit up to the end.
+fn add(x: &[bool], z: &[bool]) -> Vec<bool> {
+    if x.iter().zip(z).all(|(p, q)| !(*p && *q)) {
+        return x.iter().zip(z).map(|(p, q)| *p || *q).collect();
+    }
+    let lo = x.iter().zip(z).position(|(p, q)| *p || *q).unwrap_or(0);
+    (0..x.len()).map(|i| i >= lo).collect()
 }
 
 /// Guard sets past this many bits are not tracked (the add stays).
@@ -58,6 +179,8 @@ struct Guards<'a> {
     cn: Canon,
     driver: HashMap<usize, usize>,
     memo: HashMap<usize, Option<Vec<(usize, Bit)>>>,
+    /// `$mul` cells with a side whose only may-one bit is one net: its guard.
+    sel: HashMap<usize, (usize, Bit)>,
 }
 
 impl Guards<'_> {
@@ -77,6 +200,11 @@ impl Guards<'_> {
             };
             if ok {
                 return Some(vec![(n, first)]);
+            }
+        }
+        if *op == Op::Mul {
+            if let Some(g) = self.sel.get(&ci) {
+                return Some(vec![*g]);
             }
         }
         None
@@ -350,11 +478,52 @@ pub fn rewrite(m: &mut Module) -> OneHotStats {
 
     // The guard rule, for the adds the key rule left.
     let done: HashSet<usize> = change.iter().copied().collect();
+    let mut cn = Canon::new(mr);
+    cn.learn_and_zeros(&mr.cells);
+    let mut sel = HashMap::new();
+    let mut disjoint = Vec::new();
+    {
+        let mut mo = MayOne::new(mr, &mut cn);
+        for (ci, c) in mr.cells.iter().enumerate() {
+            match c {
+                Cell::Binary { op: Op::Mul, a, b, signed: false, y } => {
+                    for side in [a, b] {
+                        let v = mo.word(side, side.0.len());
+                        let ones: Vec<usize> = (0..v.len()).filter(|i| v[*i]).collect();
+                        if let [p] = ones[..] {
+                            if let Kb::Net(n) = kb(mo.cn.k(side.0[p])) {
+                                let _ = y;
+                                sel.insert(ci, (n, side.0[p]));
+                                break;
+                            }
+                        }
+                    }
+                }
+                Cell::Binary { op: Op::Add, a, b, signed: false, y } if !done.contains(&ci) => {
+                    let w = y.0.len();
+                    let (x, z) = (mo.word(a, w), mo.word(b, w));
+                    if x.iter().zip(&z).all(|(p, q)| !(*p && *q)) {
+                        disjoint.push(ci);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    for ci in &disjoint {
+        if let Cell::Binary { y, .. } = &mr.cells[*ci] {
+            st.bits += y.0.len();
+        }
+        st.disjoint += 1;
+    }
+    change.extend(disjoint.iter().copied());
+    let done: HashSet<usize> = change.iter().copied().collect();
     let mut gx = Guards {
         m: mr,
-        cn: Canon::new(mr),
+        cn,
         driver: HashMap::new(),
         memo: HashMap::new(),
+        sel,
     };
     for (ci, c) in mr.cells.iter().enumerate() {
         if let Cell::Binary { op: Op::Mul | Op::And | Op::Add | Op::Or, y, .. } = c {
@@ -371,7 +540,10 @@ pub fn rewrite(m: &mut Module) -> OneHotStats {
             continue;
         }
         let Cell::Binary { op: Op::Add, a, b, signed: false, y } = c else { continue };
-        let (Some(ga), Some(gb)) = (gx.operand(a), gx.operand(b)) else { continue };
+        let (Some(ga), Some(gb)) = (gx.operand(a), gx.operand(b)) else {
+            st.unguarded += 1;
+            continue;
+        };
         if ga.is_empty() || gb.is_empty() {
             continue;
         }
@@ -386,6 +558,8 @@ pub fn rewrite(m: &mut Module) -> OneHotStats {
     }
     st.sat_calls = ex.stats.calls;
     st.sat_proven = ex.stats.proven;
+    st.sat_refuted = ex.stats.refuted;
+    st.sat_unknown = ex.stats.unknown;
     drop(ex);
     drop(gx);
     for ci in change {
@@ -409,7 +583,9 @@ impl crate::stage::Pass for OneHotSums {
     }
     fn json(s: &OneHotStats) -> serde_json::Value {
         serde_json::json!({ "adds": s.adds, "bits": s.bits, "terms": s.terms, "guarded": s.guarded,
-                            "sat_calls": s.sat_calls, "sat_proven": s.sat_proven })
+                            "sat_calls": s.sat_calls, "sat_proven": s.sat_proven,
+                            "sat_refuted": s.sat_refuted, "sat_unknown": s.sat_unknown, "unguarded": s.unguarded,
+                            "disjoint": s.disjoint })
     }
 }
 
@@ -555,6 +731,49 @@ mod tests {
         let y = sig(&mut m, "y", 8);
         let t0 = bin(&mut m, Op::Mul, p.extend(8, false), x, 8);
         let t1 = bin(&mut m, Op::Mul, g1.extend(8, false), y, 8);
+        bin(&mut m, Op::Add, t0, t1, 8);
+        assert_eq!(rewrite(&mut m).guarded, 1);
+    }
+
+    /// Word packing by sum: `qe * 2**4 + q` with a 4-bit `q` never carries.
+    #[test]
+    fn packed_fields_become_or() {
+        let mut m = Module::new("t");
+        let qe = sig(&mut m, "qe", 1);
+        let q = sig(&mut m, "q", 4);
+        let k = SigSpec::constant(16, 5);
+        let hi = bin(&mut m, Op::Mul, qe.extend(5, false), k, 5);
+        bin(&mut m, Op::Add, hi, q.extend(5, false), 5);
+        let st = rewrite(&mut m);
+        assert_eq!((st.adds, st.disjoint), (1, 1));
+        assert_eq!(ops(&m), vec![Op::Or]);
+    }
+
+    /// Overlapping fields can carry: the add stays.
+    #[test]
+    fn overlapping_fields_stay_add() {
+        let mut m = Module::new("t");
+        let qe = sig(&mut m, "qe", 1);
+        let q = sig(&mut m, "q", 4);
+        let k = SigSpec::constant(8, 5);
+        let hi = bin(&mut m, Op::Mul, qe.extend(5, false), k, 5);
+        bin(&mut m, Op::Add, hi, q.extend(5, false), 5);
+        assert_eq!(rewrite(&mut m).adds, 0);
+    }
+
+    /// `(bnot(g) & 1) * y + g * x`: the select is masked down to bit 0.
+    #[test]
+    fn masked_select_is_a_guard() {
+        let mut m = Module::new("t");
+        let g = sig(&mut m, "g", 1);
+        let ng = m.wire(1);
+        m.cells.push(Cell::Unary { op: Op::Not, a: g.clone(), a_signed: false, y: ng.clone() });
+        let one = SigSpec::constant(1, 8);
+        let mask = bin(&mut m, Op::And, ng.extend(8, false), one, 8);
+        let x = sig(&mut m, "x", 8);
+        let y = sig(&mut m, "y", 8);
+        let t0 = bin(&mut m, Op::Mul, g.extend(8, false), x, 8);
+        let t1 = bin(&mut m, Op::Mul, mask, y, 8);
         bin(&mut m, Op::Add, t0, t1, 8);
         assert_eq!(rewrite(&mut m).guarded, 1);
     }
