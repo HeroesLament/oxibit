@@ -411,6 +411,7 @@ dependencies = [
  "oxibit-fasm",
  "oxibit-prof",
  "oxibit-report",
+ "oxibit-sta",
  "serde_json",
  "tracing",
 ]

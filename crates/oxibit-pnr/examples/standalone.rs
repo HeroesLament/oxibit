@@ -14,6 +14,12 @@
 //! OXIBIT_ENDGAME=OVERUSE,RADIUS|off: `Opts::endgame`.
 //! OXIBIT_ENTRY_BOUND=0|1: `Estimate::entry`. OXIBIT_OVERUSE_DUMP=path: the
 //! nodes still overused after routing.
+//! OXIBIT_TD=n: n timing-driven passes after the first. Each runs setup
+//! analysis (`oxibit_sta::analyze`, SDF from DB_ROOT/timings) on the last
+//! routing and routes again from scratch with its criticalities
+//! (`Opts::criticality`); OXIBIT_MAX_CRIT, OXIBIT_CRIT_EXP set `max_crit`,
+//! `crit_exp`. One `{"timing": ...}` line per pass. The FASM written is the
+//! clean pass with the shortest worst same-domain path.
 //!
 //! stdout: one JSON line per phase. Exit 0 when the routing is complete
 //! and clean and no two writers conflict; 1 otherwise; 3 on an error.
@@ -21,6 +27,7 @@
 use std::io::Write;
 use std::path::Path;
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use oxibit_fasm::db::Database;
@@ -136,7 +143,66 @@ fn run() -> Result<bool, String> {
     if let Ok(v) = std::env::var("OXIBIT_ENTRY_BOUND") {
         opts.estimate.entry = v != "0";
     }
-    let sa = flow::standalone_with(&db, &g, &placed_v, &imp, "", opts, &r)?;
+    if let Some(v) = envf("OXIBIT_MAX_CRIT") {
+        opts.max_crit = v;
+    }
+    if let Some(v) = envf("OXIBIT_CRIT_EXP") {
+        opts.crit_exp = v;
+    }
+    let td: u32 = std::env::var("OXIBIT_TD")
+        .ok()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(0);
+    let lib = if td > 0 {
+        Some(oxibit_sta::sdf::Library::load_dir(&Path::new(db_root).join("timings"))?)
+    } else {
+        None
+    };
+    let mut sa = flow::standalone_with(&db, &g, &placed_v, &imp, "", opts.clone(), &r)?;
+    if let Some(lib) = &lib {
+        // (worst same-domain path ps, pass) of the best clean pass so far.
+        let mut best: Option<(i64, u32)> = None;
+        let mut best_sa = None;
+        for pass in 0..=td {
+            let rep = oxibit_sta::analyze::analyze(
+                &g,
+                &imp,
+                &sa.nets,
+                &sa.routes,
+                lib,
+                oxibit_sta::analyze::Options {
+                    paths: 1,
+                    ..Default::default()
+                },
+            );
+            let worst = rep
+                .worst
+                .iter()
+                .filter(|((l, c), _)| l == c && l != oxibit_sta::analyze::ASYNC && l != oxibit_sta::analyze::UNCLOCKED)
+                .map(|(_, p)| p.delay)
+                .max()
+                .unwrap_or(0);
+            let mut v = rep.json();
+            v["pass"] = json!(pass);
+            v["route"] = sa.stats.to_json();
+            v["ok"] = json!(sa.ok());
+            line(json!({ "timing": v }));
+            let crit = rep.router_criticality(&imp);
+            let this = sa;
+            if this.ok() && best.is_none_or(|(w, _)| worst < w) {
+                best = Some((worst, pass));
+                best_sa = Some(this);
+            }
+            if pass == td {
+                break;
+            }
+            opts.criticality = Some(Arc::new(crit));
+            sa = flow::standalone_with(&db, &g, &placed_v, &imp, "", opts.clone(), &r)?;
+        }
+        let (worst, pass) = best.ok_or("timing-driven: no pass routed clean")?;
+        line(json!({"timing_driven": {"passes": td + 1, "chosen": pass, "worst_ps": worst}}));
+        sa = best_sa.expect("best pass kept");
+    }
     for v in &sa.report {
         line(v.clone());
     }
