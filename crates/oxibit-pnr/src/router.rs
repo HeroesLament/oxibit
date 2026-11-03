@@ -123,6 +123,13 @@ pub struct Opts {
     pub delay_norm: f32,
     /// A* weight of the delay term (delay cost units per tile).
     pub astar_delay: f32,
+    /// Per net (by index), each sink node's timing criticality, 0..=1,
+    /// from a setup analysis of an earlier routing. A target's delay
+    /// weight is then max(delay_weight, max_crit * crit^crit_exp), and a
+    /// net's targets are routed most critical first.
+    pub criticality: Option<std::sync::Arc<Vec<HashMap<u32, f32>>>>,
+    pub max_crit: f32,
+    pub crit_exp: f32,
     /// A sink is searched for inside the bounding box of its net's
     /// terminals grown by this many tiles, and without the box only when
     /// none is found there. A net rerouted again has its margin doubled,
@@ -168,6 +175,9 @@ impl Default for Opts {
             delay_weight: 0.0,
             delay_norm: 100.0,
             astar_delay: 0.3,
+            criticality: None,
+            max_crit: 0.99,
+            crit_exp: 1.0,
             bbox_margin: -1,
             entry_aim: false,
             overuse_dump: None,
@@ -276,6 +286,8 @@ pub struct Router<'g> {
     /// OXIBIT_DUMP_NET: write every pop of this net's searches (debug).
     dump_net: Vec<usize>,
     cur_net: usize,
+    /// Index of the net being routed (`Opts::criticality`).
+    cur_index: usize,
 }
 
 /// One target search: how far it wandered and what it paid.
@@ -354,6 +366,7 @@ impl<'g> Router<'g> {
                 .map(|v| v.split(',').filter_map(|x| x.parse().ok()).collect())
                 .unwrap_or_default(),
             cur_net: usize::MAX,
+            cur_index: usize::MAX,
         }
     }
 
@@ -573,6 +586,27 @@ impl<'g> Router<'g> {
         out
     }
 
+    /// Criticality of a target set for the net being routed: its most
+    /// critical node's.
+    fn crit_of(&self, set: &[u32]) -> f32 {
+        self.opts
+            .criticality
+            .as_ref()
+            .and_then(|c| c.get(self.cur_index))
+            .map(|m| set.iter().filter_map(|n| m.get(n)).copied().fold(0.0f32, f32::max))
+            .unwrap_or(0.0)
+    }
+
+    /// Delay weight of a target of criticality `crit`.
+    fn target_weight(&self, crit: f32) -> f32 {
+        if crit <= 0.0 {
+            return self.opts.delay_weight;
+        }
+        self.opts
+            .delay_weight
+            .max(self.opts.max_crit * crit.powf(self.opts.crit_exp))
+    }
+
     fn manhattan(&self, a: u32, b: u32) -> f32 {
         let (ax, ay) = self.g.node_xy(a);
         let (bx, by) = self.g.node_xy(b);
@@ -707,6 +741,21 @@ impl<'g> Router<'g> {
             self.manhattan(anchor, a[0])
                 .total_cmp(&self.manhattan(anchor, b[0]))
         });
+        // With criticalities: most critical first (stable, so nearest
+        // first among equals), each with its own delay weight.
+        let mut weights: Vec<f32> = vec![self.opts.delay_weight; targets.len()];
+        if self.opts.criticality.is_some() {
+            let mut tc: Vec<(Vec<u32>, f32)> = targets
+                .into_iter()
+                .map(|t| {
+                    let c = self.crit_of(&t);
+                    (t, c)
+                })
+                .collect();
+            tc.sort_by(|a, b| b.1.total_cmp(&a.1));
+            weights = tc.iter().map(|t| self.target_weight(t.1)).collect();
+            targets = tc.into_iter().map(|t| t.0).collect();
+        }
 
         // The terminals' bounding box, grown by the margin.
         let bbox = (margin >= 0).then(|| {
@@ -723,7 +772,7 @@ impl<'g> Router<'g> {
             (x0 - m, y0 - m, x1 + m, y1 + m)
         });
 
-        for set in &targets {
+        for (ti, set) in targets.iter().enumerate() {
             if set.iter().any(|&t| self.tag[t as usize] == tag) {
                 continue; // already on the tree
             }
@@ -741,7 +790,7 @@ impl<'g> Router<'g> {
                 (HashMap::new(), 0.0)
             };
             let eb = |n: u32| near.get(&n).copied().unwrap_or(far);
-            let w = self.opts.delay_weight;
+            let w = weights[ti];
             let astar = (1.0 - w) * self.opts.estimate.per_tile + w * self.opts.astar_delay;
             let mut reached = None;
             let mut sd = SearchDiag {
@@ -1103,6 +1152,7 @@ impl<'g> Router<'g> {
                 }
                 let before = pops;
                 self.cur_net = if iter == 1 { i } else { usize::MAX };
+                self.cur_index = i;
                 let (hops, f) = oxibit_prof::hot_block!(
                     "route.net",
                     [
