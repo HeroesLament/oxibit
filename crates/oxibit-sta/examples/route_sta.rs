@@ -11,6 +11,8 @@
 //! - STA_ROUTES_OUT=FILE: write the last pass's routes (`write_routes`).
 //! - STA_ROUTES_IN=FILE: analyse these routes instead of routing (one
 //!   pass, no FASM check).
+//! - STA_NEXTPNR=1: PLACED.json is a nextpnr routed.json; analyse its own
+//!   `ROUTING` (tile pips only, site pips are the analysis's 20 ps arcs).
 //! - STA_TD=n: n timing-driven passes after the first: each routes again
 //!   from scratch with the previous pass's criticalities
 //!   (`router::Opts::criticality`). STA_MAX_CRIT, STA_CRIT_EXP set the
@@ -98,6 +100,74 @@ fn read_routes(path: &str) -> Result<Vec<Vec<Hop>>, String> {
     Ok(out)
 }
 
+/// The tile pips of each routed net from nextpnr's `ROUTING` attributes
+/// (`wire;pip;strength` triples, a pip `X{x}Y{y}/DST/SRC`). Every part of
+/// a net split by exit gets the whole tree: arrival times walk from that
+/// part's root, so edges it cannot reach do not count. Returns the routes
+/// and (pips, site pips skipped, same-node pips, misses).
+fn nextpnr_routes(
+    g: &Graph,
+    imp: &placed::Import,
+    v: &serde_json::Value,
+) -> Result<(Vec<Vec<Hop>>, [usize; 4], Vec<String>), String> {
+    use oxibit_fasm::route::PipLookup;
+    use std::collections::HashMap;
+    let by_xy: HashMap<(i32, i32), String> = g
+        .tile_names()
+        .filter_map(|t| g.tile_xy(t).map(|xy| (xy, t.to_string())))
+        .collect();
+    let top = v["modules"]
+        .as_object()
+        .and_then(|m| m.values().find(|m| m["netnames"].is_object()))
+        .ok_or("no module with netnames")?;
+    let mut by_bit: HashMap<i64, Vec<Hop>> = HashMap::new();
+    let mut st = [0usize; 4];
+    let mut missed: Vec<String> = Vec::new();
+    for (_name, n) in top["netnames"].as_object().unwrap() {
+        let Some(rt) = n["attributes"]["ROUTING"].as_str() else { continue };
+        let Some(bit) = n["bits"].get(0).and_then(|b| b.as_i64()) else { continue };
+        let f: Vec<&str> = rt.split(';').collect();
+        let mut hops = Vec::new();
+        for t in f.chunks(3) {
+            let Some(&pip) = t.get(1) else { continue };
+            if pip.is_empty() {
+                continue;
+            }
+            let Some((tile, rest)) = pip.split_once('/') else { continue };
+            let Some((dst, src)) = rest.split_once('/') else { continue };
+            if dst.contains('.') || tile == "SITEWIRE" {
+                st[1] += 1;
+                continue;
+            }
+            st[0] += 1;
+            let xy = tile
+                .strip_prefix('X')
+                .and_then(|t| t.split_once('Y'))
+                .and_then(|(x, y)| Some((x.parse().ok()?, y.parse().ok()?)));
+            let Some(name) = xy.and_then(|xy| by_xy.get(&xy)) else {
+                st[3] += 1;
+                if missed.len() < 12 {
+                    missed.push(format!("{pip} (no tile)"));
+                }
+                continue;
+            };
+            match g.lookup_pip(&format!("{name}.{dst}.{src}")) {
+                PipLookup::Edge { src, dst, tile, pi, .. } => hops.push(Hop { src, dst, tile, pi }),
+                PipLookup::SameNode(_) => st[2] += 1,
+                _ => {
+                    st[3] += 1;
+                    if missed.len() < 12 {
+                        missed.push(format!("{name}.{dst}.{src}"));
+                    }
+                }
+            }
+        }
+        by_bit.insert(bit, hops);
+    }
+    let routes = imp.bits.iter().map(|b| by_bit.get(b).cloned().unwrap_or_default()).collect();
+    Ok((routes, st, missed))
+}
+
 fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().collect();
     let [_, db_root, part, meta_dir, design] = &args[..] else {
@@ -131,6 +201,21 @@ fn run() -> Result<(), String> {
         v["pass"] = json!(pass);
         println!("{}", json!({ "timing": v }));
     };
+
+    if std::env::var("STA_NEXTPNR").is_ok() {
+        let (routes, st, missed) = nextpnr_routes(&g, &imp, &placed_v)?;
+        let empty = routes.iter().filter(|r| r.is_empty()).count();
+        println!("{}", json!({"check": {"nextpnr": true, "nets": routes.len(), "empty": empty,
+                                         "pips": st[0], "site_pips": st[1], "same_node": st[2],
+                                         "missed": st[3], "missed_examples": missed}}));
+        let t = std::time::Instant::now();
+        let rep = analyze::analyze(&g, &imp, &imp.nets, &routes, &lib, so);
+        report(0, &rep, t.elapsed().as_secs_f64());
+        if let Ok(path) = std::env::var("STA_ROUTES_OUT") {
+            write_routes(&path, &routes)?;
+        }
+        return Ok(());
+    }
 
     if let Ok(path) = std::env::var("STA_ROUTES_IN") {
         let routes = read_routes(&path)?;
