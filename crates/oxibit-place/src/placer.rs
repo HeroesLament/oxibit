@@ -1207,11 +1207,15 @@ pub struct Options {
     /// Region constraints: objects held to boxes of the die.
     pub floorplan: Floorplan,
     /// Place each memory's RAMB36 pieces as one run of consecutive sites
-    /// up one BRAM column, moved as one object. Off, they are independent
-    /// objects, and the placer scatters a wide memory's pieces over
-    /// several columns: picoBEAM's 4096 x 72 code memory (eight 4K x 9
-    /// pieces) landed on two or three columns per engine and its fetch bus
-    /// became the router's plateau (w1, 11-03).
+    /// up one BRAM column, moved as one object. Off by default: it lowers
+    /// wirelength and routes worse. picoBEAM 4096 x 72 code memory, 11-03:
+    /// scattered (off, w1) the router plateaued at 90-100 overused and
+    /// reached 0 at iteration 43; stacked (on, w2, same netlist, HPWL
+    /// 819,811 -> 804,463) it was still at 246 overused at iteration 23,
+    /// each iteration twice as long. A stack puts all of a memory's
+    /// outputs through one column's switchboxes; scatter spreads that
+    /// demand. A placement that keeps a memory near its consumers without
+    /// stacking it is the open question.
     pub bram_groups: bool,
 }
 
@@ -1338,7 +1342,7 @@ impl Default for Options {
             bypass: PinCost::OFF_BYPASS,
             density: DensityCost::OFF,
             floorplan: Floorplan::default(),
-            bram_groups: true,
+            bram_groups: false,
         }
     }
 }

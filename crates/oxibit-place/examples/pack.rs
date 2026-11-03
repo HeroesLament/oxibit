@@ -242,10 +242,11 @@ fn run_with(args: &[String], r: &oxibit_report::Reporter) -> Result<bool, String
         {
             opts.unit_window = m;
         }
-        // block RAM groups (one memory's RAMB36 pieces up one column) are
-        // on unless OXIBIT_BRAM_GROUPS=0
-        if std::env::var("OXIBIT_BRAM_GROUPS").as_deref() == Ok("0") {
-            opts.bram_groups = false;
+        // block RAM groups (one memory's RAMB36 pieces up one column):
+        // OXIBIT_BRAM_GROUPS=1 turns them on (off by default, see
+        // Options::bram_groups)
+        if std::env::var("OXIBIT_BRAM_GROUPS").as_deref() == Ok("1") {
+            opts.bram_groups = true;
         }
         if let Some(m) = std::env::var("OXIBIT_PLACE_POLISH")
             .ok()
