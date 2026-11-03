@@ -18,8 +18,17 @@
 //! An operand is zero unless one of its keys equals `s`; with disjoint key
 //! sets the two operands are never nonzero together, which is all the
 //! rewrite needs. Only `$add` cells change, and the miter checks the result.
+//!
+//! A second rule covers sums whose selects are not compares of one word:
+//! `b * x + bnot(b) * y`, or priority-derived enables that are exclusive by
+//! construction. A term `b * v` (a one-bit `b`, zero-extended, or replicated
+//! under `$and`) is zero unless its GUARD `b` is 1, and a sum of guarded
+//! values is zero unless one of their guards is. An `$add` the first rule
+//! leaves is an `$or` when its two operands' guard sets are proven never 1
+//! together (`exclusive::Exclusive`, SAT over their cones; unproven stays an
+//! `$add`).
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use oxibit_hdl::netlist::{Bit, Cell, Module, Op, SigSpec};
 use oxibit_prof::hot;
@@ -33,6 +42,100 @@ pub struct OneHotStats {
     pub bits: usize,
     /// Selection terms under the rewritten sums.
     pub terms: usize,
+    /// Of `adds`, those rewritten by the guard rule, and its SAT checks.
+    pub guarded: usize,
+    pub sat_calls: usize,
+    pub sat_proven: usize,
+}
+
+/// Guard sets past this many bits are not tracked (the add stays).
+const GUARD_MAX: usize = 64;
+
+/// Values that are zero unless one of their guard bits is 1. A guard is
+/// kept as (canonical net, a bit of it) so sets dedupe by net.
+struct Guards<'a> {
+    m: &'a Module,
+    cn: Canon,
+    driver: HashMap<usize, usize>,
+    memo: HashMap<usize, Option<Vec<(usize, Bit)>>>,
+}
+
+impl Guards<'_> {
+    /// A selection term's guard: the one-bit side of an unsigned `$mul`
+    /// (zero-extended) or `$and` (replicated).
+    fn term(&mut self, ci: usize) -> Option<Vec<(usize, Bit)>> {
+        let m = self.m;
+        let Cell::Binary { op: op @ (Op::Mul | Op::And), a, b, signed: false, .. } = &m.cells[ci] else {
+            return None;
+        };
+        for side in [a, b] {
+            let first = *side.0.first()?;
+            let Kb::Net(n) = kb(self.cn.k(first)) else { continue };
+            let ok = match op {
+                Op::Mul => side.0[1..].iter().all(|x| kb(self.cn.k(*x)) == Kb::Zero),
+                _ => side.0.iter().all(|x| kb(self.cn.k(*x)) == Kb::Net(n)),
+            };
+            if ok {
+                return Some(vec![(n, first)]);
+            }
+        }
+        None
+    }
+
+    /// An operand's guards: constant zeros add none, every other bit must
+    /// come from a guarded cell.
+    fn operand(&mut self, s: &SigSpec) -> Option<Vec<(usize, Bit)>> {
+        let mut acc: Vec<(usize, Bit)> = Vec::new();
+        let mut seen: Vec<usize> = Vec::new();
+        for b in &s.0 {
+            match kb(self.cn.k(*b)) {
+                Kb::Zero => {}
+                Kb::Net(n) => {
+                    let ci = *self.driver.get(&n)?;
+                    if seen.contains(&ci) {
+                        continue;
+                    }
+                    seen.push(ci);
+                    for g in self.node(ci)? {
+                        if !acc.iter().any(|h| h.0 == g.0) {
+                            acc.push(g);
+                        }
+                    }
+                    if acc.len() > GUARD_MAX {
+                        return None;
+                    }
+                }
+                _ => return None,
+            }
+        }
+        Some(acc)
+    }
+
+    fn node(&mut self, ci: usize) -> Option<Vec<(usize, Bit)>> {
+        if let Some(r) = self.memo.get(&ci) {
+            return r.clone();
+        }
+        self.memo.insert(ci, None);
+        let m = self.m;
+        let r = match &m.cells[ci] {
+            // zero unless one of either side's guards is 1, exclusive or not
+            Cell::Binary { op: Op::Add | Op::Or, a, b, signed: false, .. } => match (self.operand(a), self.operand(b)) {
+                (Some(mut x), Some(y)) => {
+                    for g in y {
+                        if !x.iter().any(|h| h.0 == g.0) {
+                            x.push(g);
+                        }
+                    }
+                    (x.len() <= GUARD_MAX).then_some(x)
+                }
+                _ => None,
+            },
+            Cell::Binary { op: Op::Mul | Op::And, .. } => self.term(ci),
+            _ => None,
+        };
+        self.memo.insert(ci, r.clone());
+        r
+    }
 }
 
 /// A canonical bit, hashable.
@@ -244,6 +347,47 @@ pub fn rewrite(m: &mut Module) -> OneHotStats {
         }
     }
     drop(cx);
+
+    // The guard rule, for the adds the key rule left.
+    let done: HashSet<usize> = change.iter().copied().collect();
+    let mut gx = Guards {
+        m: mr,
+        cn: Canon::new(mr),
+        driver: HashMap::new(),
+        memo: HashMap::new(),
+    };
+    for (ci, c) in mr.cells.iter().enumerate() {
+        if let Cell::Binary { op: Op::Mul | Op::And | Op::Add | Op::Or, y, .. } = c {
+            for b in &y.0 {
+                if let K::Net(n) = gx.cn.k(*b) {
+                    gx.driver.entry(n).or_insert(ci);
+                }
+            }
+        }
+    }
+    let mut ex = crate::exclusive::Exclusive::new(mr);
+    for (ci, c) in mr.cells.iter().enumerate() {
+        if done.contains(&ci) {
+            continue;
+        }
+        let Cell::Binary { op: Op::Add, a, b, signed: false, y } = c else { continue };
+        let (Some(ga), Some(gb)) = (gx.operand(a), gx.operand(b)) else { continue };
+        if ga.is_empty() || gb.is_empty() {
+            continue;
+        }
+        let xa: Vec<Bit> = ga.iter().map(|g| g.1).collect();
+        let xb: Vec<Bit> = gb.iter().map(|g| g.1).collect();
+        if ex.exclusive(&xa, &xb) {
+            change.push(ci);
+            st.guarded += 1;
+            st.bits += y.0.len();
+            st.terms += ga.len() + gb.len();
+        }
+    }
+    st.sat_calls = ex.stats.calls;
+    st.sat_proven = ex.stats.proven;
+    drop(ex);
+    drop(gx);
     for ci in change {
         if let Cell::Binary { op, .. } = &mut m.cells[ci] {
             *op = Op::Or;
@@ -264,7 +408,8 @@ impl crate::stage::Pass for OneHotSums {
         p.onehot
     }
     fn json(s: &OneHotStats) -> serde_json::Value {
-        serde_json::json!({ "adds": s.adds, "bits": s.bits, "terms": s.terms })
+        serde_json::json!({ "adds": s.adds, "bits": s.bits, "terms": s.terms, "guarded": s.guarded,
+                            "sat_calls": s.sat_calls, "sat_proven": s.sat_proven })
     }
 }
 
@@ -362,6 +507,56 @@ mod tests {
         }
         bin(&mut m, Op::Add, terms[0].clone(), terms[1].clone(), 9);
         assert_eq!(rewrite(&mut m).adds, 1);
+    }
+
+    /// `b * x + bnot(b) * y`: complementary guards.
+    #[test]
+    fn complementary_guards_become_or() {
+        let mut m = Module::new("t");
+        let b = sig(&mut m, "b", 1);
+        let nb = m.wire(1);
+        m.cells.push(Cell::Unary { op: Op::Not, a: b.clone(), a_signed: false, y: nb.clone() });
+        let x = sig(&mut m, "x", 8);
+        let y = sig(&mut m, "y", 8);
+        let t0 = bin(&mut m, Op::Mul, b.extend(8, false), x, 8);
+        let t1 = bin(&mut m, Op::Mul, nb.extend(8, false), y, 8);
+        bin(&mut m, Op::Add, t0, t1, 8);
+        let st = rewrite(&mut m);
+        assert_eq!((st.adds, st.guarded), (1, 1));
+        assert_eq!(ops(&m), vec![Op::Or]);
+    }
+
+    /// Two independent selects can both be 1: the sum stays an add.
+    #[test]
+    fn independent_guards_stay_add() {
+        let mut m = Module::new("t");
+        let p = sig(&mut m, "p", 1);
+        let q = sig(&mut m, "q", 1);
+        let x = sig(&mut m, "x", 8);
+        let y = sig(&mut m, "y", 8);
+        let t0 = bin(&mut m, Op::Mul, p.extend(8, false), x, 8);
+        let t1 = bin(&mut m, Op::Mul, q.extend(8, false), y, 8);
+        bin(&mut m, Op::Add, t0, t1, 8);
+        let st = rewrite(&mut m);
+        assert_eq!(st.adds, 0);
+        assert_eq!(ops(&m), vec![Op::Add]);
+    }
+
+    /// Priority-derived selects: `p` and `bnot(p) & q` never hold together.
+    #[test]
+    fn priority_guards_become_or() {
+        let mut m = Module::new("t");
+        let p = sig(&mut m, "p", 1);
+        let q = sig(&mut m, "q", 1);
+        let np = m.wire(1);
+        m.cells.push(Cell::Unary { op: Op::Not, a: p.clone(), a_signed: false, y: np.clone() });
+        let g1 = bin(&mut m, Op::And, np, q, 1);
+        let x = sig(&mut m, "x", 8);
+        let y = sig(&mut m, "y", 8);
+        let t0 = bin(&mut m, Op::Mul, p.extend(8, false), x, 8);
+        let t1 = bin(&mut m, Op::Mul, g1.extend(8, false), y, 8);
+        bin(&mut m, Op::Add, t0, t1, 8);
+        assert_eq!(rewrite(&mut m).guarded, 1);
     }
 
     #[test]
