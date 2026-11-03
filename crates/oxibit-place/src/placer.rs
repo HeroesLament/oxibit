@@ -1099,18 +1099,34 @@ enum Kind {
     Ramb18,
 }
 
-/// A movable object: a single-slice fill, or one hard cell.
+/// A movable object: a single-slice fill, a chain of slices, one hard
+/// cell, or a block RAM group (one memory's RAMB36 pieces).
 struct Obj {
     kind: Kind,
     need_m: bool,
+    /// For a block RAM group, the pieces in synthesis order: cell `k` sits
+    /// on `sites[k]`.
     cells: Vec<CellId>,
-    /// Sites held: one, or a chain's run bottom to top.
+    /// Sites held: one, or a run bottom to top (a slice chain, or a block
+    /// RAM group up one BRAM column).
     sites: Vec<usize>,
+}
+
+/// `oxsyn_bram{memory}_{piece}`, the name `oxibit-synth` gives each block
+/// RAM it maps one memory into: (memory, piece).
+fn bram_piece(name: &str) -> Option<(u64, u32)> {
+    let rest = &name[name.rfind("oxsyn_bram")? + "oxsyn_bram".len()..];
+    let (m, t) = rest.split_once('_')?;
+    Some((m.parse().ok()?, t.parse().ok()?))
 }
 
 #[derive(Debug, Default)]
 pub struct PlaceStats {
     pub objects: usize,
+    /// Memories mapped to more than one RAMB36, placed as one run up a
+    /// BRAM column, and the RAMB36 cells in them.
+    pub bram_groups: usize,
+    pub bram_grouped: usize,
     /// Labels, held objects and box capacity, when there is a floorplan.
     pub floorplan: Option<FloorplanStats>,
     pub chains_placed: usize,
@@ -1190,6 +1206,13 @@ pub struct Options {
     pub density: DensityCost,
     /// Region constraints: objects held to boxes of the die.
     pub floorplan: Floorplan,
+    /// Place each memory's RAMB36 pieces as one run of consecutive sites
+    /// up one BRAM column, moved as one object. Off, they are independent
+    /// objects, and the placer scatters a wide memory's pieces over
+    /// several columns: picoBEAM's 4096 x 72 code memory (eight 4K x 9
+    /// pieces) landed on two or three columns per engine and its fetch bus
+    /// became the router's plateau (w1, 11-03).
+    pub bram_groups: bool,
 }
 
 /// Slice density per region: the die cut into `bin` x `bin` tile bins,
@@ -1315,6 +1338,7 @@ impl Default for Options {
             bypass: PinCost::OFF_BYPASS,
             density: DensityCost::OFF,
             floorplan: Floorplan::default(),
+            bram_groups: true,
         }
     }
 }
@@ -1363,6 +1387,7 @@ pub fn place_with(
         });
         fills.push(m.slices);
     }
+    let mut groups36: BTreeMap<u64, Vec<(u32, CellId)>> = BTreeMap::new();
     for c in p.nl.cell_ids() {
         if p.nl.cell(c).bel.is_some() {
             continue;
@@ -1373,10 +1398,31 @@ pub fn place_with(
             "RAMB18E1_RAMB18E1" => Kind::Ramb18,
             _ => continue,
         };
+        if k == Kind::Ramb36
+            && opts.bram_groups
+            && let Some((m, t)) = bram_piece(&p.nl.cell(c).name)
+        {
+            groups36.entry(m).or_default().push((t, c));
+            continue;
+        }
         objs.push(Obj {
             kind: k,
             need_m: false,
             cells: vec![c],
+            sites: Vec::new(),
+        });
+        fills.push(Vec::new());
+    }
+    for (_, mut pieces) in groups36 {
+        pieces.sort();
+        if pieces.len() > 1 {
+            st.bram_groups += 1;
+            st.bram_grouped += pieces.len();
+        }
+        objs.push(Obj {
+            kind: Kind::Ramb36,
+            need_m: false,
+            cells: pieces.into_iter().map(|(_, c)| c).collect(),
             sites: Vec::new(),
         });
         fills.push(Vec::new());
@@ -1491,6 +1537,31 @@ pub fn place_with(
         }
     };
 
+    // RAMB36 sites up each BRAM column: a site and the next one above it.
+    let mut up36: HashMap<usize, usize> = HashMap::new();
+    {
+        let mut cols: HashMap<i32, Vec<usize>> = HashMap::new();
+        for (i, s) in sites.ramb36.iter().enumerate() {
+            cols.entry(s.x).or_default().push(i);
+        }
+        for col in cols.values_mut() {
+            col.sort_by_key(|&i| sites.ramb36[i].y);
+            for w in col.windows(2) {
+                up36.insert(w[0], w[1]);
+            }
+        }
+    }
+    // The run of RAMB36 sites a group of `len` would occupy from `base`.
+    let run36_from = |base: usize, len: usize| -> Option<Vec<usize>> {
+        let mut v = vec![base];
+        let mut cur = base;
+        for _ in 1..len {
+            cur = *up36.get(&cur)?;
+            v.push(cur);
+        }
+        Some(v)
+    };
+
     // The run of slice sites a chain of `len` would occupy from `base`.
     let run_from = |base: usize, len: usize| -> Option<Vec<usize>> {
         let mut v = vec![base];
@@ -1519,6 +1590,9 @@ pub fn place_with(
         (
             objs[o].kind != Kind::Slice,
             std::cmp::Reverse(fills[o].len()),
+            // block RAM groups before single block RAMs: a run needs a free
+            // stretch of column, which singles placed first would break up
+            std::cmp::Reverse(if objs[o].kind == Kind::Slice { 0 } else { objs[o].cells.len() }),
             oreg[o].is_none(),
         )
     });
@@ -1545,9 +1619,12 @@ pub fn place_with(
                 Kind::Slice => run_from(s, fills[o].len())
                     .filter(|r| fits(&objs[o], &fills[o], r, &owner, usize::MAX)),
                 Kind::Dsp => owner[ki][s].is_none().then(|| vec![s]),
-                Kind::Ramb36 => (owner[ki][s].is_none()
-                    && b18.get(&sites.ramb36[s].tile).copied().unwrap_or(0) == 0)
-                    .then(|| vec![s]),
+                Kind::Ramb36 => run36_from(s, objs[o].cells.len()).filter(|r| {
+                    r.iter().all(|&t| {
+                        owner[ki][t].is_none()
+                            && b18.get(&sites.ramb36[t].tile).copied().unwrap_or(0) == 0
+                    })
+                }),
                 Kind::Ramb18 => (owner[ki][s].is_none()
                     && !b36.get(&sites.ramb18[s].tile).copied().unwrap_or(false))
                 .then(|| vec![s]),
@@ -1571,7 +1648,9 @@ pub fn place_with(
         }
         match k {
             Kind::Ramb36 => {
-                b36.insert(sites.ramb36[run[0]].tile, true);
+                for &s in &run {
+                    b36.insert(sites.ramb36[s].tile, true);
+                }
             }
             Kind::Ramb18 => *b18.entry(sites.ramb18[run[0]].tile).or_default() += 1,
             _ => {}
@@ -1589,7 +1668,9 @@ pub fn place_with(
     let mut obj_cells: Vec<Vec<u32>> = vec![Vec::new(); n];
     for (o, f) in fills.iter().enumerate() {
         let list: Vec<(usize, CellId)> = if f.is_empty() {
-            vec![(0, objs[o].cells[0])]
+            // a hard object: one cell, or a block RAM group's pieces, each
+            // on its own site of the run
+            objs[o].cells.iter().copied().enumerate().collect()
         } else {
             f.iter()
                 .enumerate()
@@ -2081,7 +2162,44 @@ pub fn place_with(
             // Object move. `others`: objects displaced, each with the site
             // it moves to.
             let len = objs[oi].sites.len();
-            let (new_run, others): (Vec<usize>, Vec<(usize, usize)>) = if len > 1 {
+            let (new_run, others): (Vec<usize>, Vec<(usize, usize)>) = if len > 1
+                && k == Kind::Ramb36
+            {
+                // A block RAM group moves up or down a column, or to another
+                // one, whole. Single RAMB36s in the way move into the sites
+                // it leaves, as single slices do for a chain; another group
+                // in the way refuses the move.
+                let Some(r) = run36_from(ts, len) else { continue };
+                let vacated: Vec<usize> = objs[oi]
+                    .sites
+                    .iter()
+                    .copied()
+                    .filter(|s| !r.contains(s))
+                    .collect();
+                let mut others = Vec::new();
+                let mut ok = true;
+                for &s in &r {
+                    if b18.get(&sites.ramb36[s].tile).copied().unwrap_or(0) != 0 {
+                        ok = false;
+                        break;
+                    }
+                    match owner[ki][s] {
+                        None => {}
+                        Some(o) if o == oi => {}
+                        Some(oj) => {
+                            if objs[oj].sites.len() != 1 {
+                                ok = false;
+                                break;
+                            }
+                            others.push((oj, vacated[others.len()]));
+                        }
+                    }
+                }
+                if !ok {
+                    continue;
+                }
+                (r, others)
+            } else if len > 1 {
                 // A chain may land on single slices: each moves, in order,
                 // into a site the chain leaves. Without this a chain only
                 // moves into a run of free sites, which a full device
@@ -2255,18 +2373,25 @@ pub fn place_with(
                     owner[ki][v] = Some(oj);
                     objs[oj].sites = vec![v];
                 }
-                if others.is_empty() {
-                    match k {
-                        Kind::Ramb36 => {
-                            b36.insert(sites.ramb36[old_run[0]].tile, false);
-                            b36.insert(sites.ramb36[new_run[0]].tile, true);
+                match k {
+                    // every tile the move leaves, then every tile it fills
+                    // (a displaced single lands on a site this object left)
+                    Kind::Ramb36 => {
+                        for &s in &old_run {
+                            b36.insert(sites.ramb36[s].tile, false);
                         }
-                        Kind::Ramb18 => {
-                            *b18.entry(sites.ramb18[old_run[0]].tile).or_default() -= 1;
-                            *b18.entry(sites.ramb18[new_run[0]].tile).or_default() += 1;
+                        for &(_, v) in &others {
+                            b36.insert(sites.ramb36[v].tile, true);
                         }
-                        _ => {}
+                        for &s in &new_run {
+                            b36.insert(sites.ramb36[s].tile, true);
+                        }
                     }
+                    Kind::Ramb18 if others.is_empty() => {
+                        *b18.entry(sites.ramb18[old_run[0]].tile).or_default() -= 1;
+                        *b18.entry(sites.ramb18[new_run[0]].tile).or_default() += 1;
+                    }
+                    _ => {}
                 }
                 for &s in &new_run {
                     owner[ki][s] = Some(oi);
@@ -2381,13 +2506,15 @@ pub fn place_with(
                 });
             }
             Kind::Ramb36 => {
-                let s = &sites.ramb36[ob.sites[0]];
-                p.nl.cell_mut(ob.cells[0]).bel = Some(Loc::Grid {
-                    x: s.x,
-                    y: s.y,
-                    site: s.rel.clone(),
-                    bel: "RAMB36E1~RAMB36E1".into(),
-                });
+                for (&c, &si) in ob.cells.iter().zip(&ob.sites) {
+                    let s = &sites.ramb36[si];
+                    p.nl.cell_mut(c).bel = Some(Loc::Grid {
+                        x: s.x,
+                        y: s.y,
+                        site: s.rel.clone(),
+                        bel: "RAMB36E1~RAMB36E1".into(),
+                    });
+                }
             }
             Kind::Ramb18 => {
                 let s = &sites.ramb18[ob.sites[0]];
