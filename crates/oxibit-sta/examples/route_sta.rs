@@ -224,6 +224,23 @@ fn diag_reach(g: &Graph, imp: &placed::Import, routes: &[Vec<Hop>]) {
     eprintln!("diag: {nets_bad} nets with unreached sinks, {sinks_bad} sinks, {root_off} routed nets whose driver starts no hop");
 }
 
+/// Each logical net's worst sink criticality, `name<TAB>crit` per line
+/// (nets with none left out): the placer's OXIBIT_PLACE_CRIT input.
+fn write_crit(path: &str, imp: &placed::Import, rep: &analyze::Report) -> Result<(), String> {
+    let mut by: std::collections::BTreeMap<&str, f32> = std::collections::BTreeMap::new();
+    for (i, cs) in rep.crit.iter().enumerate() {
+        let c = cs.iter().copied().fold(0.0f32, f32::max);
+        if c <= 0.0 {
+            continue;
+        }
+        let name = imp.names[i].split('@').next().unwrap_or_default();
+        let e = by.entry(name).or_insert(0.0);
+        *e = e.max(c);
+    }
+    let text: String = by.iter().map(|(n, c)| format!("{n}\t{c:.4}\n")).collect();
+    std::fs::write(path, text).map_err(|e| format!("{path}: {e}"))
+}
+
 fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().collect();
     let [_, db_root, part, meta_dir, design] = &args[..] else {
@@ -256,6 +273,11 @@ fn run() -> Result<(), String> {
         v["seconds"] = json!(secs);
         v["pass"] = json!(pass);
         println!("{}", json!({ "timing": v }));
+        if let Ok(path) = std::env::var("STA_CRIT_OUT") {
+            if let Err(e) = write_crit(&path, &imp, rep) {
+                eprintln!("route_sta: {e}");
+            }
+        }
     };
 
     if std::env::var("STA_NEXTPNR").is_ok() {

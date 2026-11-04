@@ -1217,6 +1217,11 @@ pub struct Options {
     /// demand. A placement that keeps a memory near its consumers without
     /// stacking it is the open question.
     pub bram_groups: bool,
+    /// Wirelength weight per net, by driver pin `cell.port` or net name
+    /// (default 1): a
+    /// timing-driven placement weighs critical nets up (`1 + k * crit^e`
+    /// from a previous route's analysis, `route_sta` STA_CRIT_OUT).
+    pub net_weights: HashMap<String, f64>,
 }
 
 /// Slice density per region: the die cut into `bin` x `bin` tile bins,
@@ -1343,6 +1348,7 @@ impl Default for Options {
             density: DensityCost::OFF,
             floorplan: Floorplan::default(),
             bram_groups: false,
+            net_weights: HashMap::new(),
         }
     }
 }
@@ -1908,6 +1914,7 @@ pub fn place_with(
         Fixed(i32, i32),
     }
     let mut net_pins: Vec<Vec<Pin>> = Vec::new();
+    let mut net_w: Vec<f64> = Vec::new();
     let mut cell_nets: Vec<Vec<u32>> = vec![Vec::new(); cells.len()];
     {
         let mut seen: HashSet<NetId> = HashSet::new();
@@ -1938,6 +1945,14 @@ pub fn place_with(
                     continue;
                 }
                 let ni = net_pins.len() as u32;
+                // by driver pin (`cell.port`, the timing analysis's net
+                // name), else by net name
+                let by_driver = net.driver.as_ref().map(|(dc, port)| format!("{}.{}", p.nl.cell(*dc).name, port));
+                let w = by_driver
+                    .and_then(|k| opts.net_weights.get(&k).copied())
+                    .or_else(|| opts.net_weights.get(&net.name).copied())
+                    .unwrap_or(1.0);
+                net_w.push(w);
                 let mut cs: Vec<u32> = pins
                     .iter()
                     .filter_map(|p| if let Pin::Cell(c) = p { Some(*c) } else { None })
@@ -1974,7 +1989,8 @@ pub fn place_with(
     };
     let mut net_cost: Vec<f64> = net_pins
         .iter()
-        .map(|ps| cost_of(ps, &pos, &cell_at))
+        .zip(&net_w)
+        .map(|(ps, w)| cost_of(ps, &pos, &cell_at) * w)
         .collect();
     let mut total: f64 = net_cost.iter().sum();
     st.hpwl_start = total;
@@ -2096,7 +2112,7 @@ pub fn place_with(
                 evaluated += 1;
                 let mut delta = 0.0;
                 for &ni in &touched {
-                    let c = cost_of(&net_pins[ni as usize], &pos, &cell_at);
+                    let c = cost_of(&net_pins[ni as usize], &pos, &cell_at) * net_w[ni as usize];
                     old_costs.push((ni, net_cost[ni as usize]));
                     delta += c - net_cost[ni as usize];
                     net_cost[ni as usize] = c;
@@ -2305,7 +2321,7 @@ pub fn place_with(
             evaluated += 1;
             let mut delta = 0.0;
             for &ni in &touched {
-                let c = cost_of(&net_pins[ni as usize], &pos, &cell_at);
+                let c = cost_of(&net_pins[ni as usize], &pos, &cell_at) * net_w[ni as usize];
                 old_costs.push((ni, net_cost[ni as usize]));
                 delta += c - net_cost[ni as usize];
                 net_cost[ni as usize] = c;

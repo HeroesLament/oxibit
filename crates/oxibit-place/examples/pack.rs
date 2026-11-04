@@ -27,6 +27,7 @@ fn read(path: &str) -> Result<Value, String> {
 ///   OXIBIT_PLACE_PIN_CAP / _PIN_WEIGHT  input pins per CLB tile over which each costs WEIGHT
 ///   OXIBIT_PLACE_BYP_CAP / _BYP_WEIGHT  the same for bypass pins (8 per tile)
 ///   OXIBIT_PLACE_DENSITY / _DENSITY_WEIGHT / _DENSITY_BIN  used-slice share per bin over which each slice costs WEIGHT
+///   OXIBIT_PLACE_CRIT / _CRIT_K / _CRIT_EXP  net criticalities (route_sta STA_CRIT_OUT): wirelength weight 1 + K * crit^EXP
 fn pack_policy() -> Result<PackPolicy, String> {
     let var = |k: &str| std::env::var(k).ok();
     let mut pol = match var("OXIBIT_PACK_POLICY").as_deref() {
@@ -247,6 +248,21 @@ fn run_with(args: &[String], r: &oxibit_report::Reporter) -> Result<bool, String
         // Options::bram_groups)
         if std::env::var("OXIBIT_BRAM_GROUPS").as_deref() == Ok("1") {
             opts.bram_groups = true;
+        }
+        // timing-driven placement: OXIBIT_PLACE_CRIT names a file of
+        // `net<TAB>criticality` lines (route_sta STA_CRIT_OUT); each net's
+        // wirelength weighs 1 + K * crit^E (OXIBIT_PLACE_CRIT_K, default 4;
+        // OXIBIT_PLACE_CRIT_EXP, default 2)
+        if let Ok(path) = std::env::var("OXIBIT_PLACE_CRIT") {
+            let k: f64 = std::env::var("OXIBIT_PLACE_CRIT_K").ok().and_then(|v| v.parse().ok()).unwrap_or(4.0);
+            let e: f64 = std::env::var("OXIBIT_PLACE_CRIT_EXP").ok().and_then(|v| v.parse().ok()).unwrap_or(2.0);
+            let text = std::fs::read_to_string(&path).map_err(|err| format!("{path}: {err}"))?;
+            for line in text.lines() {
+                let Some((name, c)) = line.rsplit_once('\t') else { continue };
+                let Ok(c) = c.trim().parse::<f64>() else { continue };
+                opts.net_weights.insert(name.to_string(), 1.0 + k * c.clamp(0.0, 1.0).powf(e));
+            }
+            println!("{}", json!({"net_weights": {"file": path, "nets": opts.net_weights.len(), "k": k, "exp": e}}));
         }
         if let Some(m) = std::env::var("OXIBIT_PLACE_POLISH")
             .ok()

@@ -88,6 +88,9 @@ pub struct Stats {
     pub in_loops: usize,
     /// One loop, as `cell.pin` (type) names, when there is one.
     pub loop_example: Vec<String>,
+    /// Latest arrival at any DSP48 output pin, ps, and where: how deep a
+    /// combinational multiplier chain the analysis sees.
+    pub dsp_out_max: (i64, String),
     /// Clocked DSPs, timed by a bound.
     pub bounded_cells: usize,
     /// DSPs with every register bypassed, timed through.
@@ -172,7 +175,7 @@ impl Report {
             "domains": domains,
             "paths": self.paths.iter().map(|p| path(p, true)).collect::<Vec<_>>(),
             "stats": {"nodes": s.nodes, "net_arcs": s.net_arcs, "cell_arcs": s.cell_arcs, "startpoints": s.startpoints,
-                      "endpoints": s.endpoints, "in_loops": s.in_loops, "loop_example": s.loop_example, "bounded_cells": s.bounded_cells,
+                      "endpoints": s.endpoints, "in_loops": s.in_loops, "loop_example": s.loop_example, "dsp_out_max": s.dsp_out_max, "bounded_cells": s.bounded_cells,
                       "dsp_comb_cells": s.dsp_comb_cells, "untimed": s.untimed, "unreached_sinks": s.unreached_sinks,
                       "clock_sinks": s.clock_sinks, "clock_unreached": s.clock_unreached,
                       "clock_min_ps": s.clock_min_ps, "clock_max_ps": s.clock_max_ps,
@@ -769,6 +772,15 @@ pub fn analyze(
                     format!("{}.{} ({})", imp.cells[*c].name, p, imp.cells[*c].ty)
                 })
                 .collect();
+        }
+    }
+    for (v, (c, p)) in gr.names.iter().enumerate() {
+        if imp.cells[*c].ty.starts_with("DSP48")
+            && DSP_OUT.contains(&bus(p))
+            && let Some((a, _)) = arr[v]
+            && a > rep.stats.dsp_out_max.0
+        {
+            rep.stats.dsp_out_max = (a, format!("{}.{}", imp.cells[*c].name, p));
         }
     }
     rep.stats.startpoints = start.len();
