@@ -296,6 +296,9 @@ pub struct CellInfo {
     /// The bel (`A6LUT`, `AFF`, `CARRY4`); empty when no routed net
     /// touches the cell.
     pub bel: String,
+    /// Bel pins a logical port maps to (`X_ORIG_PORT_<pin>`), when the
+    /// netlist says: a LUT's inputs, as against shared pins it does not read.
+    pub logical: Vec<String>,
 }
 
 /// One sink of a routed net's logical net: the cell, its bel pin, and the
@@ -515,6 +518,7 @@ pub fn import(g: &Graph, sites: &HashMap<String, (String, String)>, meta: &mut M
         imp.cells.push(CellInfo {
             name: name.clone(),
             ty: ty.clone(),
+            logical: attrs.keys().filter_map(|k| k.strip_prefix("X_ORIG_PORT_")).map(str::to_string).collect(),
             ..CellInfo::default()
         });
         let conns = c["connections"].as_object().cloned().unwrap_or_default();

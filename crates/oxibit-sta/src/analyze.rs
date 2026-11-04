@@ -37,7 +37,7 @@
 //! domain's worst path (the period it would run at) and Dmax the worst of
 //! those; cross-domain paths are held to the capture domain's period.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use oxibit_fasm::route::Graph;
 use oxibit_pnr::delay::{self, Model, TreeEdge};
@@ -86,6 +86,8 @@ pub struct Stats {
     pub endpoints: usize,
     /// Nodes on a combinational loop (never ordered).
     pub in_loops: usize,
+    /// One loop, as `cell.pin` (type) names, when there is one.
+    pub loop_example: Vec<String>,
     /// Clocked DSPs, timed by a bound.
     pub bounded_cells: usize,
     /// DSPs with every register bypassed, timed through.
@@ -170,7 +172,7 @@ impl Report {
             "domains": domains,
             "paths": self.paths.iter().map(|p| path(p, true)).collect::<Vec<_>>(),
             "stats": {"nodes": s.nodes, "net_arcs": s.net_arcs, "cell_arcs": s.cell_arcs, "startpoints": s.startpoints,
-                      "endpoints": s.endpoints, "in_loops": s.in_loops, "bounded_cells": s.bounded_cells,
+                      "endpoints": s.endpoints, "in_loops": s.in_loops, "loop_example": s.loop_example, "bounded_cells": s.bounded_cells,
                       "dsp_comb_cells": s.dsp_comb_cells, "untimed": s.untimed, "unreached_sinks": s.unreached_sinks,
                       "clock_sinks": s.clock_sinks, "clock_unreached": s.clock_unreached,
                       "clock_min_ps": s.clock_min_ps, "clock_max_ps": s.clock_max_ps,
@@ -372,7 +374,28 @@ pub fn analyze(
             .iter()
             .map(|h| (h.src, h.dst, h.tile, h.pi))
             .collect();
-        delay::arrivals_with(g, nets[i].driver.anchor(), &edges, opts.model)
+        let anchor = nets[i].driver.anchor();
+        let mut at = delay::arrivals_with(g, anchor, &edges, opts.model);
+        // A tree may leave the driver's site by more than one pin (a LUT's
+        // O6 straight out and through the output mux, as nextpnr routes
+        // it): every other root in the driver's tile starts there too, one
+        // site pip later.
+        let dsts: HashSet<u32> = edges.iter().map(|e| e.1).collect();
+        let home = g.node_xy(anchor);
+        let mut extra: Vec<u32> = edges
+            .iter()
+            .map(|e| e.0)
+            .filter(|n| !dsts.contains(n) && !at.contains_key(n) && g.node_xy(*n) == home)
+            .collect();
+        extra.sort_unstable();
+        extra.dedup();
+        for r in extra {
+            for (n, a) in delay::arrivals_with(g, r, &edges, opts.model) {
+                let a = a + pip as u64;
+                at.entry(n).and_modify(|b| *b = (*b).min(a)).or_insert(a);
+            }
+        }
+        at
     };
     let sink_at = |at: &HashMap<u32, u64>, sp: &SinkPin| -> Option<i64> {
         if sp.internal {
@@ -534,7 +557,11 @@ pub fn analyze(
                 }
                 let Some(o) = gr.get(c, out) else { continue };
                 for (n, p) in &pins {
-                    if p.len() == 2 && p.starts_with('A') {
+                    // A1..A5 are shared by a letter's 6LUT and 5LUT, so a
+                    // pin can carry a net only the other LUT reads (even
+                    // this LUT's own output): only the pins the cell maps
+                    // a logical input to are arcs.
+                    if p.len() == 2 && p.starts_with('A') && (info.logical.is_empty() || info.logical.contains(p)) {
                         let d = lut
                             .and_then(|l| l.arc(p, out))
                             .map(|d| d.max as i64)
@@ -708,6 +735,42 @@ pub fn analyze(
     }
     rep.stats.nodes = n;
     rep.stats.in_loops = n - order.len();
+    if order.len() < n {
+        // Every unordered node has an unordered predecessor (else it would
+        // have been ordered), so walking predecessors must close a loop.
+        let mut back: HashMap<u32, u32> = HashMap::new();
+        for a in 0..n as u32 {
+            if indeg[a as usize] == 0 {
+                continue;
+            }
+            for &(b, _) in &gr.out[a as usize] {
+                if indeg[b as usize] > 0 {
+                    back.entry(b).or_insert(a);
+                }
+            }
+        }
+        let mut v = (0..n as u32).find(|&v| indeg[v as usize] > 0).unwrap_or(0);
+        let mut seen: HashMap<u32, usize> = HashMap::new();
+        let mut walk: Vec<u32> = Vec::new();
+        while !seen.contains_key(&v) && walk.len() < 1_000_000 {
+            seen.insert(v, walk.len());
+            walk.push(v);
+            match back.get(&v) {
+                Some(&u) => v = u,
+                None => break,
+            }
+        }
+        if let Some(&at) = seen.get(&v) {
+            rep.stats.loop_example = walk[at..]
+                .iter()
+                .take(24)
+                .map(|&u| {
+                    let (c, p) = &gr.names[u as usize];
+                    format!("{}.{} ({})", imp.cells[*c].name, p, imp.cells[*c].ty)
+                })
+                .collect();
+        }
+    }
     rep.stats.startpoints = start.len();
     rep.stats.endpoints = end.len();
 

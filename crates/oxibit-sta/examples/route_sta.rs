@@ -135,7 +135,9 @@ fn nextpnr_routes(
             }
             let Some((tile, rest)) = pip.split_once('/') else { continue };
             let Some((dst, src)) = rest.split_once('/') else { continue };
-            if dst.contains('.') || tile == "SITEWIRE" {
+            // site wires (`SLICE_X0Y0.AMUX`) on either side: inside a site,
+            // or the site pin's own pip onto its tile wire
+            if dst.contains('.') || src.contains('.') || tile == "SITEWIRE" {
                 st[1] += 1;
                 continue;
             }
@@ -166,6 +168,60 @@ fn nextpnr_routes(
     }
     let routes = imp.bits.iter().map(|b| by_bit.get(b).cloned().unwrap_or_default()).collect();
     Ok((routes, st, missed))
+}
+
+/// Per net: sinks the tree does not reach from the driver, with examples
+/// (stderr): where an imported route and the import disagree on nodes.
+fn diag_reach(g: &Graph, imp: &placed::Import, routes: &[Vec<Hop>]) {
+    use std::collections::{HashMap, HashSet};
+    let (mut nets_bad, mut sinks_bad, mut root_off, mut shown) = (0usize, 0usize, 0usize, 0usize);
+    for (i, r) in routes.iter().enumerate() {
+        if imp.sink_pins[i].iter().all(|sp| sp.internal) {
+            continue;
+        }
+        let mut out: HashMap<u32, Vec<u32>> = HashMap::new();
+        for h in r {
+            out.entry(h.src).or_default().push(h.dst);
+        }
+        let roots: Vec<u32> = imp.nets[i].driver.nodes().to_vec();
+        if !roots.iter().any(|n| out.contains_key(n)) && !r.is_empty() {
+            root_off += 1;
+        }
+        let mut seen: HashSet<u32> = roots.iter().copied().collect();
+        let mut st = roots.clone();
+        while let Some(n) = st.pop() {
+            for &d in out.get(&n).map(|v| v.as_slice()).unwrap_or(&[]) {
+                if seen.insert(d) {
+                    st.push(d);
+                }
+            }
+        }
+        let bad: Vec<&placed::SinkPin> =
+            imp.sink_pins[i].iter().filter(|sp| !sp.internal && !sp.nodes.iter().any(|n| seen.contains(n))).collect();
+        if bad.is_empty() {
+            continue;
+        }
+        nets_bad += 1;
+        sinks_bad += bad.len();
+        if shown < 8 {
+            shown += 1;
+            let srcs: HashSet<u32> = r.iter().map(|h| h.src).collect();
+            let first: Vec<String> = r.iter().filter(|h| !r.iter().any(|x| x.dst == h.src)).map(|h| g.node_name(h.src)).take(3).collect();
+            eprintln!(
+                "diag net {} driver {:?} -> {:?}; tree roots {:?}; unreached {} e.g. {}.{} at {:?}; driver in tree {}",
+                imp.names[i],
+                imp.driver_pins[i],
+                roots.iter().map(|&n| g.node_name(n)).collect::<Vec<_>>(),
+                first,
+                bad.len(),
+                imp.cells[bad[0].cell].name,
+                bad[0].port,
+                bad[0].nodes.iter().take(3).map(|&n| g.node_name(n)).collect::<Vec<_>>(),
+                roots.iter().any(|n| srcs.contains(n)),
+            );
+        }
+    }
+    eprintln!("diag: {nets_bad} nets with unreached sinks, {sinks_bad} sinks, {root_off} routed nets whose driver starts no hop");
 }
 
 fn run() -> Result<(), String> {
@@ -208,6 +264,9 @@ fn run() -> Result<(), String> {
         println!("{}", json!({"check": {"nextpnr": true, "nets": routes.len(), "empty": empty,
                                          "pips": st[0], "site_pips": st[1], "same_node": st[2],
                                          "missed": st[3], "missed_examples": missed}}));
+        if std::env::var("STA_NEXTPNR").as_deref() == Ok("diag") {
+            diag_reach(&g, &imp, &routes);
+        }
         let t = std::time::Instant::now();
         let rep = analyze::analyze(&g, &imp, &imp.nets, &routes, &lib, so);
         report(0, &rep, t.elapsed().as_secs_f64());
