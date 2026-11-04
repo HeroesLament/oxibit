@@ -13,6 +13,15 @@
 //! wider than the multiplier input) is a `$mul` in fabric instead of a
 //! DSP: a few AND rows into the adder that sums the partials anyway.
 //!
+//! A row of partials sharing an A chunk whose B side is exactly two
+//! chunks (B up to 35 bits) is one cascaded pair instead (`cascade`): the
+//! lower DSP computes `A * B0`, the upper `A * B1 + (PCIN >> 17)` over the
+//! dedicated PCOUT -> PCIN wires inside one DSP tile (OPMODE Z = 101), so
+//! the row's sum never leaves the DSP column. The row's product is the
+//! lower P's low 17 bits under the upper P. That is exact: B's low chunk
+//! is 17 bits, the shift the Z mux applies, and the shift is arithmetic.
+//! Rows are then summed in fabric as a balanced tree.
+//!
 //! Two operand facts are read before sizing. A bit driven by `$and` with a
 //! constant-zero operand bit is zero (EHDL writes masks as `x & 1`, then
 //! multiplies by them). And a constant operand makes the product a sum of
@@ -248,6 +257,19 @@ fn chunks(v: &[Bit], w: usize) -> Vec<(usize, Vec<Bit>)> {
 /// A combinational DSP48E1 computing `P = A * B` (A 30 bits, of which the
 /// multiplier uses the low 25; B 18 bits).
 fn dsp_cell(name: String, a: SigSpec, b: SigSpec, p: SigSpec) -> Cell {
+    dsp_cell_with(name, a, b, p, None, None)
+}
+
+/// `dsp_cell`, optionally fed by a lower DSP's PCOUT (`pcin`: OPMODE Z =
+/// PCIN >> 17) and driving its own PCOUT onto `pcout`.
+fn dsp_cell_with(
+    name: String,
+    a: SigSpec,
+    b: SigSpec,
+    p: SigSpec,
+    pcin: Option<SigSpec>,
+    pcout: Option<SigSpec>,
+) -> Cell {
     let mut params = BTreeMap::new();
     for k in [
         "ACASCREG",
@@ -283,11 +305,16 @@ fn dsp_cell(name: String, a: SigSpec, b: SigSpec, p: SigSpec) -> Cell {
     conns.insert("D".to_string(), c(0, 25));
     conns.insert("ACIN".to_string(), c(0, 30));
     conns.insert("BCIN".to_string(), c(0, 18));
-    conns.insert("PCIN".to_string(), c(0, 48));
+    let cascaded = pcin.is_some();
+    conns.insert("PCIN".to_string(), pcin.unwrap_or_else(|| c(0, 48)));
+    if let Some(po) = pcout {
+        conns.insert("PCOUT".to_string(), po);
+    }
     conns.insert("ALUMODE".to_string(), c(0, 4));
     conns.insert("INMODE".to_string(), c(0, 5));
-    // X = M, Y = M, Z = 0.
-    conns.insert("OPMODE".to_string(), c(0b000_0101, 7));
+    // X = M, Y = M; Z = 0, or PCIN >> 17 on the upper DSP of a pair.
+    let opmode = if cascaded { 0b101_0101 } else { 0b000_0101 };
+    conns.insert("OPMODE".to_string(), c(opmode, 7));
     conns.insert("CARRYINSEL".to_string(), c(0, 3));
     for k in ["CARRYCASCIN", "CARRYIN", "MULTSIGNIN", "CLK"] {
         conns.insert(k.to_string(), c(0, 1));
@@ -344,6 +371,8 @@ pub struct DspStats {
     pub mul_const: usize,
     /// Bits found zero behind `$and` masks.
     pub and_zeros: usize,
+    /// Rows built as a cascaded pair (two DSPs, PCOUT -> PCIN).
+    pub cascades: usize,
 }
 
 /// Chunks this narrow (sign position included) multiply in fabric.
@@ -352,6 +381,11 @@ pub const SMALL: usize = 4;
 #[hot]
 /// Map multipliers needing at most `opt_max` DSPs; leave the rest as logic.
 pub fn infer(m: &mut Module, opt_max: usize) -> DspStats {
+    infer_with(m, opt_max, false)
+}
+
+/// `infer`; `cascade` builds two-chunk rows as cascaded pairs.
+pub fn infer_with(m: &mut Module, opt_max: usize, cascade: bool) -> DspStats {
     let mut st = DspStats::default();
     let mut cn = Canon::new(m);
     st.and_zeros = cn.learn_and_zeros(&m.cells);
@@ -409,6 +443,46 @@ pub fn infer(m: &mut Module, opt_max: usize) -> DspStats {
         }
         let mut terms: Vec<SigSpec> = Vec::new();
         for (sa, xa) in &ca {
+            // A cascaded pair: this row's two partials summed in the DSP
+            // column. B's lower chunk is 17 bits, the Z mux's shift.
+            if cascade
+                && cb.len() == 2
+                && cb[1].0 == 17
+                && !small(xa, &cb[0].1)
+                && !small(xa, &cb[1].1)
+                && *sa < yw
+            {
+                let lo = m.wire(48);
+                let hi = m.wire(48);
+                let pc = m.wire(48);
+                out.push(dsp_cell_with(
+                    format!("oxsyn_dsp{ci}_{sa}_0"),
+                    sext(xa, 30),
+                    sext(&cb[0].1, 18),
+                    lo.clone(),
+                    None,
+                    Some(pc.clone()),
+                ));
+                out.push(dsp_cell_with(
+                    format!("oxsyn_dsp{ci}_{sa}_17"),
+                    sext(xa, 30),
+                    sext(&cb[1].1, 18),
+                    hi.clone(),
+                    Some(pc),
+                    None,
+                ));
+                st.dsp += 2;
+                st.cascades += 1;
+                // row = hi << 17 | lo[16:0], at offset sa
+                let mut t = vec![Bit::Zero; *sa];
+                t.extend(lo.0[..17].iter().copied());
+                t.extend(hi.0.iter().copied());
+                let sign = hi.0[47];
+                t.resize(yw.max(t.len()), sign);
+                t.truncate(yw);
+                terms.push(SigSpec(t));
+                continue;
+            }
             for (sb, xb) in &cb {
                 let shift = sa + sb;
                 if shift >= yw {
@@ -441,19 +515,31 @@ pub fn infer(m: &mut Module, opt_max: usize) -> DspStats {
                 terms.push(SigSpec(t));
             }
         }
-        let mut acc = terms[0].clone();
-        for t in &terms[1..] {
-            let s = m.wire(yw as u32);
-            out.push(Cell::Binary {
-                op: Op::Add,
-                a: acc,
-                b: t.clone(),
-                signed: false,
-                y: s.clone(),
-            });
-            acc = s;
+        // A balanced tree of adds: log2(terms) carry chains deep, not a
+        // linear chain of them.
+        let mut level = terms;
+        while level.len() > 1 {
+            let mut next = Vec::with_capacity(level.len().div_ceil(2));
+            let mut it = level.into_iter();
+            while let Some(a) = it.next() {
+                match it.next() {
+                    Some(b) => {
+                        let s = m.wire(yw as u32);
+                        out.push(Cell::Binary {
+                            op: Op::Add,
+                            a,
+                            b,
+                            signed: false,
+                            y: s.clone(),
+                        });
+                        next.push(s);
+                    }
+                    None => next.push(a),
+                }
+            }
+            level = next;
         }
-        m.connects.push((y.clone(), acc));
+        m.connects.push((y.clone(), level.pop().expect("a multiplier has a term")));
     }
     m.cells = out;
     st
@@ -461,23 +547,24 @@ pub fn infer(m: &mut Module, opt_max: usize) -> DspStats {
 
 pub struct Dsp {
     pub max_per_mul: usize,
+    pub cascade: bool,
 }
 
 impl crate::stage::Pass for Dsp {
     const NAME: &'static str = "dsp";
-    const EMITS: &'static [crate::caps::Mode] = &[crate::caps::Mode::Dsp48Comb];
+    const EMITS: &'static [crate::caps::Mode] = &[crate::caps::Mode::Dsp48Comb, crate::caps::Mode::Dsp48Cascade];
     type Stats = DspStats;
     fn enabled(p: &crate::policy::PassSet) -> bool {
         p.dsp
     }
     fn json(s: &DspStats) -> serde_json::Value {
-        serde_json::json!({ "dsp": s.dsp, "mul_left": s.mul_left, "mul_fabric": s.mul_fabric, "fabric_partials": s.fabric_partials, "mul_const": s.mul_const, "and_zeros": s.and_zeros })
+        serde_json::json!({ "dsp": s.dsp, "mul_left": s.mul_left, "mul_fabric": s.mul_fabric, "fabric_partials": s.fabric_partials, "mul_const": s.mul_const, "and_zeros": s.and_zeros, "cascades": s.cascades })
     }
 }
 
 impl crate::stage::RtlPass for Dsp {
     fn run(&self, m: &mut crate::stage::Rtl) -> DspStats {
-        infer(&mut m.0, self.max_per_mul)
+        infer_with(&mut m.0, self.max_per_mul, self.cascade)
     }
 }
 
@@ -542,6 +629,43 @@ mod pb_tests {
         assert_eq!(st.dsp, 0, "a 1-bit operand is an AND row, not a DSP");
         assert_eq!(st.mul_fabric, 1);
         assert_eq!(st.and_zeros, 31);
+    }
+
+    #[test]
+    fn signed_32x32_rows_are_cascaded_pairs() {
+        let mut m = Module::new("t");
+        let a = m.wire(32);
+        let b = m.wire(32);
+        let y = m.wire(64);
+        m.cells.push(Cell::Binary {
+            op: Op::Mul,
+            a,
+            b,
+            signed: true,
+            y,
+        });
+        let st = infer_with(&mut m, 4, true);
+        assert_eq!((st.dsp, st.cascades), (4, 2), "two rows, each one PCOUT -> PCIN pair");
+        let adds = m.cells.iter().filter(|c| matches!(c, Cell::Binary { op: Op::Add, .. })).count();
+        assert_eq!(adds, 1, "two row products, one fabric add");
+        let fed: Vec<&Cell> = m
+            .cells
+            .iter()
+            .filter(|c| matches!(c, Cell::Instance { conns, .. } if conns.get("PCIN").is_some_and(|p| p.0.iter().any(|b| !matches!(b, Bit::Zero)))))
+            .collect();
+        assert_eq!(fed.len(), 2, "the upper DSP of each pair reads PCIN");
+        for c in fed {
+            let Cell::Instance { conns, .. } = c else { unreachable!() };
+            assert_eq!(conns["OPMODE"], SigSpec::constant(0b101_0101, 7), "Z = PCIN >> 17");
+        }
+        // without cascades: four independent DSPs summed by three adds
+        let mut m2 = Module::new("t");
+        let a = m2.wire(32);
+        let b = m2.wire(32);
+        let y = m2.wire(64);
+        m2.cells.push(Cell::Binary { op: Op::Mul, a, b, signed: true, y });
+        let st2 = infer_with(&mut m2, 4, false);
+        assert_eq!((st2.dsp, st2.cascades), (4, 0));
     }
 
     #[test]

@@ -55,6 +55,9 @@ pub struct Policy {
     pub carry_min: usize,
     /// Multipliers needing more DSP48E1s than this stay in fabric.
     pub dsp_max_per_mul: usize,
+    /// Sum a two-chunk row of partial products in the DSP column (a
+    /// PCOUT -> PCIN pair) rather than in fabric.
+    pub dsp_cascade: bool,
     /// Exact local area recovery passes after the area-flow passes.
     pub exact_passes: usize,
     /// LUT levels the area passes may add over the depth-optimal mapping.
@@ -73,6 +76,7 @@ impl Policy {
             area_passes: 2,
             carry_min: 3,
             dsp_max_per_mul: 4,
+            dsp_cascade: true,
             exact_passes: 0,
             depth_slack: 0,
         }

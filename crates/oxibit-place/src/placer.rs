@@ -1127,6 +1127,8 @@ pub struct PlaceStats {
     /// BRAM column, and the RAMB36 cells in them.
     pub bram_groups: usize,
     pub bram_grouped: usize,
+    /// DSP cascade pairs placed as one object on one DSP tile.
+    pub dsp_pairs: usize,
     /// Labels, held objects and box capacity, when there is a floorplan.
     pub floorplan: Option<FloorplanStats>,
     pub chains_placed: usize,
@@ -1398,8 +1400,49 @@ pub fn place_with(
         fills.push(m.slices);
     }
     let mut groups36: BTreeMap<u64, Vec<(u32, CellId)>> = BTreeMap::new();
+    // DSP cascade pairs (PCOUT -> PCIN): one object on both DSP sites of a
+    // tile, the driver on DSP_0 below, the reader on DSP_1 above, where
+    // the in-tile cascade pips are.
+    let mut dsp_upper: HashMap<CellId, CellId> = HashMap::new();
+    let mut dsp_paired: HashSet<CellId> = HashSet::new();
+    for c in p.nl.cells_of("DSP48E1_DSP48E1") {
+        if p.nl.cell(c).bel.is_some() {
+            continue;
+        }
+        let reader = p.nl.cell(c).ports.iter().filter(|(k, _)| k.starts_with("PCOUT")).find_map(|(_, port)| {
+            let n = port.net?;
+            p.nl.net(n)
+                .users
+                .iter()
+                .find(|(u, up)| up.starts_with("PCIN") && p.nl.cell(*u).ty == "DSP48E1_DSP48E1")
+                .map(|(u, _)| *u)
+        });
+        if let Some(u) = reader
+            && u != c
+            && p.nl.cell(u).bel.is_none()
+            && !dsp_paired.contains(&u)
+            && !dsp_paired.contains(&c)
+        {
+            dsp_upper.insert(c, u);
+            dsp_paired.insert(c);
+            dsp_paired.insert(u);
+        }
+    }
     for c in p.nl.cell_ids() {
         if p.nl.cell(c).bel.is_some() {
+            continue;
+        }
+        if dsp_paired.contains(&c) {
+            if let Some(&u) = dsp_upper.get(&c) {
+                st.dsp_pairs += 1;
+                objs.push(Obj {
+                    kind: Kind::Dsp,
+                    need_m: false,
+                    cells: vec![c, u],
+                    sites: Vec::new(),
+                });
+                fills.push(Vec::new());
+            }
             continue;
         }
         let k = match p.nl.cell(c).ty.as_str() {
@@ -1561,6 +1604,34 @@ pub fn place_with(
             }
         }
     }
+    // DSP sites: DSP_0 (site Y0) -> DSP_1 (Y1) of the same tile, the only
+    // cascade hop a pair uses.
+    let mut up_dsp: HashMap<usize, usize> = HashMap::new();
+    {
+        let mut by_tile: HashMap<(i32, i32), (Option<usize>, Option<usize>)> = HashMap::new();
+        for (i, d) in sites.dsp.iter().enumerate() {
+            let e = by_tile.entry((d.x, d.y)).or_default();
+            if d.rel.ends_with("Y0") {
+                e.0 = Some(i);
+            } else if d.rel.ends_with("Y1") {
+                e.1 = Some(i);
+            }
+        }
+        for (lo, hi) in by_tile.values() {
+            if let (Some(lo), Some(hi)) = (lo, hi) {
+                up_dsp.insert(*lo, *hi);
+            }
+        }
+    }
+    let rund_from = |base: usize, len: usize| -> Option<Vec<usize>> {
+        let mut v = vec![base];
+        let mut cur = base;
+        for _ in 1..len {
+            cur = *up_dsp.get(&cur)?;
+            v.push(cur);
+        }
+        Some(v)
+    };
     // The run of RAMB36 sites a group of `len` would occupy from `base`.
     let run36_from = |base: usize, len: usize| -> Option<Vec<usize>> {
         let mut v = vec![base];
@@ -1628,7 +1699,8 @@ pub fn place_with(
             let cand = match k {
                 Kind::Slice => run_from(s, fills[o].len())
                     .filter(|r| fits(&objs[o], &fills[o], r, &owner, usize::MAX)),
-                Kind::Dsp => owner[ki][s].is_none().then(|| vec![s]),
+                Kind::Dsp => rund_from(s, objs[o].cells.len())
+                    .filter(|r| r.iter().all(|&t| owner[ki][t].is_none())),
                 Kind::Ramb36 => run36_from(s, objs[o].cells.len()).filter(|r| {
                     r.iter().all(|&t| {
                         owner[ki][t].is_none()
@@ -2183,6 +2255,37 @@ pub fn place_with(
             // it moves to.
             let len = objs[oi].sites.len();
             let (new_run, others): (Vec<usize>, Vec<(usize, usize)>) = if len > 1
+                && k == Kind::Dsp
+            {
+                // A DSP cascade pair moves whole to another tile's two
+                // sites; single DSPs there move into the sites it leaves.
+                let Some(r) = rund_from(ts, len) else { continue };
+                let vacated: Vec<usize> = objs[oi]
+                    .sites
+                    .iter()
+                    .copied()
+                    .filter(|s| !r.contains(s))
+                    .collect();
+                let mut others = Vec::new();
+                let mut ok = true;
+                for &s in &r {
+                    match owner[ki][s] {
+                        None => {}
+                        Some(o) if o == oi => {}
+                        Some(oj) => {
+                            if objs[oj].sites.len() != 1 {
+                                ok = false;
+                                break;
+                            }
+                            others.push((oj, vacated[others.len()]));
+                        }
+                    }
+                }
+                if !ok {
+                    continue;
+                }
+                (r, others)
+            } else if len > 1
                 && k == Kind::Ramb36
             {
                 // A block RAM group moves up or down a column, or to another
@@ -2517,13 +2620,15 @@ pub fn place_with(
                 }
             }
             Kind::Dsp => {
-                let s = &sites.dsp[ob.sites[0]];
-                p.nl.cell_mut(ob.cells[0]).bel = Some(Loc::Grid {
-                    x: s.x,
-                    y: s.y,
-                    site: s.rel.clone(),
-                    bel: "DSP48E1".into(),
-                });
+                for (&c, &si) in ob.cells.iter().zip(&ob.sites) {
+                    let s = &sites.dsp[si];
+                    p.nl.cell_mut(c).bel = Some(Loc::Grid {
+                        x: s.x,
+                        y: s.y,
+                        site: s.rel.clone(),
+                        bel: "DSP48E1".into(),
+                    });
+                }
             }
             Kind::Ramb36 => {
                 for (&c, &si) in ob.cells.iter().zip(&ob.sites) {

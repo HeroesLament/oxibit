@@ -322,7 +322,7 @@ fn run_with(args: &[String], r: &oxibit_report::Reporter) -> Result<bool, String
         );
         println!(
             "{}",
-            json!({"placer": {"objects": ps.objects, "chains": ps.chains_placed, "bram_groups": ps.bram_groups, "bram_grouped": ps.bram_grouped, "hpwl_start": ps.hpwl_start, "hpwl_end": ps.hpwl_end,
+            json!({"placer": {"objects": ps.objects, "chains": ps.chains_placed, "bram_groups": ps.bram_groups, "bram_grouped": ps.bram_grouped, "dsp_pairs": ps.dsp_pairs, "hpwl_start": ps.hpwl_start, "hpwl_end": ps.hpwl_end,
                               "moves": ps.moves, "accepted": ps.accepted, "seconds": ps.seconds,
                               "pins": {"cap": opts.pins.cap, "weight": opts.pins.weight, "excess_start": ps.pin_excess_start, "excess_end": ps.pin_excess_end,
                                        "tiles_over_cap": ps.tiles_over_cap, "tile_max": ps.tile_pins_max, "bypass_ffs_per_slice": fopts.bypass_ffs_per_slice},

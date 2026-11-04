@@ -4,9 +4,10 @@
 //! pins the tile can hold at a constant itself (D, RSTD, CARRYINSEL2, CED,
 //! CEAD, CEINMODE, CEALUMODE) come off the routing and are listed in
 //! `DSP_GND_PINS` / `DSP_VCC_PINS`; a cascade input on GND is disconnected.
-//! Cascades (ACOUT/BCOUT/PCOUT chains) are not clustered: oxibit-synth does
-//! not emit them (caps: `Dsp48Cascade` unsupported), and any seen are
-//! counted.
+//! A PCOUT -> PCIN pair (oxibit-synth's cascaded multiplier rows) is
+//! counted here and placed by `placer` as one object on both sites of a DSP
+//! tile. Other cascades (ACOUT/BCOUT, CARRYCASCOUT, MULTSIGNOUT, chains
+//! longer than a pair) are counted as unhandled.
 
 use std::collections::BTreeMap;
 
@@ -51,6 +52,7 @@ pub fn pack_dsps(p: &mut Packer) {
     let n = p.generic_xform(&rules);
     let (gnd, vcc) = (p.nl.gnd, p.nl.vcc);
     let mut cascades = 0;
+    let mut pc_bits = 0;
     for c in p.nl.cells_of("DSP48E1_DSP48E1") {
         let mut gnd_pins =
             p.nl.cell(c)
@@ -74,7 +76,11 @@ pub fn pack_dsps(p: &mut Packer) {
                 continue;
             }
             if cascade_out(&port) && net.is_some_and(|n| !p.nl.net(n).users.is_empty()) {
-                cascades += 1;
+                if port.starts_with("PCOUT") {
+                    pc_bits += 1;
+                } else {
+                    cascades += 1;
+                }
             }
             if tile_constant(&port) {
                 if net == Some(gnd) {
@@ -95,4 +101,5 @@ pub fn pack_dsps(p: &mut Packer) {
     }
     p.count("dsp", n);
     p.count("dsp.cascade_unhandled", cascades);
+    p.count("dsp.pcout_bits", pc_bits);
 }

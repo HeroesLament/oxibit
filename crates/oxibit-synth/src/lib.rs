@@ -115,6 +115,7 @@ pub fn synth(m: &Module, dirs: &lib_ports::PrimPorts, caps: &DeviceCaps, policy:
     let ds = flow.rtl(
         &dsp::Dsp {
             max_per_mul: policy.dsp_max_per_mul,
+            cascade: policy.dsp_cascade,
         },
         &mut rtl,
     );

@@ -115,7 +115,11 @@ impl DeviceCaps {
             (Mode::Ram128x1d, PnrSupported, "oxibit-pnr cellcfg RAMD64E"),
             (Mode::MuxF7, Unsupported, "no MUXF7 in oxibit-pnr"),
             (Mode::MuxF8, Unsupported, "no MUXF8 in oxibit-pnr"),
-            (Mode::Dsp48Cascade, Unsupported, "no PCIN / PCOUT routing in oxibit-pnr"),
+            (
+                Mode::Dsp48Cascade,
+                PnrSupported,
+                "oxibit-place pairs PCOUT -> PCIN on one DSP tile; the router takes the in-tile DSP_0_PCOUT -> DSP_1_PCIN pips",
+            ),
             (Mode::Lut62, Unsupported, "no dual-output LUT packing in oxibit-pnr"),
         ];
         DeviceCaps {
