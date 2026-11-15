@@ -9,7 +9,7 @@
 //!
 //! The routing-bel settings that follow from site paths (FF data muxes,
 //! output muxes, `CY0`, `WEMUX`) are `placed::apply_site_muxes`; LUT INITs
-//! are `lutinit`. `DI1MUX` (a SLICEM LUT RAM's data input) is not written.
+//! are `lutinit`. `DI1MUX` (a SLICEM LUT RAM's data input) is a site mux there too.
 //!
 //! nextpnr writes `NOCLKINV` for both halves of every CLB tile that holds a
 //! logic cell, also a half with no FF; so does this.
@@ -130,7 +130,7 @@ pub fn slice_config(placed: &Value, locate: &dyn Fn(&str) -> Option<Located>) ->
                 "LDPE" => (false, false, true, false),
                 t => return Err(format!("{name}: unsupported FF type {t:?} at {tile}/{site}.{bel}")),
             };
-            // Vivado omits INIT at its default: 1 for the set/preset types.
+            // the vendor tool omits INIT at its default: 1 for the set/preset types.
             let def_init = if matches!(ty, "FDSE" | "FDSE_1" | "FDPE" | "FDPE_1") { 1 } else { 0 };
             let init = params.get("INIT").and_then(int_param).unwrap_or(def_init);
             let lines = out.entry(half.clone()).or_default();
@@ -333,7 +333,7 @@ pub fn dsp_config(placed: &Value, locate: &dyn Fn(&str) -> Option<Located>) -> R
             out.insert(format!("{pre}.{f}"));
         };
 
-        // 1 is the same as 2 (UG479); Vivado writes AREG_0, nothing, AREG_2.
+        // 1 is the same as 2 (UG479); the vendor tool writes AREG_0, nothing, AREG_2.
         for reg in ["AREG", "BREG"] {
             let v = int(reg, 1);
             if v == 0 || v == 2 {

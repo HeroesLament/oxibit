@@ -29,6 +29,153 @@ use std::collections::HashMap;
 
 use oxibit_fasm::route::Graph;
 
+/// The cells the timing analysis (`sta`) knows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CellKind {
+    Lut,
+    /// F7 or F8 mux.
+    Mux,
+    Ff,
+    Bram,
+    Dsp,
+}
+
+/// A cell delay in ps. `assumed`: a placeholder with no source behind it;
+/// a path that uses one says so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CellDelay {
+    pub ps: i64,
+    pub assumed: bool,
+}
+
+const fn known(ps: i64) -> CellDelay {
+    CellDelay { ps, assumed: false }
+}
+
+const fn assumed(ps: i64) -> CellDelay {
+    CellDelay { ps, assumed: true }
+}
+
+/// A port's bus: its name less the bit (`DIADI[3]` and `DIADI3` are `DIADI`).
+fn bus(port: &str) -> &str {
+    port.trim_end_matches(|c: char| c.is_ascii_digit() || c == '[' || c == ']')
+}
+
+// Sources. LUT, mux and flop: the delays nextpnr-himbaechel prints in its
+// critical path reports for this part. Block RAM and DSP48E1: the slow
+// corner's maximum in prjxray-db's `timings/BRAM_L.sdf` and `DSP_L.sdf`
+// (the block RAM's data setup there, 0.737, is the 0.74 nextpnr prints).
+
+/// Through a combinational cell, input pin `from` to output pin `to`.
+///
+/// A DSP48E1 is timed as an unregistered multiplier (AREG, BREG, MREG and
+/// PREG all 0, USE_MULT MULTIPLY, no pre-adder), the slowest arcs of the
+/// only unclocked configuration met so far; a control pin (OPMODE, ...)
+/// is given the A input's delay.
+pub fn comb(kind: CellKind, from: &str, to: &str) -> CellDelay {
+    match kind {
+        CellKind::Lut if to == "O5" => known(150),
+        CellKind::Lut => known(120),
+        CellKind::Mux if from.starts_with('S') => known(310),
+        CellKind::Mux => known(220),
+        CellKind::Dsp => known(match (bus(from), bus(to)) {
+            ("A", "ACOUT") => 723,
+            ("ACIN", "ACOUT") => 521,
+            ("B", "BCOUT") | ("BCIN", "BCOUT") => 735,
+            ("B", _) => 3656,
+            ("ACIN", _) => 3639,
+            ("BCIN", _) => 3410,
+            ("C", _) => 1820,
+            ("PCIN", _) => 1518,
+            _ => 3841,
+        }),
+        // No combinational arcs.
+        CellKind::Ff | CellKind::Bram => known(0),
+    }
+}
+
+/// Clock to output. `out_reg`: a block RAM's output register is on
+/// (DOA_REG or DOB_REG 1).
+pub fn clk_to_q(kind: CellKind, out_reg: bool) -> CellDelay {
+    match kind {
+        CellKind::Ff => known(350),
+        CellKind::Bram if out_reg => known(882),
+        CellKind::Bram => known(2454),
+        // A registered DSP48E1: none met yet.
+        _ => assumed(400),
+    }
+}
+
+/// Setup of input pin `port` before its clock.
+pub fn setup(kind: CellKind, port: &str) -> CellDelay {
+    match kind {
+        CellKind::Ff => known(100),
+        CellKind::Bram => known(match bus(port) {
+            b if b.starts_with("ADDR") => 566,
+            b if b.starts_with("WE") => 532,
+            b if b.starts_with("EN") => 466,
+            b if b.starts_with("REGCE") => 360,
+            b if b.starts_with("RST") => 342,
+            _ => 737,
+        }),
+        // A LUT RAM's write side, a registered DSP48E1.
+        _ => assumed(300),
+    }
+}
+
+// Hold: the fast corner of prjxray-db's `timings/*.sdf` (CLBLL_L, BRAM_L,
+// DSP_L): the fast minimum for delays and the fast maximum for hold checks,
+// each the extreme over the cell's configurations, so a check against
+// these is pessimistic. Routing has no fast-corner model here: a slow
+// routing delay times `HOLD_ROUTE_SCALE` stands in for it.
+
+/// The smallest fast-minimum over slow-maximum ratio of any INT_L or INT_R
+/// pip (6650 pips; median 0.276). A slow routing delay times this is a
+/// lower bound on the fast-corner one, as far as pip intrinsics go.
+pub const HOLD_ROUTE_SCALE: f64 = 0.239;
+
+/// Fast-corner minimum through a combinational cell, any arc.
+pub fn comb_min(kind: CellKind) -> CellDelay {
+    match kind {
+        CellKind::Lut => known(42),
+        CellKind::Mux => known(19),
+        CellKind::Dsp => known(132),
+        CellKind::Ff | CellKind::Bram => known(0),
+    }
+}
+
+/// Fast-corner minimum clock to output.
+pub fn clk_to_q_min(kind: CellKind) -> CellDelay {
+    match kind {
+        CellKind::Ff => known(99),
+        CellKind::Bram => known(204),
+        CellKind::Dsp => known(126),
+        CellKind::Lut | CellKind::Mux => assumed(99),
+    }
+}
+
+/// Fast-corner maximum hold after the capturing clock edge.
+pub fn hold(kind: CellKind) -> CellDelay {
+    match kind {
+        CellKind::Ff => known(241),
+        CellKind::Bram => known(667),
+        CellKind::Dsp => known(274),
+        // A LUT RAM's write side: not among the SDF cells read.
+        CellKind::Lut | CellKind::Mux => assumed(241),
+    }
+}
+
+/// `hold`, by pin where the SDF tells a cell's pins apart: a block RAM's
+/// (BRAM_L and BRAM_R, the fast maximum of each pin family). Its data
+/// pins set `hold`'s 667; an address needs 360.
+pub fn hold_pin(kind: CellKind, port: &str) -> CellDelay {
+    if kind != CellKind::Bram {
+        return hold(kind);
+    }
+    const BRAM: [(&str, i64); 6] = [("ADDR", 360), ("EN", 427), ("WE", 197), ("RSTRAM", 453), ("REGCE", 155), ("RSTREG", 67)];
+    known(BRAM.iter().find(|(p, _)| port.starts_with(p)).map_or(667, |f| f.1))
+}
+
 /// One routed edge: (src node, dst node, tile, type pip index).
 pub type TreeEdge = (u32, u32, u32, u32);
 
@@ -85,4 +232,57 @@ pub fn arrivals_with(g: &Graph, root: u32, edges: &[TreeEdge], model: Model) -> 
         }
     }
     at
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn block_ram_clock_to_out_depends_on_the_output_register() {
+        assert_eq!(clk_to_q(CellKind::Bram, false), CellDelay { ps: 2454, assumed: false });
+        assert_eq!(clk_to_q(CellKind::Bram, true), CellDelay { ps: 882, assumed: false });
+    }
+
+    #[test]
+    fn block_ram_setup_goes_by_the_pin_bus_in_either_spelling() {
+        assert_eq!(setup(CellKind::Bram, "DIPBDIP1").ps, 737);
+        assert_eq!(setup(CellKind::Bram, "DIADI[13]").ps, 737);
+        assert_eq!(setup(CellKind::Bram, "ADDRARDADDR10").ps, 566);
+        assert_eq!(setup(CellKind::Bram, "WEBWE[3]").ps, 532);
+        assert_eq!(setup(CellKind::Bram, "ENARDEN").ps, 466);
+        assert_eq!(setup(CellKind::Bram, "REGCEAREGCE").ps, 360);
+        assert_eq!(setup(CellKind::Bram, "RSTRAMARSTRAM").ps, 342);
+    }
+
+    #[test]
+    fn dsp_arcs_are_told_apart_by_bus_not_by_prefix() {
+        // ACIN and ALUMODE both start with A.
+        assert_eq!(comb(CellKind::Dsp, "A[17]", "P[3]").ps, 3841);
+        assert_eq!(comb(CellKind::Dsp, "B4", "P47").ps, 3656);
+        assert_eq!(comb(CellKind::Dsp, "ACIN29", "P0").ps, 3639);
+        assert_eq!(comb(CellKind::Dsp, "ACIN29", "ACOUT29").ps, 521);
+        assert_eq!(comb(CellKind::Dsp, "A0", "ACOUT0").ps, 723);
+        assert_eq!(comb(CellKind::Dsp, "C[5]", "P[5]").ps, 1820);
+        assert_eq!(comb(CellKind::Dsp, "PCIN47", "PCOUT47").ps, 1518);
+        assert_eq!(comb(CellKind::Dsp, "ALUMODE2", "P1").ps, 3841);
+        assert!(!comb(CellKind::Dsp, "A0", "P0").assumed);
+    }
+
+    #[test]
+    fn only_unsourced_delays_are_marked_assumed() {
+        assert!(!clk_to_q(CellKind::Ff, false).assumed);
+        assert!(!setup(CellKind::Ff, "D").assumed);
+        assert!(setup(CellKind::Lut, "WE").assumed);
+        assert!(clk_to_q(CellKind::Dsp, false).assumed);
+        assert!(setup(CellKind::Dsp, "A0").assumed);
+    }
+
+    #[test]
+    fn lut_and_mux_delays_follow_the_pins_used() {
+        assert_eq!(comb(CellKind::Lut, "A3", "O6").ps, 120);
+        assert_eq!(comb(CellKind::Lut, "A3", "O5").ps, 150);
+        assert_eq!(comb(CellKind::Mux, "0", "OUT").ps, 220);
+        assert_eq!(comb(CellKind::Mux, "S0", "OUT").ps, 310);
+    }
 }

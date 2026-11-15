@@ -14,7 +14,18 @@
 //!   non-transparent).
 //!
 //! Asynchronous-read memories up to 128 deep become distributed RAM
-//! (`lutram`).
+//! (`lutram`), up to 512 deep as banks of RAM128X1D with a LUT choosing
+//! the bank (`lutram_banked`).
+//!
+//! Before that, each memory is put in a shape the primitives take
+//! (`normalize`):
+//!
+//! - Address bits above what the memory's size needs are dropped. A write
+//!   with any of them set is past the end, which `$mem_v2` ignores, so the
+//!   write enable is gated off by them; a read past the end is x, so the
+//!   read takes whatever word the low bits pick.
+//! - A memory with several read ports and at most one write port becomes
+//!   one copy per read port, each written by that write port.
 //!
 //! No depth cascading yet: a memory deeper than the deepest fitting shape
 //! stays a `$mem_v2`. Nothing here is checked by the equivalence oracle (the
@@ -158,6 +169,12 @@ pub struct BramStats {
     pub ram64m: usize,
     pub ram128x1d: usize,
     pub mapped: usize,
+    /// Copies made of multi-read memories (one per read port past the first).
+    pub copies: usize,
+    /// Write ports gated off past the memory's end.
+    pub guarded: usize,
+    /// LUTs for the guards and the bank selects.
+    pub luts: usize,
     /// Memories left as `$mem_v2`, with the reason.
     pub left: Vec<(String, &'static str)>,
 }
@@ -200,6 +217,116 @@ fn eligible(mem: &Memory) -> Result<(), &'static str> {
     Ok(())
 }
 
+/// A LUT computing `f` (of the inputs as an integer, `ins[0]` the low bit).
+fn lut(m: &mut Module, out: &mut Vec<Cell>, st: &mut BramStats, ins: &[Bit], f: impl Fn(usize) -> bool) -> Bit {
+    let o = m.wire(1).0[0];
+    lut_to(out, st, ins, f, o);
+    o
+}
+
+/// `lut` driving `o`.
+fn lut_to(out: &mut Vec<Cell>, st: &mut BramStats, ins: &[Bit], f: impl Fn(usize) -> bool, o: Bit) {
+    let mut conns = BTreeMap::new();
+    for (i, b) in ins.iter().enumerate() {
+        conns.insert(format!("I{i}"), SigSpec(vec![*b]));
+    }
+    conns.insert("O".to_string(), SigSpec(vec![o]));
+    let init: Vec<Option<bool>> = (0..1usize << ins.len()).map(|x| Some(f(x))).collect();
+    out.push(Cell::Instance {
+        ty: format!("LUT{}", ins.len()),
+        name: format!("oxsyn_memlut{}", st.luts),
+        params: BTreeMap::from([("INIT".to_string(), Param::Bits(init))]),
+        conns,
+    });
+    st.luts += 1;
+}
+
+/// Whether any of `bits` is set, as a tree of 6-input LUTs.
+fn any(m: &mut Module, out: &mut Vec<Cell>, st: &mut BramStats, bits: &[Bit]) -> Bit {
+    let mut level: Vec<Bit> = bits.iter().copied().filter(|b| *b != Bit::Zero).collect();
+    if level.contains(&Bit::One) {
+        return Bit::One;
+    }
+    if level.is_empty() {
+        return Bit::Zero;
+    }
+    while level.len() > 1 {
+        level = level.chunks(6).map(|c| if c.len() == 1 { c[0] } else { lut(m, out, st, c, |x| x != 0) }).collect();
+    }
+    level[0]
+}
+
+/// Address bits a memory of `size` words needs.
+fn abits_for(size: u32) -> usize {
+    (u32::BITS - size.max(1).saturating_sub(1).leading_zeros()) as usize
+}
+
+/// `mem` in shapes the primitives take: address cut to the size (writes
+/// past the end gated off), one copy per read port when it has one write
+/// port or none. `Err` (with `mem` unchanged) for a memory with a nonzero
+/// offset or per-bit write enables, which the mapping reports.
+fn normalize(m: &mut Module, out: &mut Vec<Cell>, st: &mut BramStats, mem: &Memory) -> Vec<Memory> {
+    if mem.offset != 0 || mem.writes.iter().any(|w| w.en.0.iter().any(|b| *b != w.en.0[0])) {
+        return vec![mem.clone()];
+    }
+    let k = abits_for(mem.size);
+    let mut mem = mem.clone();
+    for w in &mut mem.writes {
+        if w.addr.width() as usize > k {
+            let past = any(m, out, st, &w.addr.0[k..]);
+            if past != Bit::Zero {
+                let en = lut(m, out, st, &[w.en.0[0], past], |x| x == 0b01);
+                w.en = SigSpec(vec![en; w.en.0.len()]);
+                st.guarded += 1;
+            }
+            w.addr = SigSpec(w.addr.0[..k].to_vec());
+        }
+    }
+    for r in &mut mem.reads {
+        if r.addr.width() as usize > k {
+            r.addr = SigSpec(r.addr.0[..k].to_vec());
+        }
+    }
+    if mem.reads.len() > 1 && mem.writes.len() <= 1 {
+        st.copies += mem.reads.len() - 1;
+        return mem
+            .reads
+            .iter()
+            .enumerate()
+            .map(|(i, r)| Memory {
+                name: format!("{}$rd{i}", mem.name),
+                reads: vec![r.clone()],
+                ..mem.clone()
+            })
+            .collect();
+    }
+    vec![mem]
+}
+
+/// Map one memory (already normalized), its cells named after `tag`.
+fn map_one(m: &mut Module, out: &mut Vec<Cell>, st: &mut BramStats, mem: &Memory, tag: &str) -> Result<(), &'static str> {
+    if mem.reads.len() == 1 && mem.reads[0].clk.is_none() {
+        let cells = lutram(m, mem, tag, st).or_else(|e| if e == "asynchronous read deeper than 128" { lutram_banked(m, out, mem, tag, st) } else { Err(e) })?;
+        out.extend(cells);
+        return Ok(());
+    }
+    eligible(mem)?;
+    // Every address the ports can present must land inside the shape,
+    // so size by the address width too.
+    let aw = mem.reads[0].addr.width().max(mem.writes.first().map_or(0, |w| w.addr.width()));
+    let need = (mem.size as usize).max(1usize << aw.min(20));
+    let (shape, tiles) = pick(mem.width as usize, need).ok_or("too deep")?;
+    for t in 0..tiles {
+        out.push(tile(m, mem, shape, t, tag));
+        if shape.big {
+            st.ramb36 += 1;
+        } else {
+            st.ramb18 += 1;
+        }
+    }
+    Ok(())
+}
+
 #[hot]
 pub fn map(m: &mut Module) -> BramStats {
     let mut st = BramStats::default();
@@ -210,52 +337,104 @@ pub fn map(m: &mut Module) -> BramStats {
             out.push(cell);
             continue;
         };
-        if mem.reads.len() == 1 && mem.reads[0].clk.is_none() {
-            match lutram(m, mem, mi, &mut st) {
-                Ok(cells) => {
-                    out.extend(cells);
-                    st.mapped += 1;
-                }
-                Err(why) => {
-                    st.left.push((mem.name.clone(), why));
-                    out.push(cell);
-                }
+        // Map into a scratch list, so a memory that can't be mapped whole
+        // leaves nothing half-built behind.
+        let mut cells = Vec::new();
+        let mut scratch = st.clone();
+        let parts = normalize(m, &mut cells, &mut scratch, mem);
+        let several = parts.len() > 1;
+        let mut res = Ok(());
+        for (i, part) in parts.iter().enumerate() {
+            let tag = if several { format!("{mi}r{i}") } else { mi.to_string() };
+            res = res.and_then(|_| map_one(m, &mut cells, &mut scratch, part, &tag));
+        }
+        match res {
+            Ok(()) => {
+                st = scratch;
+                st.mapped += 1;
+                out.extend(cells);
             }
-            continue;
-        }
-        if let Err(why) = eligible(mem) {
-            st.left.push((mem.name.clone(), why));
-            out.push(cell);
-            continue;
-        }
-        // Every address the ports can present must land inside the shape,
-        // so size by the address width too.
-        let aw = mem.reads[0].addr.width().max(mem.writes.first().map_or(0, |w| w.addr.width()));
-        let need = (mem.size as usize).max(1usize << aw.min(20));
-        let Some((shape, tiles)) = pick(mem.width as usize, need) else {
-            st.left.push((mem.name.clone(), "too deep"));
-            out.push(cell);
-            continue;
-        };
-        for t in 0..tiles {
-            out.push(tile(m, mem, shape, t, mi));
-            if shape.big {
-                st.ramb36 += 1;
-            } else {
-                st.ramb18 += 1;
+            Err(why) => {
+                st.left.push((mem.name.clone(), why));
+                out.push(cell);
             }
         }
-        st.mapped += 1;
     }
     m.cells = out;
     st
+}
+
+/// An asynchronous-read memory with at most one write port, 129 to 512
+/// deep: per data bit, one RAM128X1D per 128 words, the write enable of
+/// each gated by the high write address bits, the read picked by the high
+/// read address bits.
+fn lutram_banked(m: &mut Module, out: &mut Vec<Cell>, mem: &Memory, tag: &str, st: &mut BramStats) -> Result<Vec<Cell>, &'static str> {
+    if mem.writes.len() > 1 {
+        return Err("write ports > 1");
+    }
+    let rd = &mem.reads[0];
+    let wr = mem.writes.first();
+    let aw = rd.addr.width().max(wr.map_or(0, |w| w.addr.width())) as usize;
+    let banks = 1usize << aw.saturating_sub(7);
+    if aw <= 7 || banks > 4 {
+        return Err("asynchronous read deeper than 512");
+    }
+    let bit = |a: &SigSpec, i: usize| a.0.get(i).copied().unwrap_or(Bit::Zero);
+    let low = |a: &SigSpec| SigSpec((0..7).map(|i| bit(a, i)).collect());
+    let hi = |a: &SigSpec| -> Vec<Bit> { (7..aw).map(|i| bit(a, i)).collect() };
+    let (wclk, wpos) = wr.map(|w| w.clk.clone()).unwrap_or((konst(0, 1), true));
+    let we = wr.map(|w| w.en.0[0]).unwrap_or(Bit::Zero);
+    let waddr = wr.map(|w| w.addr.clone()).unwrap_or(konst(0, aw));
+    let wes: Vec<Bit> = (0..banks)
+        .map(|b| {
+            let mut ins = vec![we];
+            ins.extend(hi(&waddr));
+            lut(m, out, st, &ins, |x| x & 1 == 1 && x >> 1 == b)
+        })
+        .collect();
+    let width = mem.width as usize;
+    let mut cells = Vec::new();
+    for i in 0..width {
+        let mut outs = Vec::new();
+        for (b, web) in wes.iter().enumerate() {
+            let dpo = m.wire(1).0[0];
+            let mut conns = BTreeMap::new();
+            conns.insert("WCLK".to_string(), wclk.clone());
+            conns.insert("WE".to_string(), SigSpec(vec![*web]));
+            conns.insert("A".to_string(), low(&waddr));
+            conns.insert("DPRA".to_string(), low(&rd.addr));
+            conns.insert("D".to_string(), SigSpec(vec![wr.map(|w| w.data.0[i]).unwrap_or(Bit::Zero)]));
+            conns.insert("DPO".to_string(), SigSpec(vec![dpo]));
+            conns.insert("SPO".to_string(), m.wire(1));
+            let mut params = BTreeMap::new();
+            let init = (0..128).map(|a| Some(mem.init.get(&((b * 128 + a) as u32)).and_then(|w| w.get(i).copied().flatten()) == Some(true))).collect();
+            params.insert("INIT".to_string(), Param::Bits(init));
+            if !wpos {
+                params.insert("IS_WCLK_INVERTED".to_string(), Param::Bits(vec![Some(true)]));
+            }
+            cells.push(Cell::Instance {
+                ty: "RAM128X1D".into(),
+                name: format!("oxsyn_lutram{tag}_{i}_{b}"),
+                params,
+                conns,
+            });
+            st.ram128x1d += 1;
+            outs.push(dpo);
+        }
+        // Read select: the bank outputs as the low inputs, the high read
+        // address bits (the bank number) above them.
+        let mut ins = outs;
+        ins.extend(hi(&rd.addr));
+        lut_to(&mut cells, st, &ins, |x| (x >> (x >> banks)) & 1 == 1, rd.data.0[i]);
+    }
+    Ok(cells)
 }
 
 /// An asynchronous-read memory with at most one write port, up to 128
 /// deep, as distributed RAM (models: yosys's xilinx cells_sim.v):
 /// RAM32M (6 bits each: ports A/B/C read at the read address, port D
 /// carries the write address), RAM64M (3 bits each), RAM128X1D (1 bit).
-fn lutram(m: &mut Module, mem: &Memory, mi: usize, st: &mut BramStats) -> Result<Vec<Cell>, &'static str> {
+fn lutram(m: &mut Module, mem: &Memory, tag: &str, st: &mut BramStats) -> Result<Vec<Cell>, &'static str> {
     if mem.writes.len() > 1 {
         return Err("write ports > 1");
     }
@@ -340,7 +519,7 @@ fn lutram(m: &mut Module, mem: &Memory, mi: usize, st: &mut BramStats) -> Result
         }
         cells.push(Cell::Instance {
             ty: ty.into(),
-            name: format!("oxsyn_lutram{mi}_{t}"),
+            name: format!("oxsyn_lutram{tag}_{t}"),
             params,
             conns,
         });
@@ -349,7 +528,7 @@ fn lutram(m: &mut Module, mem: &Memory, mi: usize, st: &mut BramStats) -> Result
 }
 
 /// One column of `mem`: bits `t * width ..` of every word.
-fn tile(m: &mut Module, mem: &Memory, s: Shape, t: usize, mi: usize) -> Cell {
+fn tile(m: &mut Module, mem: &Memory, s: Shape, t: usize, tag: &str) -> Cell {
     let (abits, dbits, pbits, webits_a, webits_b) = if s.big { (16, 32, 4, 4, 8) } else { (14, 16, 2, 2, 4) };
     let rd = &mem.reads[0];
     let (rclk, rpos) = rd.clk.clone().expect("synchronous read");
@@ -504,7 +683,7 @@ fn tile(m: &mut Module, mem: &Memory, s: Shape, t: usize, mi: usize) -> Cell {
     let ty = if s.big { "RAMB36E1" } else { "RAMB18E1" };
     Cell::Instance {
         ty: ty.into(),
-        name: format!("oxsyn_bram{mi}_{t}"),
+        name: format!("oxsyn_bram{tag}_{t}"),
         params,
         conns,
     }
@@ -527,7 +706,8 @@ impl crate::stage::Pass for Bram {
     }
     fn json(s: &BramStats) -> serde_json::Value {
         serde_json::json!({ "ramb18": s.ramb18, "ramb36": s.ramb36, "ram32m": s.ram32m, "ram64m": s.ram64m,
-                            "ram128x1d": s.ram128x1d, "mapped": s.mapped, "left": s.left.len() })
+                            "ram128x1d": s.ram128x1d, "mapped": s.mapped, "copies": s.copies, "guarded": s.guarded,
+                            "luts": s.luts, "left": s.left.len() })
     }
 }
 
@@ -565,5 +745,80 @@ mod tests {
         assert_eq!(s.place(8), (None, Some(0)));
         assert_eq!(s.place(9), (Some(8), None));
         assert!(pick(1, 65536).is_none());
+    }
+
+    use oxibit_hdl::netlist::{MemRead, MemWrite};
+
+    /// A `size` x `width` memory, async reads at `aw`-bit addresses, one
+    /// write port.
+    fn memory(m: &mut Module, size: u32, width: u32, aw: u32, reads: usize) -> Memory {
+        let clk = m.wire(1);
+        let we = m.wire(1).0[0];
+        let reads = (0..reads)
+            .map(|_| MemRead {
+                clk: None,
+                addr: m.wire(aw),
+                data: m.wire(width),
+            })
+            .collect();
+        Memory {
+            name: "mm".into(),
+            width,
+            size,
+            offset: 0,
+            init: BTreeMap::new(),
+            attrs: BTreeMap::new(),
+            reads,
+            writes: vec![MemWrite {
+                clk: (clk, true),
+                addr: m.wire(aw),
+                data: m.wire(width),
+                en: SigSpec(vec![we; width as usize]),
+            }],
+        }
+    }
+
+    fn count(m: &Module, ty: &str) -> usize {
+        m.cells.iter().filter(|c| matches!(c, Cell::Instance { ty: t, .. } if t == ty)).count()
+    }
+
+    #[test]
+    fn read_ports_become_copies() {
+        let mut m = Module::new("t");
+        let mem = memory(&mut m, 32, 4, 5, 3);
+        m.cells.push(Cell::Mem(mem));
+        let st = map(&mut m);
+        assert!(st.left.is_empty(), "{:?}", st.left);
+        assert_eq!((st.copies, st.ram32m), (2, 3));
+        assert_eq!(count(&m, "RAM32M"), 3);
+    }
+
+    #[test]
+    fn deep_async_banks_and_guards() {
+        // 512 deep behind a 10-bit address: the top bit is past the end
+        // (one guard LUT); four banks of RAM128X1D per bit, a write-enable
+        // LUT per bank and a select LUT per bit.
+        let mut m = Module::new("t");
+        let mem = memory(&mut m, 512, 2, 10, 1);
+        m.cells.push(Cell::Mem(mem));
+        let st = map(&mut m);
+        assert!(st.left.is_empty(), "{:?}", st.left);
+        assert_eq!((st.guarded, st.ram128x1d), (1, 8));
+        assert_eq!(st.luts, 1 + 4 + 2);
+        assert_eq!(count(&m, "RAM128X1D"), 8);
+        assert!(!m.cells.iter().any(|c| matches!(c, Cell::Mem(_))));
+    }
+
+    #[test]
+    fn bank_select_truth_table() {
+        // Four bank outputs on I0..I3, bank number on I4..I5: O = I[bank].
+        let banks = 4;
+        let f = |x: usize| (x >> (x >> banks)) & 1 == 1;
+        for bank in 0..4 {
+            for outs in 0..16usize {
+                let x = outs | bank << banks;
+                assert_eq!(f(x), (outs >> bank) & 1 == 1);
+            }
+        }
     }
 }

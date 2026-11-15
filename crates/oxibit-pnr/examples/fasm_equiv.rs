@@ -548,6 +548,20 @@ fn main() -> R<()> {
         for letter in ['A', 'B', 'C', 'D'] {
             let key = (tile.clone(), site.clone(), letter);
             let (ia, ib) = (va.inits.get(&key).copied(), vb.inits.get(&key).copied());
+            // A LUT RAM's INIT is its contents, not a function (most are 0):
+            // its read address must sit on the same pins in both.
+            let ram = |v: &View| v.lines.contains(&format!("{tile}.{site}.{letter}LUT.RAM"));
+            if ram(&va) || ram(&vb) {
+                for j in 1..=6 {
+                    let w = format!("{letter}{j}");
+                    let (a, b) = (cx.wire_src(&va, tile, site, &w, 0), cx.wire_src(&vb, tile, site, &w, 0));
+                    if a == b {
+                        note("ram_pins_same", None);
+                    } else {
+                        note("ram_pins_differ", Some(json!({"pin": format!("{tile}/{site}.{w}"), "a": cx.name(&a), "b": cx.name(&b)})));
+                    }
+                }
+            }
             if ia.unwrap_or(0) == 0 && ib.unwrap_or(0) == 0 {
                 continue;
             }
@@ -589,7 +603,7 @@ fn main() -> R<()> {
             note(kind, Some(json!({"node": g.node_name(*n), "sources": rs.iter().map(|&r| g.node_name(r)).collect::<Vec<_>>()})));
         }
     }
-    let same = ["cell_pins_differ", "luts_differ", "site_pins_differ", "shorts_a", "shorts_b"].iter().all(|k| !counts.contains_key(k));
+    let same = ["cell_pins_differ", "luts_differ", "ram_pins_differ", "site_pins_differ", "shorts_a", "shorts_b"].iter().all(|k| !counts.contains_key(k));
     println!("{}", json!({"a": fa, "b": fb, "equivalent": same, "tiles": tiles.len(), "slices": slices.len(), "connected_cell_pins": connected.len(), "counts": counts, "examples": examples}));
     if same { Ok(()) } else { std::process::exit(1) }
 }

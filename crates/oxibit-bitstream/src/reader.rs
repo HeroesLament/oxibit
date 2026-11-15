@@ -2,7 +2,7 @@
 //! [`writer::full_configuration`](crate::writer::full_configuration), for a
 //! full-configuration bitstream (one FAR, one FDRI write of every frame in
 //! device order, as `xc7frames2bit`, `oxibit fasm2bit` and an uncompressed
-//! Vivado `write_bitstream` lay it out).
+//! the vendor tool `write_bitstream` lay it out).
 //!
 //! Frame addresses follow [`FrameLayout::next`] from the FAR written before
 //! FDRI. Where the walk changes block type, half or row, the data carries

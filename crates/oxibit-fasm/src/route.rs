@@ -229,6 +229,8 @@ pub struct Graph {
     coords: Vec<(i32, i32)>,
     /// node -> grid coordinates of one of its tiles (A* heuristic).
     node_xy: Vec<(i16, i16)>,
+    /// node -> the box of all its tiles: (x0, y0, x1, y1).
+    node_box: Vec<(i16, i16, i16, i16)>,
     /// node -> its wires' lumped RC, for a node of more than one used wire
     /// (the nodes nextpnr gives a timing class).
     node_rc: Vec<Option<NodeRc>>,
@@ -452,11 +454,15 @@ impl Graph {
         let tile_index = tiles.iter().enumerate().map(|(i, (n, _, _, _))| (n.clone(), i as u32)).collect();
         let coords: Vec<(i32, i32)> = tiles.iter().map(|&(_, _, x, y)| (x, y)).collect();
         let mut node_xy = vec![(0i16, 0i16); nodes];
+        let mut node_box = vec![(i16::MAX, i16::MAX, i16::MIN, i16::MIN); nodes];
         for (ti, base) in wire_base.iter().enumerate() {
             let n_wires = types[&tiles[ti].1].wires.len() as u32;
+            let (x, y) = (coords[ti].0 as i16, coords[ti].1 as i16);
             for wi in 0..n_wires {
                 let n = node_of[(base + wi) as usize] as usize;
-                node_xy[n] = (coords[ti].0 as i16, coords[ti].1 as i16);
+                node_xy[n] = (x, y);
+                let b = &mut node_box[n];
+                *b = (b.0.min(x), b.1.min(y), b.2.max(x), b.3.max(y));
             }
         }
         let types: HashMap<String, Arc<TypeData>> = types.into_iter().map(|(k, v)| (k, Arc::new(v))).collect();
@@ -464,6 +470,7 @@ impl Graph {
         Ok(Graph {
             coords,
             node_xy,
+            node_box,
             node_rc,
             rev: OnceLock::new(),
             first_wire: OnceLock::new(),
@@ -664,6 +671,12 @@ impl Graph {
     /// Grid coordinates of one of the node's tiles.
     pub fn node_xy(&self, n: u32) -> (i16, i16) {
         self.node_xy[n as usize]
+    }
+
+    /// The box of grid coordinates the node's tiles span: (x0, y0, x1, y1).
+    /// A long line's is 18 tiles one way; `node_xy` is some one tile of it.
+    pub fn node_box(&self, n: u32) -> (i16, i16, i16, i16) {
+        self.node_box[n as usize]
     }
 
     /// `TILE/WIRE` names of a node's first wire (for reports).

@@ -261,11 +261,22 @@ pub struct Unresolved {
     pub examples: BTreeMap<String, Vec<String>>,
 }
 
+/// The LUT letter whose O6 drives F7 mux `bel`'s data input `port`.
+fn f7_input_lut(bel: &str, port: &str) -> Option<char> {
+    match (bel, port) {
+        ("F7AMUX", "1") => Some('A'),
+        ("F7AMUX", "0") => Some('B'),
+        ("F7BMUX", "1") => Some('C'),
+        ("F7BMUX", "0") => Some('D'),
+        _ => None,
+    }
+}
+
 impl Unresolved {
     fn add(&mut self, why: &str, what: String) {
         *self.counts.entry(why.to_string()).or_default() += 1;
         let ex = self.examples.entry(why.to_string()).or_default();
-        if ex.len() < 4 {
+        if ex.len() < 32 {
             ex.push(what);
         }
     }
@@ -304,6 +315,9 @@ pub struct Import {
     pub const_sinks: Vec<(bool, u32)>,
     /// Constant inputs a site drives itself (CE from CEUSEDVCC, ...).
     pub const_internal: usize,
+    /// Constant-0 inputs of F7 muxes fed by an empty LUT, which reads 0:
+    /// nothing to route (`f7_input_lut`).
+    pub const_empty_lut: usize,
     /// The routing-bel setting every site path the import chose needs:
     /// (tile, FASM site) -> routing bel -> its input pin (`apply_site_muxes`).
     pub site_muxes: BTreeMap<(String, String), BTreeMap<String, String>>,
@@ -533,7 +547,10 @@ pub fn import(g: &Graph, sites: &HashMap<String, (String, String)>, meta: &mut M
             if bs.is_empty() {
                 continue;
             }
-            let Some(wire) = v.bels[&bel].get(p.as_str()).cloned() else {
+            // A bus bit a packer left as `NAME[i]` is the bel pin `NAMEi`
+            // (an MMCM's DRP buses: DADDR, DI, DO).
+            let flat = || p.replace(['[', ']'], "");
+            let Some(wire) = v.bels[&bel].get(p.as_str()).or_else(|| v.bels[&bel].get(flat().as_str())).cloned() else {
                 missing_pins.extend(bs.iter().map(|&b| (b, format!("{primary}.{var}.{bel}.{p}"))));
                 continue;
             };
@@ -667,13 +684,28 @@ pub fn import(g: &Graph, sites: &HashMap<String, (String, String)>, meta: &mut M
                             continue;
                         }
                     }
+                    // An F7 mux's data inputs come from inside the site, the
+                    // O6 of one LUT each (F7AMUX: 1 from A, 0 from B; F7BMUX:
+                    // 1 from C, 0 from D). A 0 there needs nothing routed
+                    // when that letter holds no LUT at all: an unused LUT
+                    // reads 0 (`oxibit_place`'s bels keep it so). With its
+                    // 5LUT in use the O6 depends on the INIT written, so
+                    // that case stays unresolved.
+                    if !val && let Some(letter) = f7_input_lut(&s.bel, &s.port) {
+                        let luts = [format!("{letter}6LUT"), format!("{letter}5LUT")];
+                        let used = site_cells.get(&(s.tile.clone(), s.site.clone())).is_some_and(|v| v.iter().any(|(bel, _)| luts.contains(bel)));
+                        if !used {
+                            imp.const_empty_lut += 1;
+                            continue;
+                        }
+                    }
                     let cands = entries(s);
                     let free = |c: &String| {
                         let k = (s.tile.clone(), s.site.clone(), c.clone());
                         forced.get(&k).is_none_or(|&o| o == b) && claimed.get(&k).is_none_or(|&o| o == b)
                     };
                     let Some(pin) = cands.iter().find(|c| free(c)).or(cands.first()).cloned() else {
-                        imp.unresolved.add("no_input_pin", format!("{}/{} {}.{} (constant)", s.tile, s.site, s.bel, s.port));
+                        imp.unresolved.add("no_input_pin", format!("{}/{} {}.{} (constant {})", s.tile, s.site, s.bel, s.port, u8::from(val)));
                         continue;
                     };
                     claimed.entry((s.tile.clone(), s.site.clone(), pin.clone())).or_insert(b);
@@ -901,6 +933,12 @@ pub fn constant_nets(g: &Graph, imp: &Import) -> (Vec<Net>, Vec<u32>) {
             if !want.values().any(|&v| v == val) {
                 continue;
             }
+            // Each sink goes to the tie that reaches it in the fewest pips,
+            // and of those the nearest to the interconnect input it enters
+            // by: the tie of that input's own tile where there is one. A
+            // sink given to a neighbouring tile's tie has to bounce across,
+            // through nodes the signals around a full block RAM need.
+            let mut best: HashMap<u32, (usize, i32, u32)> = HashMap::new();
             for tie in g.nodes_with_wire(&[wire.to_string()]) {
                 if let Some(r) = radius {
                     let (x, y) = g.node_xy(tie);
@@ -934,10 +972,15 @@ pub fn constant_nets(g: &Graph, imp: &Import) -> (Vec<Net>, Vec<u32>) {
                                 }
                                 i += 1;
                             }
+                            let ((tx, ty), (dx, dy)) = (g.node_xy(tie), g.node_xy(d));
+                            let far = (i32::from(tx) - i32::from(dx)).abs() + (i32::from(ty) - i32::from(dy)).abs();
                             for h in hard {
                                 if want.get(&h) == Some(&val) {
-                                    want.remove(&h);
-                                    by_tie.entry(tie).or_default().push(h);
+                                    let c = (level, far, tie);
+                                    let e = best.entry(h).or_insert(c);
+                                    if c < *e {
+                                        *e = c;
+                                    }
                                 }
                                 next.push(h);
                             }
@@ -945,6 +988,10 @@ pub fn constant_nets(g: &Graph, imp: &Import) -> (Vec<Net>, Vec<u32>) {
                     }
                     frontier = next;
                 }
+            }
+            for (sink, (_, _, tie)) in best {
+                want.remove(&sink);
+                by_tie.entry(tie).or_default().push(sink);
             }
         }
     }
@@ -986,7 +1033,12 @@ fn note_muxes(
 /// writes it (`write_routing_bel`): `None` for a routing bel this does not
 /// manage, `Some(None)` for a managed one whose setting is the default (no
 /// line). Managed: the FF data muxes (`AFFMUX`, `A5FFMUX`), the output muxes
-/// (`AOUTMUX`), the carry chain's `ACY0` and `PRECYINIT`, and `WEMUX`.
+/// (`AOUTMUX`), the carry chain's `ACY0` and `PRECYINIT`, `WEMUX`, and a
+/// SLICEM LUT RAM's data input select (`ADI1MUX` to `CDI1MUX`: from the
+/// bypass pin `AI` writes `ALUT.DI1MUX.AI`; the cascade from the LUT above
+/// is the default). Without the DI1MUX lines every A to C LUT RAM takes the
+/// cascade, so a RAM32M / RAM64M whose ports have their own data writes the
+/// wrong data.
 fn mux_line(bel: &str, pin: &str) -> Option<Option<String>> {
     let letter = bel.len() > 1 && "ABCD".contains(&bel[..1]);
     let rest = if letter { &bel[1..] } else { bel };
@@ -1009,6 +1061,10 @@ fn mux_line(bel: &str, pin: &str) -> Option<Option<String>> {
             }
         ))),
         "WEMUX" => Some((pin == "CE").then(|| "WEMUX.CE".to_string())),
+        "DI1MUX" if letter && "ABC".contains(&bel[..1]) => {
+            let l = &bel[..1];
+            Some((pin == format!("{l}I")).then(|| format!("{l}LUT.DI1MUX.{pin}")))
+        }
         _ => None,
     }
 }
@@ -1227,6 +1283,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn an_f7_mux_input_comes_from_its_letters_lut() {
+        assert_eq!(f7_input_lut("F7AMUX", "1"), Some('A'));
+        assert_eq!(f7_input_lut("F7AMUX", "0"), Some('B'));
+        assert_eq!(f7_input_lut("F7BMUX", "1"), Some('C'));
+        assert_eq!(f7_input_lut("F7BMUX", "0"), Some('D'));
+        assert_eq!(f7_input_lut("F7AMUX", "S0"), None);
+        assert_eq!(f7_input_lut("F8MUX", "0"), None);
+    }
+
+    #[test]
     fn site_mux_lines() {
         assert_eq!(mux_line("BFFMUX", "BX"), Some(Some("BFFMUX.BX".into())));
         assert_eq!(mux_line("CFFMUX", "CARRY4_XOR"), Some(Some("CFFMUX.XOR".into())));
@@ -1238,7 +1304,10 @@ mod tests {
         assert_eq!(mux_line("WEMUX", "WE"), Some(None));
         assert_eq!(mux_line("WEMUX", "CE"), Some(Some("WEMUX.CE".into())));
         assert_eq!(mux_line("CEUSEDMUX", "IN"), None);
-        assert_eq!(mux_line("ADI1MUX", "AI"), None);
+        assert_eq!(mux_line("ADI1MUX", "AI"), Some(Some("ALUT.DI1MUX.AI".into())));
+        assert_eq!(mux_line("CDI1MUX", "CI"), Some(Some("CLUT.DI1MUX.CI".into())));
+        assert_eq!(mux_line("BDI1MUX", "DI"), Some(None));
+        assert_eq!(mux_line("DDI1MUX", "DI"), None);
     }
 
     #[test]

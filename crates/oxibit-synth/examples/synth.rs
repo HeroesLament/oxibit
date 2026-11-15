@@ -121,6 +121,7 @@ fn main() -> ExitCode {
         }
     };
     policy.area_passes = env_num("OXIBIT_AREA_PASSES", policy.area_passes);
+    policy.exact_passes = env_num("OXIBIT_EXACT_PASSES", policy.exact_passes);
     policy.carry_min = env_num("OXIBIT_CARRY_MIN", policy.carry_min);
     let p = &mut policy.passes;
     p.dsp = env_on("OXIBIT_DSP", p.dsp);
@@ -131,6 +132,8 @@ fn main() -> ExitCode {
     p.iopad = env_on("OXIBIT_IOPAD", p.iopad);
     p.ffmerge = env_on("OXIBIT_FFMERGE", p.ffmerge);
     p.dfeed = env_on("OXIBIT_DFEED", p.dfeed);
+    p.memshare = env_on("OXIBIT_MEMSHARE", p.memshare);
+    p.memflop = env_on("OXIBIT_MEMFLOP", p.memflop);
     let caps = DeviceCaps::xc7z020();
     // Deep cones recurse once per cell; give the walk room.
     let res = std::thread::scope(|sc| {
@@ -185,6 +188,11 @@ fn main() -> ExitCode {
             "inverters": s.inverters, "dup_luts": s.dup_luts, "ff": s.ffs, "named": s.named, "nodes_by_op": r.ands_by_op, "carry_by_op": r.carry_by_op, "ramb18": r.bram.ramb18,
             "ramb36": r.bram.ramb36, "ram32m": r.bram.ram32m, "ram64m": r.bram.ram64m, "ram128x1d": r.bram.ram128x1d, "mem_mapped": r.bram.mapped, "srlc32e": r.srl.srlc32e, "srl_ffs": r.srl.ffs, "ff_constant": r.ffmerge.constant, "ff_duplicate": r.ffmerge.duplicate, "ibuf": r.iopad.ibuf, "obuf": r.iopad.obuf, "mem_left": r.bram.left});
     let mut line = line;
+    line["dsp_wanted"] = r.dsp.wanted.into();
+    line["mul_budget"] = r.dsp.mul_budget.into();
+    line["mul_const"] = r.dsp.mul_const.into();
+    line["memshare"] = serde_json::json!({"merged": r.memshare.merged, "ports": r.memshare.ports, "left": r.memshare.left});
+    line["memflop"] = serde_json::json!({"memories": r.memflop.memories, "bits": r.memflop.bits, "left": r.memflop.left});
     line["policy"] = serde_json::json!({"floor": format!("{:?}", policy.floor), "evidence": format!("{:?}", policy.evidence)});
     line["passes"] = serde_json::Value::Array(r.passes.iter().map(|p| p.json()).collect());
     println!("{line}");

@@ -17,17 +17,22 @@ use serde_json::{Value, json};
 
 use crate::netlist::{CellId, Dir, NetId, Netlist};
 
+pub mod bestchoice;
 pub mod bram;
 pub mod carry;
 pub mod clocking;
 pub mod constants;
+pub mod ctx;
 pub mod dram;
 pub mod dsp;
 pub mod ffs;
 pub mod io;
 pub mod luts;
 pub mod muxf;
+pub mod slices;
 pub mod srl;
+
+pub use ctx::{PackCtx, merging_score};
 
 /// A port and parameter rewrite from one primitive to a packed cell type
 /// (nextpnr's `XFormRule`).
@@ -115,6 +120,17 @@ pub struct Packer {
     pub stats: BTreeMap<String, usize>,
     /// I/O cells (buffers, delays) -> the IOB site they belong to.
     pub io_site: BTreeMap<CellId, String>,
+    /// Slice-sized groups of LUTs and flops (`slices::pack_slices`); empty
+    /// until that runs.
+    pub slices: Vec<slices::SliceGroup>,
+    /// Fractured letters, from the same pass: the LUT on a letter's 6LUT
+    /// -> the LUT sharing the letter on its 5LUT.
+    pub fractured: BTreeMap<CellId, CellId>,
+    /// DSP cascade links from `pack::dsp`: (producer, consumer) cell ids.
+    /// The consumer must place one DSP tile above the producer: the
+    /// cascade nets ride `always` pseudo-pips and the tileconn wire
+    /// `DSP_ACOUT* -> DSP_0_ACIN*` at grid delta (0, +5), upward only.
+    pub dsp_cascades: Vec<(CellId, CellId)>,
 }
 
 impl Packer {
@@ -126,6 +142,9 @@ impl Packer {
             cluster_of: BTreeMap::new(),
             stats: BTreeMap::new(),
             io_site: BTreeMap::new(),
+            slices: Vec::new(),
+            fractured: BTreeMap::new(),
+            dsp_cascades: Vec::new(),
         }
     }
 

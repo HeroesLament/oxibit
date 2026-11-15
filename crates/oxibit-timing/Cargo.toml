@@ -1,0 +1,13 @@
+[package]
+name = "oxibit-timing"
+description = "Silicon timing characterization: phase-sweep edge fits, model-free path delays, per-chip comparison"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+# float_roundtrip: exact float parsing. The default parser can be one ulp
+# off, which moves phase points that coincide across Vernier grids.
+serde_json = { workspace = true, features = ["float_roundtrip"] }

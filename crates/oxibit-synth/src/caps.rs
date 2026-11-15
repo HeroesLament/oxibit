@@ -68,11 +68,21 @@ pub struct Cost {
     pub lut62_packing: bool,
 }
 
+/// Sites on the part: what the netlist must fit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Sites {
+    pub dsp48e1: usize,
+    pub lut: usize,
+    /// Where the counts come from.
+    pub basis: &'static str,
+}
+
 #[derive(Clone, Debug)]
 pub struct DeviceCaps {
     pub part: &'static str,
     pub modes: BTreeMap<Mode, Status>,
     pub cost: Cost,
+    pub sites: Sites,
 }
 
 impl DeviceCaps {
@@ -144,6 +154,11 @@ impl DeviceCaps {
             cost: Cost {
                 lut_k: 6,
                 lut62_packing: false,
+            },
+            sites: Sites {
+                dsp48e1: 220,
+                lut: 53_200,
+                basis: "DSP: prjxray-db zynq7 xc7z020clg400-1 tilegrid, 110 DSP_L / DSP_R tiles of 2 DSP48E1; LUT: DS190, 13,300 slices of 4 LUTs",
             },
         }
     }

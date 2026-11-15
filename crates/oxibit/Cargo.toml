@@ -11,6 +11,7 @@ oxibit-bitstream.workspace = true
 oxibit-fasm.workspace = true
 oxibit-pnr.workspace = true
 oxibit-report.workspace = true
+oxibit-timing.workspace = true
 libc.workspace = true
 clap.workspace = true
 serde.workspace = true

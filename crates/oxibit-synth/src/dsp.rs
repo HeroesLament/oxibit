@@ -12,8 +12,19 @@
 //! `SMALL` bits (the slivers left over when an operand is a bit or two
 //! wider than the multiplier input) is a `$mul` in fabric instead of a
 //! DSP: a few AND rows into the adder that sums the partials anyway.
+//!
+//! A multiplier with a constant operand takes no DSP: it stays a `$mul`,
+//! whose partial-product rows lowering folds against the constant (a power
+//! of two, the usual case, is a shift and costs nothing; picoBEAM writes
+//! shifts as `x * 134_217_728`).
+//!
+//! The device has a fixed number of DSP48E1 sites (`budget`, less any the
+//! design instantiates itself). When the multipliers want more, the largest
+//! (by operand area, the fabric they would otherwise cost) keep their DSPs
+//! and the rest stay `$mul` for lowering, size-first: a multiplier that
+//! does not fit what is left is skipped and smaller ones may still take it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use oxibit_hdl::netlist::{Bit, Cell, Module, Op, Param, SigSpec};
 use oxibit_prof::hot;
@@ -117,6 +128,16 @@ fn signed_width(cn: &mut Canon, v: &[Bit], signed: bool, yw: usize) -> (usize, V
     }
     z.push(Bit::Zero);
     if z.len() < s.len() { (z.len(), z) } else { (s.len(), s) }
+}
+
+/// For an operand that is a constant, its set bits (1: a power of two);
+/// `None` for one that depends on a net.
+fn const_ones(cn: &mut Canon, v: &[Bit]) -> Option<usize> {
+    v.iter().try_fold(0, |n, &b| match cn.k(b) {
+        K::Const(Bit::One) => Some(n + 1),
+        K::Const(_) => Some(n),
+        K::Net(_) => None,
+    })
 }
 
 fn sext(v: &[Bit], w: usize) -> SigSpec {
@@ -236,7 +257,16 @@ fn dsp_cell(name: String, a: SigSpec, b: SigSpec, p: SigSpec) -> Cell {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct DspStats {
     pub dsp: usize,
+    /// DSP48E1 sites available to inference (the device's, less the
+    /// design's own instances).
+    pub budget: usize,
+    /// DSP48E1s that inference wanted (every multiplier within `opt_max`).
+    pub wanted: usize,
+    /// Multipliers left to fabric because the budget was spent.
+    pub mul_budget: usize,
     pub mul_left: usize,
+    /// Multipliers with a constant operand, left to lowering.
+    pub mul_const: usize,
     /// Partial products left to fabric (a chunk of at most `SMALL` bits).
     pub fabric_partials: usize,
     /// Multipliers whose every partial is narrow, left whole to fabric.
@@ -246,54 +276,125 @@ pub struct DspStats {
 /// Chunks this narrow (sign position included) multiply in fabric.
 pub const SMALL: usize = 4;
 
+fn small(x: &[Bit], y: &[Bit]) -> bool {
+    x.len() <= SMALL || y.len() <= SMALL
+}
+
+/// What inference makes of one `$mul`.
+enum Plan {
+    Const,
+    /// Every partial narrow: the multiplier is cheaper in fabric whole.
+    Fabric,
+    /// More DSPs than `opt_max`.
+    Left,
+    /// Operand chunks (A side, B side), the DSPs they take, the operand
+    /// area (the size the budget ranks by).
+    Dsp {
+        ca: Vec<(usize, Vec<Bit>)>,
+        cb: Vec<(usize, Vec<Bit>)>,
+        need: usize,
+        area: usize,
+    },
+}
+
+fn plan(cn: &mut Canon, ci: usize, a: &SigSpec, b: &SigSpec, signed: bool, yw: usize, opt_max: usize) -> Plan {
+    let (wa, ea) = signed_width(cn, &a.0, signed, yw);
+    let (wb, eb) = signed_width(cn, &b.0, signed, yw);
+    let (ka, kb) = (const_ones(cn, &ea), const_ones(cn, &eb));
+    if std::env::var_os("OXIBIT_DSP_DEBUG").is_some() {
+        eprintln!("mul {ci}: a {} b {} y {yw} signed {signed} -> {wa} x {wb} const_ones {ka:?} {kb:?}", a.width(), b.width());
+    }
+    if ka.is_some() || kb.is_some() {
+        return Plan::Const;
+    }
+    // Split each operand into chunks the multiplier takes: the top chunk
+    // signed (A <= 25, B <= 18 bits), the rest unsigned (24 / 17 bits, fed
+    // with a zero sign bit). Put the longer operand on A.
+    let (pa, pb) = if wa >= wb { (ea, eb) } else { (eb, ea) };
+    let ca = chunks(&pa, 25);
+    let cb = chunks(&pb, 18);
+    let need = ca
+        .iter()
+        .flat_map(|(_, xa)| cb.iter().map(move |(_, xb)| (xa, xb)))
+        .filter(|(xa, xb)| !small(xa, xb))
+        .count();
+    if need == 0 {
+        Plan::Fabric
+    } else if need > opt_max {
+        Plan::Left
+    } else {
+        Plan::Dsp {
+            ca,
+            cb,
+            need,
+            area: wa * wb,
+        }
+    }
+}
+
 #[hot]
-/// Map multipliers needing at most `opt_max` DSPs; leave the rest as logic.
-pub fn infer(m: &mut Module, opt_max: usize) -> DspStats {
+/// Map multipliers needing at most `opt_max` DSPs, at most `budget` DSPs
+/// in all counting the design's own DSP48E1 instances, largest first;
+/// leave the rest as logic.
+pub fn infer(m: &mut Module, opt_max: usize, budget: usize) -> DspStats {
     let mut st = DspStats::default();
     let mut cn = Canon::new(m);
     let cells = std::mem::take(&mut m.cells);
+    let own = cells.iter().filter(|c| matches!(c, Cell::Instance { ty, .. } if ty == "DSP48E1")).count();
+    st.budget = budget.saturating_sub(own);
+    let mut plans: Vec<Option<Plan>> = cells
+        .iter()
+        .enumerate()
+        .map(|(ci, cell)| match cell {
+            Cell::Binary {
+                op: Op::Mul,
+                a,
+                b,
+                signed,
+                y,
+            } => Some(plan(&mut cn, ci, a, b, *signed, y.width() as usize, opt_max)),
+            _ => None,
+        })
+        .collect();
+    // Largest operand area first, then fewer DSPs, then netlist order.
+    let mut want: Vec<(usize, usize, usize)> = plans
+        .iter()
+        .enumerate()
+        .filter_map(|(ci, p)| match p {
+            Some(Plan::Dsp { need, area, .. }) => Some((*area, *need, ci)),
+            _ => None,
+        })
+        .collect();
+    want.sort_by(|x, y| y.0.cmp(&x.0).then(x.1.cmp(&y.1)).then(x.2.cmp(&y.2)));
+    let mut left = st.budget;
+    let mut keep = BTreeSet::new();
+    for &(_, need, ci) in &want {
+        st.wanted += need;
+        if need <= left {
+            left -= need;
+            keep.insert(ci);
+        }
+    }
     let mut out = Vec::with_capacity(cells.len());
     for (ci, cell) in cells.into_iter().enumerate() {
-        let Cell::Binary {
-            op: Op::Mul,
-            a,
-            b,
-            signed,
-            y,
-        } = &cell
-        else {
+        let Cell::Binary { op: Op::Mul, y, .. } = &cell else {
             out.push(cell);
             continue;
         };
+        let (ca, cb) = match plans[ci].take() {
+            Some(Plan::Dsp { ca, cb, .. }) if keep.contains(&ci) => (ca, cb),
+            p => {
+                match p {
+                    Some(Plan::Const) => st.mul_const += 1,
+                    Some(Plan::Fabric) => st.mul_fabric += 1,
+                    Some(Plan::Left) => st.mul_left += 1,
+                    _ => st.mul_budget += 1,
+                }
+                out.push(cell);
+                continue;
+            }
+        };
         let yw = y.width() as usize;
-        let (wa, ea) = signed_width(&mut cn, &a.0, *signed, yw);
-        let (wb, eb) = signed_width(&mut cn, &b.0, *signed, yw);
-        if std::env::var_os("OXIBIT_DSP_DEBUG").is_some() {
-            eprintln!("mul {ci}: a {} b {} y {yw} signed {signed} -> {wa} x {wb}", a.width(), b.width());
-        }
-        // Split each operand into chunks the multiplier takes: the top
-        // chunk signed (A <= 25, B <= 18 bits), the rest unsigned (24 / 17
-        // bits, fed with a zero sign bit). Put the longer operand on A.
-        let (pa, pb) = if wa >= wb { (ea, eb) } else { (eb, ea) };
-        let ca = chunks(&pa, 25);
-        let cb = chunks(&pb, 18);
-        let small = |x: &Vec<Bit>, y: &Vec<Bit>| x.len() <= SMALL || y.len() <= SMALL;
-        let need = ca
-            .iter()
-            .flat_map(|(_, xa)| cb.iter().map(move |(_, xb)| (xa, xb)))
-            .filter(|(xa, xb)| !small(xa, xb))
-            .count();
-        // Every partial narrow: the multiplier is cheaper in fabric whole.
-        if need == 0 {
-            st.mul_fabric += 1;
-            out.push(cell);
-            continue;
-        }
-        if need > opt_max {
-            st.mul_left += 1;
-            out.push(cell);
-            continue;
-        }
         let mut terms: Vec<SigSpec> = Vec::new();
         for (sa, xa) in &ca {
             for (sb, xb) in &cb {
@@ -348,6 +449,8 @@ pub fn infer(m: &mut Module, opt_max: usize) -> DspStats {
 
 pub struct Dsp {
     pub max_per_mul: usize,
+    /// DSP48E1 sites on the device.
+    pub budget: usize,
 }
 
 impl crate::stage::Pass for Dsp {
@@ -358,12 +461,85 @@ impl crate::stage::Pass for Dsp {
         p.dsp
     }
     fn json(s: &DspStats) -> serde_json::Value {
-        serde_json::json!({ "dsp": s.dsp, "mul_left": s.mul_left, "mul_fabric": s.mul_fabric, "fabric_partials": s.fabric_partials })
+        serde_json::json!({ "dsp": s.dsp, "budget": s.budget, "wanted": s.wanted, "mul_budget": s.mul_budget, "mul_left": s.mul_left, "mul_const": s.mul_const, "mul_fabric": s.mul_fabric, "fabric_partials": s.fabric_partials })
     }
 }
 
 impl crate::stage::RtlPass for Dsp {
     fn run(&self, m: &mut crate::stage::Rtl) -> DspStats {
-        infer(&mut m.0, self.max_per_mul)
+        infer(&mut m.0, self.max_per_mul, self.budget)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `y = a * b`, signed, on fresh nets of the given widths.
+    fn mul(m: &mut Module, wa: u32, wb: u32) {
+        let (a, b, y) = (m.wire(wa), m.wire(wb), m.wire(wa + wb));
+        m.cells.push(Cell::Binary {
+            op: Op::Mul,
+            a,
+            b,
+            signed: true,
+            y,
+        });
+    }
+
+    fn dsps(m: &Module) -> usize {
+        m.cells.iter().filter(|c| matches!(c, Cell::Instance { ty, .. } if ty == "DSP48E1")).count()
+    }
+
+    #[test]
+    fn constant_operand_takes_no_dsp() {
+        let mut m = Module::new("t");
+        let (a, y) = (m.wire(40), m.wire(64));
+        m.cells.push(Cell::Binary {
+            op: Op::Mul,
+            a,
+            b: c(134_217_728, 32),
+            signed: false,
+            y,
+        });
+        let st = infer(&mut m, 4, 220);
+        assert_eq!((st.dsp, st.mul_const, st.wanted), (0, 1, 0));
+        assert_eq!(dsps(&m), 0);
+    }
+
+    #[test]
+    fn budget_keeps_the_largest() {
+        // 40 x 30: 4 DSPs, area 1200. 24 x 17 and 20 x 15: 1 DSP each.
+        let shapes = [(20, 15), (40, 30), (24, 17)];
+        let mut m = Module::new("t");
+        for (wa, wb) in shapes {
+            mul(&mut m, wa, wb);
+        }
+        let st = infer(&mut m, 4, 5);
+        assert_eq!((st.wanted, st.dsp, st.mul_budget), (6, 5, 1));
+        // The 20 x 15 is the one left.
+        assert!(m.cells.iter().any(|c| matches!(c, Cell::Binary { op: Op::Mul, a, .. } if a.width() == 20)));
+
+        // Room for 3 once the design's own DSP48E1 is counted: the 40 x 30
+        // does not fit, the two smaller ones still do.
+        let mut m = Module::new("t");
+        for (wa, wb) in shapes {
+            mul(&mut m, wa, wb);
+        }
+        let (a, b, p) = (m.wire(30), m.wire(18), m.wire(48));
+        m.cells.push(dsp_cell("own".into(), a, b, p));
+        let st = infer(&mut m, 4, 4);
+        assert_eq!((st.budget, st.dsp, st.mul_budget), (3, 2, 1));
+        assert_eq!(dsps(&m), 3);
+    }
+
+    #[test]
+    fn unbounded_budget_maps_everything() {
+        let mut m = Module::new("t");
+        for (wa, wb) in [(20, 15), (40, 30), (24, 17)] {
+            mul(&mut m, wa, wb);
+        }
+        let st = infer(&mut m, 4, usize::MAX);
+        assert_eq!((st.dsp, st.mul_budget), (6, 0));
     }
 }

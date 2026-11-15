@@ -6,7 +6,7 @@
 //!
 //! | Container | Header | Word byte order | Consumers |
 //! |---|---|---|---|
-//! | [`Container::Bit`] | TLV (design, part, date, time) | big-endian | Vivado, JTAG tools, `xc7frames2bit` |
+//! | [`Container::Bit`] | TLV (design, part, date, time) | big-endian | the vendor tool, JTAG tools, `xc7frames2bit` |
 //! | [`Container::RawBin`] | none | big-endian | `write_bitstream -bin_file`, SPI flash images |
 //! | [`Container::SwappedBin`] | none | byte-swapped per word | Zynq-7000 PCAP, Linux `fpga_manager` |
 //!

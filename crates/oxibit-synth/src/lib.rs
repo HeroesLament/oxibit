@@ -27,6 +27,8 @@ pub mod lib_ports;
 pub mod lower;
 pub mod map;
 pub mod memdff;
+pub mod memflop;
+pub mod memshare;
 pub mod muxchain;
 pub mod policy;
 pub mod srl;
@@ -51,6 +53,8 @@ pub struct Report {
     /// Carry-chain bits per word-level cell type (before the dead-chain sweep).
     pub carry_by_op: std::collections::BTreeMap<&'static str, usize>,
     pub mem_rd_ff: usize,
+    pub memshare: memshare::MemShareStats,
+    pub memflop: memflop::MemFlopStats,
     pub dead_ff: usize,
     pub dead_chain: usize,
     pub stats: emit::Stats,
@@ -103,10 +107,20 @@ pub fn synth(m: &Module, dirs: &lib_ports::PrimPorts, caps: &DeviceCaps, policy:
     rep.emit(phase("prepare", true));
     let mut rtl = Rtl::new(m.clone());
     let mem_rd_ff = flow.rtl(&memdff::MemDff, &mut rtl);
+    let ms = flow.rtl(
+        &memshare::MemShare {
+            dirs,
+            carry_min: policy.carry_min,
+            lut_k: caps.cost.lut_k,
+        },
+        &mut rtl,
+    );
+    let mf = flow.rtl(&memflop::MemFlop, &mut rtl);
     let mc = flow.rtl(&muxchain::MuxPack, &mut rtl);
     let ds = flow.rtl(
         &dsp::Dsp {
             max_per_mul: policy.dsp_max_per_mul,
+            budget: caps.sites.dsp48e1,
         },
         &mut rtl,
     );
@@ -144,7 +158,7 @@ pub fn synth(m: &Module, dirs: &lib_ports::PrimPorts, caps: &DeviceCaps, policy:
 
     let outs = lw.outputs();
     rep.emit(phase("map", true));
-    let mp = map::map(&lw.aig, &outs, policy.area_passes, rep);
+    let mp = map::map(&lw.aig, &outs, policy.area_passes, policy.exact_passes, rep);
     rep.emit(phase("map", false));
     let t2 = std::time::Instant::now();
 
@@ -185,6 +199,8 @@ pub fn synth(m: &Module, dirs: &lib_ports::PrimPorts, caps: &DeviceCaps, policy:
         ands_by_op: lw.ands_by_op.clone(),
         carry_by_op: lw.carry_by_op.clone(),
         mem_rd_ff,
+        memshare: ms,
+        memflop: mf,
         dead_ff,
         dead_chain,
         stats,

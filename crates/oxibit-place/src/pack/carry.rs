@@ -3,15 +3,33 @@
 //! Every CARRY4 is split into four MUXCY/XORCY pairs, the pairs are chained
 //! by their carry nets, and each chain is cut into CARRY4s again: one per
 //! four positions, stacked down a column (`dy = -(i/4 + i/100)`, skipping
-//! the tiles with no CARRY4). Each position's S and DI must come from a LUT
-//! that can sit at that position (S on the 6LUT, DI on the 5LUT, five inputs
-//! between them); otherwise a feed-through LUT1 carries the signal there.
+//! the tiles with no CARRY4). Each position's S must come from a LUT that
+//! can sit at that position, on its 6LUT; otherwise a feed-through LUT1
+//! carries the signal there. DI comes from a LUT on the 5LUT when one fits
+//! beside S (five inputs between them), else on the letter's bypass pin
+//! (AX..DX): the CY0 mux takes O5 or that pin, so DI needs no LUT of its
+//! own (nextpnr-xilinx feeds it through a LUT1 instead).
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use super::constants::prop32;
 use super::{Offset, Packer, Rule, slot};
 use crate::netlist::{CellId, Dir, NetId};
+
+/// A chain member's row offset for CARRY4 row `k` (0 at the root): the
+/// tile-grid offset nextpnr-xilinx writes, one HCLK row skipped per 25
+/// CARRY4s, which `place::import` reads against another tool's placement.
+fn chain_dy(k: usize) -> i32 {
+    -((k + k / 25) as i32)
+}
+
+/// The inverse of `chain_dy`: the CARRY4 row (0 at the root, counting up
+/// its slice column) of a chain member at row offset `dy`. Placement sites
+/// a chain by rows, not by this offset (`legalise_spread`).
+pub fn chain_row(dy: i32) -> usize {
+    let d = (-dy).max(0) as usize;
+    d - d / 26
+}
 
 fn create(p: &mut Packer, ty: &str, name: &str) -> CellId {
     let c = p.nl.add_cell(name, ty);
@@ -177,16 +195,79 @@ pub fn pack_carries(p: &mut Packer) {
         groups.push(g);
     }
 
-    let lut_types: HashSet<&str> = ["LUT1", "LUT2", "LUT3", "LUT4", "LUT5"].into_iter().collect();
+    // A chain whose carry-in is a signal takes it on CYINIT, which enters
+    // the bottom slice on AX. Position 0's DI enters on AX too (the CY0
+    // mux), constant or not, and the pin holds one net: the carry-in would
+    // be left with CIN, which no general routing reaches. So position 0's
+    // DI must come from the 5LUT instead:
+    // - a constant DI beside an S LUT of at most four inputs (five with the
+    //   constant LUT's own): a constant LUT of its own, which the loop
+    //   below seats on the 5LUT (`carry.cyinit_const_di`);
+    // - otherwise the chain gets a first position that only passes the
+    //   carry (S = 1, no DI), the real positions one up
+    //   (`carry.cyinit_shift`). Most chains are a multiple of four long, so
+    //   that costs a slice; it is the fallback.
+    let (mut cyinit_shift, mut cyinit_const_di) = (0usize, 0usize);
+    for g in groups.iter_mut() {
+        let root = g.muxcys[0];
+        let ci = p.nl.cell(root).net("CI");
+        let di = p.nl.cell(root).net("DI");
+        let live = ci.is_some_and(|n| n != p.nl.gnd && n != p.nl.vcc);
+        let (Some(ci), true, true) = (ci, live, di.is_some() && di != ci) else { continue };
+        let base = p.nl.cell(root).name.clone();
+        let vcc = p.nl.vcc;
+        let gnd = p.nl.gnd;
+        // Inputs of the LUT that alone drives S, the constant LUT's VCC
+        // input counted with them; no such LUT means a one-input feed.
+        let s_inputs = p.nl.cell(root).net("S").and_then(|s| {
+            let (d, _) = p.nl.driver(s)?;
+            // S also feeds the XORCY's LI: the MUXCY and it are one position.
+            let sole = p.nl.net(s).users.iter().all(|(u, _)| *u == root || Some(*u) == g.xorcys[0]);
+            (sole && p.nl.cell(d).ty.starts_with("LUT")).then(|| {
+                let mut ins: BTreeSet<NetId> = (0..6).filter_map(|j| p.nl.cell(d).net(&format!("I{j}"))).collect();
+                ins.insert(vcc);
+                ins.len()
+            })
+        });
+        if let (Some(d), true) = (di.filter(|&d| d == gnd || d == vcc), s_inputs.is_none_or(|n| n <= 5)) {
+            // INIT over the one input, tied high: bit 1 is the output.
+            let k = p.create_lut(&format!("{base}$cyinit$di"), &[vcc], None, prop32(if d == vcc { 2 } else { 1 }));
+            let kn = p.nl.add_net_unique(&format!("{base}$cyinit$di$o"));
+            p.nl.connect(k, "O", kn);
+            p.nl.disconnect(root, "DI");
+            p.nl.connect(root, "DI", kn);
+            cyinit_const_di += 1;
+            continue;
+        }
+        let one = p.create_lut(&format!("{base}$cyinit$one"), &[vcc], None, prop32(2));
+        let on = p.nl.add_net_unique(&format!("{base}$cyinit$one$o"));
+        p.nl.connect(one, "O", on);
+        let pass = create(p, "MUXCY", &format!("{base}$cyinit$muxcy"));
+        p.nl.connect(pass, "S", on);
+        let cn = p.nl.add_net_unique(&format!("{base}$cyinit$co"));
+        p.nl.disconnect(root, "CI");
+        p.nl.connect(root, "CI", cn);
+        if let Some(x) = g.xorcys[0] {
+            p.nl.disconnect(x, "CI");
+            p.nl.connect(x, "CI", cn);
+        }
+        p.nl.connect(pass, "CI", ci);
+        p.nl.connect(pass, "O", cn);
+        g.muxcys.insert(0, pass);
+        g.xorcys.insert(0, None);
+        cyinit_shift += 1;
+    }
+
+    let lut5_types: HashSet<&str> = ["LUT1", "LUT2", "LUT3", "LUT4", "LUT5"].into_iter().collect();
     let mut packed: BTreeSet<CellId> = BTreeSet::new();
-    let (mut feeds, mut chains) = (0usize, 0usize);
+    let (mut feeds, mut chains, mut di_bypass) = (0usize, 0usize, 0usize);
     for g in &groups {
         chains += 1;
         let mut c4s: Vec<CellId> = Vec::new();
         for i in 0..g.muxcys.len() {
             let z = (i % 4) as i32;
             let (muxcy, xorcy) = (g.muxcys[i], g.xorcys[i]);
-            let dy = -((i / 4 + i / (4 * 25)) as i32);
+            let dy = chain_dy(i / 4);
             if z == 0 {
                 let name = format!("{}$PACKED_CARRY4$", p.nl.cell(muxcy).name);
                 let c4 = create(p, "CARRY4", &name);
@@ -229,56 +310,35 @@ pub fn pack_carries(p: &mut Packer) {
                 p.nl.disconnect(x, "DI");
                 packed.insert(x);
             }
-            // S and DI from LUTs that can sit at this position, else feeds.
+            // S from a LUT that can sit on this position's 6LUT, else a
+            // feed. DI from a LUT on its 5LUT if one fits beside S, else on
+            // the bypass pin.
             let s_net = p.nl.cell(c4).net(&format!("S[{z}]"));
             let di_net = p.nl.cell(c4).net(&format!("DI[{z}]"));
-            let mut inputs: BTreeSet<NetId> = BTreeSet::new();
-            let mut s_inputs = 0;
-            let lut_driver = |p: &Packer, n: NetId| -> Option<CellId> {
+            let sole_lut = |p: &Packer, n: NetId| -> Option<CellId> {
                 let (d, _) = p.nl.driver(n)?;
-                (p.nl.net(n).users.len() == 1 && lut_types.contains(p.nl.cell(d).ty.as_str())).then_some(d)
+                (p.nl.net(n).users.len() == 1 && p.nl.cell(d).ty.starts_with("LUT")).then_some(d)
             };
-            let mut s_lut = s_net.and_then(|n| lut_driver(p, n));
-            if let Some(l) = s_lut {
-                for j in 0..5 {
-                    if let Some(x) = p.nl.cell(l).net(&format!("I{j}")) {
-                        inputs.insert(x);
-                        s_inputs += 1;
-                    }
-                }
-            }
-            let mut di_lut = di_net.and_then(|n| lut_driver(p, n));
-            if let Some(l) = di_lut {
-                for j in 0..5 {
-                    if let Some(x) = p.nl.cell(l).net(&format!("I{j}")) {
-                        inputs.insert(x);
-                    }
-                }
-            }
-            let mut count = inputs.len();
-            if s_lut.is_none() {
-                count += 1;
-            }
-            if di_lut.is_none() {
-                count += 1;
-            }
-            if count > 5 {
-                di_lut = None;
-                if s_inputs > 4 {
-                    s_lut = None;
-                }
-            }
+            let lut_inputs = |p: &Packer, l: CellId| -> BTreeSet<NetId> { (0..6).filter_map(|j| p.nl.cell(l).net(&format!("I{j}"))).collect() };
+            let mut s_lut = s_net.and_then(|n| sole_lut(p, n));
+            let s_ins = s_lut.map(|l| lut_inputs(p, l)).unwrap_or_default();
+            let di_lut = di_net.and_then(|n| sole_lut(p, n)).filter(|&l| {
+                // A fractured letter: both LUTs on A1..A5 (A6 high), the S
+                // LUT's input (a feed's one) counted when S needs a feed.
+                let s_count = if s_lut.is_some() { s_ins.len() } else { 1 };
+                let mut all = s_ins.clone();
+                all.extend(lut_inputs(p, l));
+                let all = all.len() + usize::from(s_lut.is_none());
+                lut5_types.contains(p.nl.cell(l).ty.as_str()) && s_count <= 5 && all <= 5
+            });
             if s_lut.is_none()
                 && let Some(n) = s_net
             {
                 s_lut = Some(p.feed_through_lut(n, &[(c4, format!("S[{z}]"))]));
                 feeds += 1;
             }
-            if di_lut.is_none()
-                && let Some(n) = di_net
-            {
-                di_lut = Some(p.feed_through_lut(n, &[(c4, format!("DI[{z}]"))]));
-                feeds += 1;
+            if di_lut.is_none() && di_net.is_some() {
+                di_bypass += 1;
             }
             if let Some(l) = s_lut {
                 p.add_member(
@@ -332,5 +392,24 @@ pub fn pack_carries(p: &mut Packer) {
     }
     p.count("carry.chains", chains);
     p.count("carry.feed_luts", feeds);
+    p.count("carry.di_bypass", di_bypass);
+    p.count("carry.cyinit_shift", cyinit_shift);
+    p.count("carry.cyinit_const_di", cyinit_const_di);
     p.count("carry.blasted", blasted);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chain_row_inverts_the_offset() {
+        for k in 0..2000 {
+            assert_eq!(chain_row(chain_dy(k)), k, "row {k}, offset {}", chain_dy(k));
+        }
+        // The old formula, written per position: the same offsets.
+        for i in 0..8000usize {
+            assert_eq!(chain_dy(i / 4), -((i / 4 + i / (4 * 25)) as i32));
+        }
+    }
 }

@@ -21,7 +21,7 @@ pub enum Container {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct BitHeader {
     /// Record `a`: design name, often followed by `;UserID=...;Version=...`
-    /// (Vivado) or `;Generator=...` (xc7frames2bit).
+    /// (the vendor tool) or `;Generator=...` (xc7frames2bit).
     pub design: Option<String>,
     /// Record `b`: part name, e.g. `xc7z020clg400-1`.
     pub part: Option<String>,

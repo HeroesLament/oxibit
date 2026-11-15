@@ -5,6 +5,7 @@ mod build;
 mod pnr_cmd;
 mod report;
 mod route_cmd;
+mod timing_cmd;
 mod input;
 #[cfg(target_os = "linux")]
 mod device;
@@ -79,6 +80,69 @@ enum PnrCmd {
         #[arg(long)]
         part: String,
         /// Print the final report (the `done` event) as JSON on stdout.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum TimingCmd {
+    /// Model-free path delays of timing-observatory sweeps on two units, and
+    /// their difference: (T + f - r) / 2 per mirrored slot pair, window
+    /// edges fitted below the phase step. Exit 0, 2 usage or missing data.
+    Abs {
+        /// Directory holding the sweep files (tobs_<tag>_<unit>_<run>.json).
+        #[arg(long)]
+        dir: PathBuf,
+        /// Unit (file-name unit field, e.g. dr-c or dr-c_s2) reported first.
+        a: String,
+        /// Unit subtracted from it.
+        b: String,
+        /// Design tags, e.g. t2f t3h.
+        #[arg(required = true)]
+        tags: Vec<String>,
+        /// Tags of split-counter designs (one counter per transition direction).
+        #[arg(long, value_delimiter = ',')]
+        split: Vec<String>,
+        /// Further units that vote for each design's reference edge side
+        /// (a and b always vote).
+        #[arg(long, value_delimiter = ',')]
+        vote: Vec<String>,
+        /// Per-chip calibration for a unit, UNIT=FILE (repeatable): its
+        /// capture-tap corrections are applied to that unit's edges. Units
+        /// without one are fitted on nominal taps; calibrations of units not
+        /// compared or voting are ignored.
+        #[arg(long = "calib", value_name = "UNIT=FILE")]
+        calib: Vec<String>,
+        /// Print every design's delays, not only the summary.
+        #[arg(short, long)]
+        verbose: bool,
+        /// One JSON object on stdout instead of text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// MMCM phase-tap spacing from sweeps with the launch clock moved 0..7
+    /// taps (tap_<tag>_<unit>_lt<t>_<run>.json). Prints both outputs' tap
+    /// errors. Exit 0, 2 usage or missing data.
+    Taps {
+        #[arg(long)]
+        dir: PathBuf,
+        /// Units whose edges are fitted together (one shared tap set).
+        #[arg(long, value_delimiter = ',', required = true)]
+        units: Vec<String>,
+        /// Design tags.
+        #[arg(long, value_delimiter = ',', required = true)]
+        tags: Vec<String>,
+        /// Tags of split-counter designs.
+        #[arg(long, value_delimiter = ',')]
+        split: Vec<String>,
+        /// Fit rounds.
+        #[arg(long, default_value_t = 40)]
+        iters: usize,
+        /// Store the result as the tap section of this calibration file
+        /// (created if missing). Needs exactly one unit.
+        #[arg(long, value_name = "FILE")]
+        write: Option<PathBuf>,
         #[arg(long)]
         json: bool,
     },
@@ -177,6 +241,11 @@ enum Command {
         /// TILE/WIRE root of the base clock net (BUFG output); enables FF relays.
         #[arg(long)]
         clock: Option<String>,
+    },
+    /// Silicon timing characterization from phase sweeps.
+    Timing {
+        #[command(subcommand)]
+        cmd: TimingCmd,
     },
     /// Place and route on oxibit's routing graph.
     Pnr {
@@ -320,6 +389,12 @@ fn main() -> ExitCode {
             build::fasm2bit(&input, &output, &db_root, &part, frames.as_deref(), &cli.report)
         }
         Command::BuildPort { db_root, part } => return build::serve(&db_root, &part),
+        Command::Timing { cmd: TimingCmd::Abs { dir, a, b, tags, split, vote, calib, verbose, json } } => {
+            timing_cmd::abs(timing_cmd::AbsArgs { dir: &dir, a: &a, b: &b, tags: &tags, split: &split, vote: &vote, calib: &calib, verbose, json })
+        }
+        Command::Timing { cmd: TimingCmd::Taps { dir, units, tags, split, iters, write, json } } => {
+            timing_cmd::taps(&dir, &units, &tags, &split, iters, write.as_deref(), json)
+        }
         Command::Pnr { cmd: PnrCmd::DspPatch { template, template_netlist, packed, structure, output, db_root, part, json } } => {
             return pnr_cmd::dsp_patch(pnr_cmd::DspPatchArgs {
                 template: &template,

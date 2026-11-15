@@ -2,6 +2,8 @@
 //! placement, progress on stderr.
 //!
 //! cargo run --release -p oxibit-pnr --example reroute -- DB_ROOT PART IN.FASM OUT.FASM
+//!
+//! OXIBIT_MAX_ITERS: the router's iteration cap (as `standalone`).
 
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
@@ -22,7 +24,11 @@ fn main() -> Result<(), String> {
     let db = Database::open(Path::new(db_root), part)?;
     let g = Graph::build_with(&db, None, GraphOpts { defaults: true })?;
     let fasm = std::fs::read_to_string(input).map_err(|e| format!("{input}: {e}"))?;
-    let res = reroute::run(&g, &fasm, Opts::default(), &r);
+    let mut opts = Opts::default();
+    if let Some(n) = std::env::var("OXIBIT_MAX_ITERS").ok().and_then(|n| n.parse().ok()) {
+        opts.max_iters = n;
+    }
+    let res = reroute::run(&g, &fasm, opts, &r);
     std::fs::write(output, &res.fasm).map_err(|e| format!("{output}: {e}"))?;
     eprintln!("{}\n{}", res.stats_json(), res.check_json());
     Ok(())

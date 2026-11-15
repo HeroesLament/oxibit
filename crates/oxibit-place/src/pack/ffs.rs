@@ -33,9 +33,10 @@ fn inverted_sr(p: &Packer, c: CellId) -> bool {
         .any(|k| cell.int_param(k).unwrap_or(0) != 0)
 }
 
-/// The control set a slice half holding `ff` would need.
-#[derive(Debug, PartialEq)]
-struct Ctrl {
+/// The control set a slice half holding `ff` would need. Slice packing
+/// (`slices::fits`) holds every flop of a slice to one of these.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Ctrl {
     clk: Option<NetId>,
     ce: Option<NetId>,
     sr: Option<NetId>,
@@ -45,7 +46,26 @@ struct Ctrl {
     sync: bool,
 }
 
-fn ctrl(p: &Packer, ff: CellId) -> Ctrl {
+impl Ctrl {
+    /// The same control set with the ways of writing "no enable" and "no
+    /// reset" made one: an enable tied high is no enable; a reset tied to
+    /// its inactive level is no reset; and without a reset, whether the
+    /// reset would have been synchronous says nothing. Two flops whose
+    /// normalised sets are equal ask the same of a slice's shared pins.
+    pub(crate) fn normalised(&self, gnd: NetId, vcc: NetId) -> Ctrl {
+        let mut k = self.clone();
+        if k.ce == Some(vcc) {
+            k.ce = None;
+        }
+        let inactive = if k.sr_inv { vcc } else { gnd };
+        if k.sr.is_none() || k.sr == Some(inactive) {
+            (k.sr, k.sr_inv, k.sync) = (None, false, false);
+        }
+        k
+    }
+}
+
+pub(crate) fn ctrl(p: &Packer, ff: CellId) -> Ctrl {
     let c = p.nl.cell(ff);
     Ctrl {
         clk: c.net("CK"),

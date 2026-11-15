@@ -64,6 +64,10 @@ pub struct PassSet {
     pub iopad: bool,
     /// LUT1 in front of flops whose D would need a bypass pin.
     pub dfeed: bool,
+    /// Exclusive write ports of a memory merged into one.
+    pub memshare: bool,
+    /// Memories with more than one write port as registers.
+    pub memflop: bool,
 }
 
 impl PassSet {
@@ -76,6 +80,8 @@ impl PassSet {
         bram: true,
         iopad: true,
         dfeed: true,
+        memshare: true,
+        memflop: true,
     };
 }
 
@@ -88,6 +94,9 @@ pub struct Policy {
     pub evidence: EvidenceLevel,
     /// Area-recovery passes after the depth-oriented mapping pass.
     pub area_passes: usize,
+    /// Exact area passes after those (`map`: each node of the cover takes
+    /// the cut that adds the fewest LUTs, depth unchanged).
+    pub exact_passes: usize,
     /// Adders and comparators at least this wide use carry chains (0: never).
     pub carry_min: usize,
     /// Multipliers needing more DSP48E1s than this stay in fabric.
@@ -102,7 +111,13 @@ impl Policy {
             floor: Level::PnrSupported,
             evidence: EvidenceLevel::Inspection,
             area_passes: 2,
-            carry_min: 3,
+            // picoBEAM (xc7z020): 1 pass -242 LUTs, 2 passes -250, depth
+            // unchanged. Swept 0, 1, 2. Not yet CEC-checked.
+            exact_passes: 2,
+            // picoBEAM (xc7z020): at 3 the design needs 13,500 slices of
+            // 13,300 (each chain row takes a whole slice); at 8, 12,877
+            // (-1,181 CARRY4, +813 LUTs). Swept 3, 8, 12, 16.
+            carry_min: 8,
             dsp_max_per_mul: 4,
         }
     }

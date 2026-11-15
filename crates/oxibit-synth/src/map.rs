@@ -1,15 +1,21 @@
-//! K-input LUT mapping of an AIG with priority cuts.
+//! K-input LUT mapping of an AIG with priority cuts, for any K up to 6
+//! (6 on xc7, 4 on Lattice Nexus).
 //!
 //! Per node, keep the `C` best K-feasible cuts built from the fanins'
 //! cuts. Pass 1 picks for depth; later passes pick for area flow under the
-//! required times of the previous cover, so depth never grows. The cover
-//! is extracted from the outputs, and each chosen cut's function is
-//! computed by simulating its cone over the leaves.
+//! required times of the previous cover, so depth never grows. Then exact
+//! area passes (ABC `if`'s area recovery): each node of the cover in turn
+//! gives up its cut, and takes the stored cut that adds the fewest LUTs to
+//! the cover as it stands (its exclusive cone, by reference counting),
+//! within its required time. The cover is extracted from the outputs, and
+//! each chosen cut's function is computed by simulating its cone over the
+//! leaves.
 
 use oxibit_prof::{hot, hot_block};
 
 use crate::aig::{Aig, Lit, Node};
 
+/// Widest cut the mapper can hold (truth tables are u64).
 pub const K: usize = 6;
 const C: usize = 8;
 
@@ -37,10 +43,10 @@ impl Cut {
     fn leaves(&self) -> &[u32] {
         &self.leaves[..self.n as usize]
     }
-    /// Union of two sorted leaf sets, if it has at most K leaves.
-    fn merge(a: &Cut, b: &Cut) -> Option<Cut> {
+    /// Union of two sorted leaf sets, if it has at most `k` leaves.
+    fn merge(a: &Cut, b: &Cut, k: usize) -> Option<Cut> {
         let sig = a.sig | b.sig;
-        if sig.count_ones() as usize > K {
+        if sig.count_ones() as usize > k {
             return None;
         }
         let (x, y) = (a.leaves(), b.leaves());
@@ -58,7 +64,7 @@ impl Cut {
                 j += 1;
                 x[i - 1]
             };
-            if n == K {
+            if n == k {
                 return None;
             }
             out[n] = v;
@@ -103,6 +109,7 @@ enum Goal {
 
 struct Mapper<'a> {
     g: &'a Aig,
+    k: usize,
     cuts: Vec<Vec<Cut>>,
     best: Vec<Option<Cut>>,
     arr: Vec<u32>,
@@ -130,7 +137,7 @@ impl<'a> Mapper<'a> {
             let cb: Vec<&Cut> = std::iter::once(&tb).chain(self.cuts[nb].iter()).collect();
             for x in &ca {
                 for y in &cb {
-                    let Some(mut c) = Cut::merge(x, y) else {
+                    let Some(mut c) = Cut::merge(x, y, self.k) else {
                         continue;
                     };
                     if cand.iter().any(|o| o.dominates(&c)) {
@@ -166,6 +173,111 @@ impl<'a> Mapper<'a> {
             self.af[i] = b.af / self.refs[i].max(1.0);
             self.cuts[i] = cand;
         }
+    }
+
+    /// LUTs `cut` adds to the cover: itself, and every leaf's cut that no
+    /// other LUT of the cover references yet, recursively. Leaves the
+    /// references counted.
+    fn ref_cut(&self, nref: &mut [u32], cut: &Cut) -> u32 {
+        let mut area = 1;
+        for &l in cut.leaves() {
+            let l = l as usize;
+            if nref[l] == 0
+                && let Some(c) = self.best[l]
+            {
+                area += self.ref_cut(nref, &c);
+            }
+            nref[l] += 1;
+        }
+        area
+    }
+
+    /// The inverse of `ref_cut`: LUTs the cover loses when `cut` goes.
+    fn deref_cut(&self, nref: &mut [u32], cut: &Cut) -> u32 {
+        let mut area = 1;
+        for &l in cut.leaves() {
+            let l = l as usize;
+            nref[l] -= 1;
+            if nref[l] == 0
+                && let Some(c) = self.best[l]
+            {
+                area += self.deref_cut(nref, &c);
+            }
+        }
+        area
+    }
+
+    /// One exact area pass over the cover `used` (with its reference
+    /// counts `nref`), in topological order, under the required times of
+    /// the cover before it.
+    fn exact_pass(&mut self, nref: &mut [u32]) {
+        for i in 0..self.g.nodes.len() {
+            if self.cuts[i].is_empty() {
+                continue;
+            }
+            let in_cover = nref[i] > 0;
+            if in_cover {
+                let b = self.best[i].expect("a cut");
+                self.deref_cut(nref, &b);
+            }
+            let req = self.req[i];
+            let mut pick: Option<(u32, u32, u8, usize)> = None;
+            for (j, c) in self.cuts[i].iter().enumerate() {
+                let arr = c.leaves().iter().map(|&l| self.arr[l as usize]).max().unwrap_or(0) + 1;
+                if arr > req {
+                    continue;
+                }
+                let area = self.ref_cut(nref, c);
+                self.deref_cut(nref, c);
+                let key = (area, arr, c.n, j);
+                if pick.is_none_or(|p| (key.0, key.1, key.2) < (p.0, p.1, p.2)) {
+                    pick = Some(key);
+                }
+            }
+            if let Some((_, arr, _, j)) = pick {
+                let c = self.cuts[i][j];
+                self.best[i] = Some(c);
+                self.arr[i] = arr;
+            } else {
+                // Nothing meets the required time: keep the cut it had,
+                // with its arrival as the leaves now give it.
+                let b = self.best[i].expect("a cut");
+                self.arr[i] = b.leaves().iter().map(|&l| self.arr[l as usize]).max().unwrap_or(0) + 1;
+            }
+            if in_cover {
+                let b = self.best[i].expect("a cut");
+                self.ref_cut(nref, &b);
+            }
+        }
+    }
+
+    /// Reference counts of the cover reachable from the outputs (each
+    /// output counts once).
+    fn cover_refs(&self, outs: &[Lit]) -> Vec<u32> {
+        let n = self.g.nodes.len();
+        let mut nref = vec![0u32; n];
+        let mut seen = vec![false; n];
+        let mut stack: Vec<u32> = Vec::new();
+        for o in outs {
+            let k = o.node();
+            nref[k as usize] += 1;
+            if !seen[k as usize] {
+                seen[k as usize] = true;
+                stack.push(k);
+            }
+        }
+        while let Some(k) = stack.pop() {
+            if let Some(c) = self.best[k as usize] {
+                for &l in c.leaves() {
+                    nref[l as usize] += 1;
+                    if !seen[l as usize] {
+                        seen[l as usize] = true;
+                        stack.push(l);
+                    }
+                }
+            }
+        }
+        nref
     }
 
     /// Mark the cover reachable from the outputs; set required times and
@@ -250,8 +362,22 @@ pub fn cut_tt(g: &Aig, root: u32, leaves: &[u32]) -> u64 {
     go(g, root, &mut memo)
 }
 
+/// Map with 6-input LUTs.
+pub fn map(g: &Aig, outs: &[Lit], area_passes: usize, exact_passes: usize, rep: &dyn oxibit_report::Progress) -> Mapping {
+    map_k(g, outs, K, area_passes, exact_passes, rep)
+}
+
+/// Map with `k`-input LUTs, 2 <= k <= 6.
 #[hot]
-pub fn map(g: &Aig, outs: &[Lit], area_passes: usize, rep: &dyn oxibit_report::Progress) -> Mapping {
+pub fn map_k(
+    g: &Aig,
+    outs: &[Lit],
+    k: usize,
+    area_passes: usize,
+    exact_passes: usize,
+    rep: &dyn oxibit_report::Progress,
+) -> Mapping {
+    let k = k.clamp(2, K);
     let n = g.nodes.len();
     let mut refs = vec![0f32; n];
     for node in &g.nodes {
@@ -265,6 +391,7 @@ pub fn map(g: &Aig, outs: &[Lit], area_passes: usize, rep: &dyn oxibit_report::P
     }
     let mut m = Mapper {
         g,
+        k,
         cuts: vec![Vec::new(); n],
         best: vec![None; n],
         arr: vec![0; n],
@@ -286,6 +413,12 @@ pub fn map(g: &Aig, outs: &[Lit], area_passes: usize, rep: &dyn oxibit_report::P
         hot_block!("map.area", { m.pass(Goal::Area) });
         (used, depth) = m.cover(outs);
         report(&format!("area{}", k + 1), &m.best, &used, depth);
+    }
+    for k in 0..exact_passes {
+        let mut nref = m.cover_refs(outs);
+        hot_block!("map.exact", { m.exact_pass(&mut nref) });
+        (used, depth) = m.cover(outs);
+        report(&format!("exact{}", k + 1), &m.best, &used, depth);
     }
     m.cuts = Vec::new();
     hot_block!("map.tt", {
@@ -363,8 +496,35 @@ mod tests {
             c = g.or(t, u);
         }
         outs.push(c);
-        let m = map(&g, &outs, 2, &oxibit_report::Silent);
+        let m = map(&g, &outs, 2, 0, &oxibit_report::Silent);
         check(&g, &outs, &m);
         assert!(m.luts.iter().all(|l| l.leaves.len() <= K));
+        // Exact area: still correct, no more LUTs, no deeper.
+        let e = map(&g, &outs, 2, 2, &oxibit_report::Silent);
+        check(&g, &outs, &e);
+        assert!(e.luts.len() <= m.luts.len(), "{} > {}", e.luts.len(), m.luts.len());
+        assert!(e.depth <= m.depth);
+    }
+
+    #[test]
+    fn maps_adder_with_4_input_luts() {
+        let mut g = Aig::new();
+        let a: Vec<Lit> = (0..8).map(|_| g.input()).collect();
+        let b: Vec<Lit> = (0..8).map(|_| g.input()).collect();
+        let mut c = Lit::FALSE;
+        let mut outs = Vec::new();
+        for i in 0..8 {
+            let s = g.xor(a[i], b[i]);
+            outs.push(g.xor(s, c));
+            let t = g.and(a[i], b[i]);
+            let u = g.and(s, c);
+            c = g.or(t, u);
+        }
+        outs.push(c);
+        let m = map_k(&g, &outs, 4, 2, 2, &oxibit_report::Silent);
+        check(&g, &outs, &m);
+        assert!(m.luts.iter().all(|l| l.leaves.len() <= 4));
+        let m6 = map(&g, &outs, 2, 2, &oxibit_report::Silent);
+        assert!(m.luts.len() >= m6.luts.len());
     }
 }

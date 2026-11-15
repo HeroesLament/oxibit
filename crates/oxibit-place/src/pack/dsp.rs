@@ -44,6 +44,11 @@ pub fn pack_dsps(p: &mut Packer) {
             }
             if cascade_out(&port) && net.is_some_and(|n| !p.nl.net(n).users.is_empty()) {
                 cascades += 1;
+                for (user, _port) in p.nl.net(net.unwrap()).users.iter() {
+                    if *user != c {
+                        p.dsp_cascades.push((c, *user));
+                    }
+                }
             }
             if tile_constant(&port) {
                 if net == Some(gnd) {
@@ -59,5 +64,5 @@ pub fn pack_dsps(p: &mut Packer) {
         p.nl.cell_mut(c).attrs.insert("DSP_VCC_PINS".into(), json!(vcc_pins));
     }
     p.count("dsp", n);
-    p.count("dsp.cascade_unhandled", cascades);
+    p.count("dsp.cascade_links", cascades);
 }
