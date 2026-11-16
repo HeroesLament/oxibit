@@ -16,8 +16,8 @@ What oxibit reads, with the evidence each claim rests on.
 ```text
 u16 9, 0F F0 0F F0 0F F0 0F F0 00     opaque preamble
 u16 0x0001
-'a' u16 len, NUL-terminated string   design; ";UserID=...;Version=..." (Vivado) or ";Generator=..." (xc7frames2bit)
-'b' u16 len, string                  part: "xc7z020clg400-1" (openXC7), "7z020clg400" (Vivado, no "xc")
+'a' u16 len, NUL-terminated string   design; ";UserID=...;Version=..." (the vendor tool) or ";Generator=..." (xc7frames2bit)
+'b' u16 len, string                  part: "xc7z020clg400-1" (openXC7), "7z020clg400" (vendor tool, no "xc")
 'c' u16 len, string                  date
 'd' u16 len, string                  time
 'e' u32 len, configuration data
@@ -56,7 +56,7 @@ Typical openXC7 full bitstream (xc7z020, `inspect --packets`):
  1010989  T1 WRITE CMD      DESYNC
 ```
 
-Vivado's compressed bitstreams (`COMPRESS=TRUE`) replace most FDRI data with
+Vendor-tool compressed bitstreams (`COMPRESS=TRUE`) replace most FDRI data with
 MFW (multi-frame write) sequences: `CMD MFW`, then `FAR` / `MFWR` pairs.
 
 ## CRC
@@ -64,14 +64,14 @@ MFW (multi-frame write) sequences: `CMD MFW`, then `FAR` / `MFWR` pairs.
 Per written word, `crc = icap_crc(register & 0x1F, word, crc)`, CRC-32C
 reflected (0x82F63B78) over 37 bits, data then address (prjxray `icap_crc`).
 
-State rules, established against a Vivado 2022.2 compressed bitstream where
+State rules, established against a real vendor-tool 2022.2 compressed bitstream where
 both of its CRC checks must pass:
 
 - zero at each sync word;
 - every written word to any register except CRC is folded in;
 - CMD RCRC resets to zero;
 - a write to CRC is a check against the running value, **then resets to
-  zero**. Without that reset the second check in the Vivado stream fails.
+  zero**. Without that reset the second check in the vendor stream fails.
 
 ## Zynq-7000 boot image
 

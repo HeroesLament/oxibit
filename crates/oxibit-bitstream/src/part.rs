@@ -52,7 +52,7 @@ pub fn by_idcode(idcode: u32) -> Option<&'static Die> {
 /// Die for a full part name (`xc7z020clg400-1`) or a bare die (`xc7z020`).
 /// Longest prefix wins, so `xc7s100...` never matches `xc7s15`.
 ///
-/// Vivado writes record `b` without the `xc` prefix (`7z020clg400`); that is
+/// the vendor tool writes record `b` without the `xc` prefix (`7z020clg400`); that is
 /// accepted too.
 pub fn by_part(part: &str) -> Option<&'static Die> {
     let mut part = part.to_ascii_lowercase();

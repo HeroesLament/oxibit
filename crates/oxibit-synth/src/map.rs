@@ -40,10 +40,10 @@ impl Cut {
     fn leaves(&self) -> &[u32] {
         &self.leaves[..self.n as usize]
     }
-    /// Union of two sorted leaf sets, if it has at most K leaves.
-    fn merge(a: &Cut, b: &Cut) -> Option<Cut> {
+    /// Union of two sorted leaf sets, if it has at most `k` leaves.
+    fn merge(a: &Cut, b: &Cut, k: usize) -> Option<Cut> {
         let sig = a.sig | b.sig;
-        if sig.count_ones() as usize > K {
+        if sig.count_ones() as usize > k {
             return None;
         }
         let (x, y) = (a.leaves(), b.leaves());
@@ -61,7 +61,7 @@ impl Cut {
                 j += 1;
                 x[i - 1]
             };
-            if n == K {
+            if n == k {
                 return None;
             }
             out[n] = v;
@@ -106,6 +106,8 @@ enum Goal {
 
 struct Mapper<'a> {
     g: &'a Aig,
+    /// LUT inputs: 6 on xc7, 4 on Lattice Nexus (`map_k`).
+    k: usize,
     cuts: Vec<Vec<Cut>>,
     best: Vec<Option<Cut>>,
     arr: Vec<u32>,
@@ -228,7 +230,7 @@ impl<'a> Mapper<'a> {
             let cb: Vec<&Cut> = std::iter::once(&tb).chain(self.cuts[nb].iter()).collect();
             for x in &ca {
                 for y in &cb {
-                    let Some(mut c) = Cut::merge(x, y) else {
+                    let Some(mut c) = Cut::merge(x, y, self.k) else {
                         continue;
                     };
                     if cand.iter().any(|o| o.dominates(&c)) {
@@ -369,8 +371,26 @@ pub struct MapOpts {
     pub depth_slack: u32,
 }
 
-#[hot]
+/// Map with 6-input LUTs.
 pub fn map(g: &Aig, outs: &[Lit], opts: MapOpts, rep: &dyn oxibit_report::Progress) -> Mapping {
+    map_with(g, outs, K, opts, rep)
+}
+
+/// Map with `k`-input LUTs, 2 <= k <= 6, depth never over the
+/// depth-optimal cover's.
+pub fn map_k(
+    g: &Aig,
+    outs: &[Lit],
+    k: usize,
+    area_passes: usize,
+    exact_passes: usize,
+    rep: &dyn oxibit_report::Progress,
+) -> Mapping {
+    map_with(g, outs, k.clamp(2, K), MapOpts { area_passes, exact_passes, depth_slack: 0 }, rep)
+}
+
+#[hot]
+fn map_with(g: &Aig, outs: &[Lit], k: usize, opts: MapOpts, rep: &dyn oxibit_report::Progress) -> Mapping {
     let n = g.nodes.len();
     let mut refs = vec![0f32; n];
     for node in &g.nodes {
@@ -384,6 +404,7 @@ pub fn map(g: &Aig, outs: &[Lit], opts: MapOpts, rep: &dyn oxibit_report::Progre
     }
     let mut m = Mapper {
         g,
+        k,
         cuts: vec![Vec::new(); n],
         best: vec![None; n],
         arr: vec![0; n],

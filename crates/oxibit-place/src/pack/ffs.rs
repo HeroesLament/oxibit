@@ -8,27 +8,18 @@ use serde_json::json;
 use super::constants::prop32;
 use super::{Offset, Packer, Rule, slot};
 use crate::netlist::{CellId, NetId};
-use crate::policy::CarryFf;
 
 /// `FDRE`/`FDSE`/`FDCE`/`FDPE` (and the `_1` clock-inverted forms) ->
 /// `SLICE_FFX`: `C` on `CK`, the reset or set on `SR`; synchronous ones get
 /// `X_FFSYNC`.
 pub fn pack_ffs(p: &mut Packer) {
     let mut rules = BTreeMap::new();
-    for (ty, sr, sync) in [
-        ("FDCE", "CLR", false),
-        ("FDPE", "PRE", false),
-        ("FDRE", "R", true),
-        ("FDSE", "S", true),
-    ] {
+    for (ty, sr, sync) in [("FDCE", "CLR", false), ("FDPE", "PRE", false), ("FDRE", "R", true), ("FDSE", "S", true)] {
         let mut r = Rule::to("SLICE_FFX").port("C", "CK").port(sr, "SR");
         if sync {
             r = r.attr("X_FFSYNC", json!("1"));
         }
-        rules.insert(
-            format!("{ty}_1"),
-            r.clone().param("IS_C_INVERTED", prop32(1)),
-        );
+        rules.insert(format!("{ty}_1"), r.clone().param("IS_C_INVERTED", prop32(1)));
         rules.insert(ty.to_string(), r);
     }
     let n = p.generic_xform(&rules);
@@ -37,19 +28,15 @@ pub fn pack_ffs(p: &mut Packer) {
 
 fn inverted_sr(p: &Packer, c: CellId) -> bool {
     let cell = p.nl.cell(c);
-    [
-        "IS_R_INVERTED",
-        "IS_S_INVERTED",
-        "IS_CLR_INVERTED",
-        "IS_PRE_INVERTED",
-    ]
-    .iter()
-    .any(|k| cell.int_param(k).unwrap_or(0) != 0)
+    ["IS_R_INVERTED", "IS_S_INVERTED", "IS_CLR_INVERTED", "IS_PRE_INVERTED"]
+        .iter()
+        .any(|k| cell.int_param(k).unwrap_or(0) != 0)
 }
 
-/// The control set a slice half holding `ff` would need.
-#[derive(Debug, PartialEq)]
-struct Ctrl {
+/// The control set a slice half holding `ff` would need. Slice packing
+/// (`slices::fits`) holds every flop of a slice to one of these.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Ctrl {
     clk: Option<NetId>,
     ce: Option<NetId>,
     sr: Option<NetId>,
@@ -59,7 +46,26 @@ struct Ctrl {
     sync: bool,
 }
 
-fn ctrl(p: &Packer, ff: CellId) -> Ctrl {
+impl Ctrl {
+    /// The same control set with the ways of writing "no enable" and "no
+    /// reset" made one: an enable tied high is no enable; a reset tied to
+    /// its inactive level is no reset; and without a reset, whether the
+    /// reset would have been synchronous says nothing. Two flops whose
+    /// normalised sets are equal ask the same of a slice's shared pins.
+    pub(crate) fn normalised(&self, gnd: NetId, vcc: NetId) -> Ctrl {
+        let mut k = self.clone();
+        if k.ce == Some(vcc) {
+            k.ce = None;
+        }
+        let inactive = if k.sr_inv { vcc } else { gnd };
+        if k.sr.is_none() || k.sr == Some(inactive) {
+            (k.sr, k.sr_inv, k.sync) = (None, false, false);
+        }
+        k
+    }
+}
+
+pub(crate) fn ctrl(p: &Packer, ff: CellId) -> Ctrl {
     let c = p.nl.cell(ff);
     Ctrl {
         clk: c.net("CK"),
@@ -123,31 +129,20 @@ fn offset_of(p: &Packer, c: CellId) -> Offset {
             abs: p.clusters[&root].root_abs_z.is_some(),
         };
     }
-    p.clusters[&root]
-        .members
-        .iter()
-        .find(|(m, _)| *m == c)
-        .map(|(_, o)| *o)
-        .expect("member")
+    p.clusters[&root].members.iter().find(|(m, _)| *m == c).map(|(_, o)| *o).expect("member")
 }
 
 /// Pair each flop with the LUT (or carry output) driving its D, as nextpnr
 /// does: a LUT not yet in a cluster takes the first flop it drives,
 /// whatever its fanout; a LUT or CARRY4 already in a cluster takes a flop
 /// only when the flop is the net's sole user and the control set fits.
-/// With `CarryFf::Shared` a carry output takes its flop whatever else it
-/// drives (the output also leaves through the letter's output mux), when
-/// that letter's flop slot is free and the control set fits.
-pub fn pack_lutffs(p: &mut Packer, carry_ff: CarryFf) {
+pub fn pack_lutffs(p: &mut Packer) {
     let mut pairs = 0;
-    let mut shared = 0;
     for ff in p.nl.cell_ids() {
         if p.nl.cell(ff).ty != "SLICE_FFX" || p.is_constrained(ff) {
             continue;
         }
-        let Some(d) = p.nl.cell(ff).net("D") else {
-            continue;
-        };
+        let Some(d) = p.nl.cell(ff).net("D") else { continue };
         let Some((drv, port)) = p.nl.driver(d).map(|(c, s)| (c, s.to_string())) else {
             continue;
         };
@@ -187,40 +182,26 @@ pub fn pack_lutffs(p: &mut Packer, carry_ff: CarryFf) {
             }
             pairs += 1;
         } else if dty == "CARRY4" && p.is_constrained(drv) {
-            let Some(z) = port
-                .strip_prefix('O')
-                .filter(|s| s.len() == 1)
-                .and_then(|s| s.parse::<i32>().ok())
-            else {
+            let Some(z) = port.strip_prefix('O').filter(|s| s.len() == 1).and_then(|s| s.parse::<i32>().ok()) else {
                 continue;
             };
             let o = offset_of(p, drv);
-            let fz = o.z + (slot::at(z, slot::FF) - slot::CARRY4);
-            let root = p.cluster_of[&drv];
-            let taken = p.clusters[&root]
-                .members
-                .iter()
-                .any(|(_, m)| m.dx == o.dx && m.dy == o.dy && m.z == fz && m.abs == o.abs);
-            let allowed = sole_user || carry_ff == CarryFf::Shared;
-            if !allowed || taken || !can_add_ff_to_cluster(p, drv, (o.dx, o.dy), ff) {
+            if !sole_user || !can_add_ff_to_cluster(p, drv, (o.dx, o.dy), ff) {
                 continue;
             }
+            let root = p.cluster_of[&drv];
             p.add_member(
                 root,
                 ff,
                 Offset {
                     dx: o.dx,
                     dy: o.dy,
-                    z: fz,
+                    z: o.z + (slot::at(z, slot::FF) - slot::CARRY4),
                     abs: o.abs,
                 },
             );
             pairs += 1;
-            if !sole_user {
-                shared += 1;
-            }
         }
     }
     p.count("lutff_pairs", pairs);
-    p.count("carry_ff_shared", shared);
 }

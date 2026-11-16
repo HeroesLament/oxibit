@@ -4,11 +4,9 @@
 
 pub mod compare;
 pub mod device;
-pub mod floorplan;
 pub mod netlist;
 pub mod pack;
+pub mod par;
 pub mod place;
 pub mod placer;
-pub mod policy;
-pub mod slice;
 pub mod xdc;

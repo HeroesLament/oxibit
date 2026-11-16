@@ -4,7 +4,8 @@
 //! routed design (`nets`), and `reroute`, which routes such a design again
 //! on its own placement so the router can be checked against nextpnr.
 //! `dsp_patch` re-targets a routed design to new DSP48E1 settings without
-//! placing or routing it again.
+//! placing or routing it again. `sta` times a placed design's paths and
+//! gives the router its criticalities.
 //! Progress goes through `oxibit_report::Progress`; nothing here prints.
 
 pub mod cellcfg;
@@ -22,3 +23,4 @@ pub mod packed;
 pub mod placed;
 pub mod reroute;
 pub mod router;
+pub mod sta;

@@ -2,7 +2,7 @@
 //! [`writer::full_configuration`](crate::writer::full_configuration), for a
 //! full-configuration bitstream (one FAR, one FDRI write of every frame in
 //! device order, as `xc7frames2bit`, `oxibit fasm2bit` and an uncompressed
-//! Vivado `write_bitstream` lay it out).
+//! the vendor tool `write_bitstream` lay it out).
 //!
 //! Frame addresses follow [`FrameLayout::next`] from the FAR written before
 //! FDRI. Where the walk changes block type, half or row, the data carries
@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 
 use crate::FRAME_WORDS;
 use crate::layout::{FrameAddress, FrameLayout};
-use crate::packet::{Item, Opcode, Reg, walk};
+use crate::packet::{Item, Opcode, Reg, cmd, walk};
 use crate::writer::Frame;
 
 /// Frames read from a bitstream.
@@ -24,48 +24,26 @@ pub struct Frames {
     pub pad_frames: usize,
     /// Pad frames with a nonzero word.
     pub nonzero_pads: usize,
-    /// Frames written by MFWR copies.
-    pub copied_frames: usize,
 }
 
-/// Read every frame the words' FDRI writes carry, and the copies a
-/// compressed bitstream makes with multiple-frame writes: after `CMD MFW`,
-/// each `FAR` then `MFWR` pair writes the last frame loaded through FDRI at
-/// that address (Vivado `-g Compress`). The first `MFWR` after an FDRI, with
-/// no `FAR` between, only commits the frame FDRI already placed. An error
-/// for FDRI before any FAR, an `MFWR` copy before any FDRI frame, data that
-/// ends inside a frame, or data past the last frame other than pad frames.
+/// Read every frame the words' FDRI writes carry. An error for what this
+/// reader does not follow: a multiple-frame write (MFWR), FDRI before any
+/// FAR, data that ends inside a frame, or data past the last frame other
+/// than pad frames.
 pub fn read_frames(words: &[u32], layout: &FrameLayout) -> Result<Frames, String> {
     let mut out = Frames::default();
     let mut far: Option<FrameAddress> = None;
-    // A FAR written since the last FDRI or MFWR: the next MFWR copies there.
-    let mut far_fresh = false;
-    let mut last: Option<Frame> = None;
     for item in walk(words).map_err(|e| format!("{e:?}"))? {
         let Item::Packet(p) = item else { continue };
         if p.opcode != Opcode::Write {
             continue;
         }
         match p.reg {
-            Reg::FAR => {
-                far = p.data.last().map(|&a| FrameAddress(a));
-                far_fresh = true;
-            }
-            Reg::MFWR if far_fresh => {
-                let a = far.expect("a fresh FAR is set");
-                let f = last.ok_or_else(|| format!("word {}: MFWR before any FDRI frame", p.index))?;
-                if !layout.is_valid(a) {
-                    return Err(format!("word {}: MFWR to {:#010X}, not in the part", p.index, a.0));
-                }
-                out.frames.insert(a, f);
-                out.copied_frames += 1;
-                far_fresh = false;
-            }
-            Reg::MFWR => {}
+            Reg::FAR => far = p.data.last().map(|&a| FrameAddress(a)),
+            Reg::CMD if p.data.contains(&cmd::MFW) => return Err(format!("word {}: multiple-frame write", p.index)),
             Reg::FDRI if !p.data.is_empty() => {
                 let start = far.ok_or_else(|| format!("word {}: FDRI before FAR", p.index))?;
-                last = fdri(p.data, start, layout, &mut out).map_err(|e| format!("FDRI at word {}: {e}", p.index))?.or(last);
-                far_fresh = false;
+                fdri(p.data, start, layout, &mut out).map_err(|e| format!("FDRI at word {}: {e}", p.index))?;
             }
             _ => {}
         }
@@ -73,9 +51,7 @@ pub fn read_frames(words: &[u32], layout: &FrameLayout) -> Result<Frames, String
     Ok(out)
 }
 
-/// Place an FDRI write's frames from `start`; returns the last frame placed.
-fn fdri(data: &[u32], start: FrameAddress, layout: &FrameLayout, out: &mut Frames) -> Result<Option<Frame>, String> {
-    let mut last = None;
+fn fdri(data: &[u32], start: FrameAddress, layout: &FrameLayout, out: &mut Frames) -> Result<(), String> {
     let mut chunks = data.chunks(FRAME_WORDS);
     let pad = |chunks: &mut std::slice::Chunks<'_, u32>, out: &mut Frames| -> Result<(), String> {
         for _ in 0..2 {
@@ -87,7 +63,7 @@ fn fdri(data: &[u32], start: FrameAddress, layout: &FrameLayout, out: &mut Frame
     };
     let mut addr = Some(start);
     while let Some(a) = addr {
-        let Some(c) = chunks.next() else { return Ok(last) };
+        let Some(c) = chunks.next() else { return Ok(()) };
         if c.len() != FRAME_WORDS {
             return Err(format!("{} words left at {:#010X}", c.len(), a.0));
         }
@@ -97,7 +73,6 @@ fn fdri(data: &[u32], start: FrameAddress, layout: &FrameLayout, out: &mut Frame
         let mut f = [0u32; FRAME_WORDS];
         f.copy_from_slice(c);
         out.frames.insert(a, f);
-        last = Some(f);
         addr = layout.next(a);
         match addr {
             Some(n) if n.block_type() != a.block_type() || n.bottom() != a.bottom() || n.row() != a.row() => pad(&mut chunks, out)?,
@@ -109,7 +84,7 @@ fn fdri(data: &[u32], start: FrameAddress, layout: &FrameLayout, out: &mut Frame
     if rest > 0 {
         return Err(format!("{rest} words past the last frame"));
     }
-    Ok(last)
+    Ok(())
 }
 
 #[cfg(test)]

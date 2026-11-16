@@ -34,7 +34,7 @@ pub struct Report {
     pub commands: Vec<String>,
     pub crc: CrcSummary,
     pub desync: bool,
-    /// Vivado marks partial bitstreams with `PARTIAL=TRUE` in record `a`.
+    /// the vendor tool marks partial bitstreams with `PARTIAL=TRUE` in record `a`.
     pub partial_hint: bool,
     /// Anything that would make a device reject this, or configure the wrong thing.
     pub problems: Vec<String>,

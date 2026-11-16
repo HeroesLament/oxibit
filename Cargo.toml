@@ -1,6 +1,10 @@
 [workspace]
 resolver = "3"
-members = ["crates/oxibit-bitstream", "crates/oxibit-fasm", "crates/oxibit-hdl", "crates/oxibit-synth", "crates/oxibit-cec", "crates/oxibit-prof", "crates/oxibit-prof-macros", "crates/oxibit-guard", "crates/oxibit-zynq7", "crates/oxibit-pnr", "crates/oxibit-place", "crates/oxibit-report", "crates/oxibit-policy", "crates/oxibit-sta", "crates/oxibit"]
+members = ["crates/oxibit-bitstream", "crates/oxibit-fasm", "crates/oxibit-hdl", "crates/oxibit-synth", "crates/oxibit-cec", "crates/oxibit-prof", "crates/oxibit-prof-macros", "crates/oxibit-guard", "crates/oxibit-zynq7", "crates/oxibit-pnr", "crates/oxibit-place", "crates/oxibit-report", "crates/oxibit-timing", "crates/oxibit-nexus", "crates/oxibit-policy", "crates/oxibit"]
+# oxibit-sta (main's first timer) reads pnr::placed::Import fields the
+# lutperm line dropped (cells, sink_pins, driver_pins); pnr::sta is the
+# timer now. Out of the build until it is ported or retired.
+exclude = ["crates/oxibit-sta"]
 
 [workspace.package]
 version = "0.1.0"
@@ -14,11 +18,13 @@ oxibit-fasm = { path = "crates/oxibit-fasm" }
 oxibit-pnr = { path = "crates/oxibit-pnr" }
 oxibit-place = { path = "crates/oxibit-place" }
 oxibit-report = { path = "crates/oxibit-report" }
-oxibit-sta = { path = "crates/oxibit-sta" }
-oxibit-policy = { path = "crates/oxibit-policy" }
+oxibit-timing = { path = "crates/oxibit-timing" }
 oxibit-guard = { path = "crates/oxibit-guard" }
 oxibit-zynq7 = { path = "crates/oxibit-zynq7" }
 oxibit-prof = { path = "crates/oxibit-prof" }
+oxibit-nexus = { path = "crates/oxibit-nexus" }
+oxibit-sta = { path = "crates/oxibit-sta" }
+oxibit-policy = { path = "crates/oxibit-policy" }
 tracing = "0.1"
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }

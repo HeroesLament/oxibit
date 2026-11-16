@@ -345,18 +345,10 @@ pub fn io_config(placed: &Value, loc: &Locator, g: &Graph) -> R<IoCfg> {
             w(&format!("IN_TERM.{}", in_term.as_deref().unwrap_or("NONE")));
             w("LVCMOS12_LVCMOS15_LVCMOS18_LVCMOS25_LVCMOS33_LVDS_25_LVTTL_SSTL135_SSTL15_TMDS_33.IN_ONLY");
         }
-        // A true LVDS_25 output drives both pads from the master's
-        // differential driver; the slave's single-ended driver stays off.
-        // Vivado: IOB_Y1 IN_ONLY, no OUT_DIFF (which turns the slave into
-        // a second, complementary single-ended driver on the N pad).
-        let true_lvds_out = is_output && is_diff && is_lvds25;
-        if true_lvds_out && ylo == 1 {
-            w("LVCMOS12_LVCMOS15_LVCMOS18_LVCMOS25_LVCMOS33_LVDS_25_LVTTL_SSTL135_SSTL15_TMDS_33.IN_ONLY");
-        }
 
         w(&format!("PULLTYPE.{pulltype}"));
 
-        if !true_lvds_out && bound.contains(&(tile.clone(), site.clone(), "IOB33S.O_ININV".to_string())) {
+        if bound.contains(&(tile.clone(), site.clone(), "IOB33S.O_ININV".to_string())) {
             out.lines.insert(format!("{tile}.OUT_DIFF"));
         }
         if is_stepdown && !is_sing {
@@ -372,17 +364,7 @@ pub fn io_config(placed: &Value, loc: &Locator, g: &Graph) -> R<IoCfg> {
         // An IDDR's register reads the delayed input when an IDELAYE2
         // drives D.
         let delayed = c.bit("D").and_then(|b| driver.get(&b.to_string())).is_some_and(|&d| cells[d].ty.contains("IDELAYE2"));
-        // An SR tied to ground is no SR: Vivado leaves SRUSED and SRVAL
-        // clear on such an ODDR.
-        let sr = match c.bit("SR") {
-            None => Sr::Unused,
-            Some(Value::String(k)) if k == "0" => Sr::Unused,
-            Some(b) => match driver.get(&b.to_string()) {
-                Some(&d) if cells[d].ty == "PSEUDO_GND" || cells[d].ty == "GND" => Sr::Unused,
-                _ => Sr::Driven,
-            },
-        };
-        iol_config(c, tile, site, delayed, sr, loc, &mut hclk, &mut out)?;
+        iol_config(c, tile, site, delayed, loc, &mut hclk, &mut out)?;
     }
 
     for (h, b) in &banks {
@@ -406,14 +388,7 @@ fn vector(name: &str, v: i64, width: u32, invert: bool) -> String {
     format!("{name} = {width}'b{bits}")
 }
 
-/// An IOLOGIC set/reset input: driven by a signal, or absent or tied low.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Sr {
-    Unused,
-    Driven,
-}
-
-fn iol_config(c: &Cell, tile: &str, site: &str, delayed: bool, sr: Sr, loc: &Locator, hclk: &mut Hclk, out: &mut IoCfg) -> R<()> {
+fn iol_config(c: &Cell, tile: &str, site: &str, delayed: bool, loc: &Locator, hclk: &mut Hclk, out: &mut IoCfg) -> R<()> {
     let is_sing = tile.contains("_SING_");
     let h = hclk.of(tile)?;
     out.hclk_of.insert(tile.to_string(), h.clone());
@@ -482,8 +457,8 @@ fn iol_config(c: &Cell, tile: &str, site: &str, delayed: bool, sr: Sr, loc: &Loc
                 w(&format!("IS_{d}_INVERTED"), c.flag(&format!("IS_{d}_INVERTED"))?);
             }
             w("ZINIT_OQ", c.int("INIT", 1)? == 0);
-            w("ODDR.SRUSED", sr == Sr::Driven);
-            w("ZSRVAL_OQ", sr == Sr::Driven && c.attr("X_ORIG_PORT_SR").as_deref().unwrap_or("R") == "R");
+            w("ODDR.SRUSED", c.has_port("SR"));
+            w("ZSRVAL_OQ", c.attr("X_ORIG_PORT_SR").as_deref().unwrap_or("R") == "R");
             w("ZINV_CLK", !c.flag("IS_CLK_INVERTED")?);
         }
         "OSERDESE2_OSERDESE2" => {

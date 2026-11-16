@@ -104,14 +104,14 @@ record and to check before loading.
 |---|---|---|
 | `convert` vs `Hw.Xilinx.Bit2Bin` | 27 openXC7 `.bit` files in ehdl `designs/` | 27 byte-identical; 6 ECP5 `.bit` files rejected by both |
 | `verify --part xc7z020` | 164 files in `libresdr_radio/taps/serve` | 160 ok; the 4 failures are DDR ring images, not bitstreams |
-| CRC model | Vivado 2022.2 compressed `system_top.bit` (stock LibreSDR) | 2 of 2 checks match |
+| CRC model | the vendor tool 2022.2 compressed `system_top.bit` (stock LibreSDR) | 2 of 2 checks match |
 | Boot image | stock LibreSDR `BOOT.bin` | header and 3 partition checksums ok; PL partition hashes equal to `system_top.bit` |
 | Target load | LibreSDR dr-c, radio bitstream as `.bin` and as `.bit` | 175 to 187 ms; magic word, scratch write/read and heartbeat verified |
 | Target refusals | truncated file, non-bitstream, access after `clear`, CLI load while `port` runs | all refused before touching hardware |
 | Port protocol | all nine ops from IEx | as specified; errors for out-of-range and misaligned access |
 
 openXC7's `xc7frames2bit` writes RCRC but no CRC checks, so its output does
-not exercise the CRC path. The Vivado bitstream does.
+not exercise the CRC path. The the vendor tool bitstream does.
 
 ## Sources
 

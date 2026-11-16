@@ -12,9 +12,10 @@
 //!
 //! PERM is none, a5 (A1..A5 permute: nextpnr today) or a6. stdout carries
 //! one JSON object per line: the import, one per iteration (overused nodes
-//! by wire class), and the end; progress goes to stderr.
+//! by wire class), the sinks on the PS (`ps_sinks`), what the routing uses
+//! (`routed`), and the end; progress goes to stderr.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
@@ -115,8 +116,8 @@ fn main() -> Result<(), String> {
                 class[s as usize] = 1;
             }
         }
-        if class[n.driver.anchor() as usize] == u8::MAX {
-            class[n.driver.anchor() as usize] = 2;
+        if class[n.source as usize] == u8::MAX {
+            class[n.source as usize] = 2;
         }
     }
     for (name, parts) in CLASSES {
@@ -170,10 +171,10 @@ fn main() -> Result<(), String> {
     // Sinks the routing does not reach, by name (a few).
     let mut missed = Vec::new();
     for (i, (n, hops)) in imp.nets.iter().zip(&routes).enumerate() {
-        let reached: HashSet<u32> = hops.iter().map(|h| h.dst).chain(n.driver.nodes().iter().copied()).collect();
+        let reached: HashSet<u32> = hops.iter().map(|h| h.dst).chain([n.source]).collect();
         for s in n.sinks.iter().filter(|s| !reached.contains(s)) {
             if missed.len() < 30 {
-                missed.push(json!([imp.names[i], g.node_name(n.driver.anchor()), g.node_name(*s)]));
+                missed.push(json!([imp.names[i], g.node_name(n.source), g.node_name(*s)]));
             }
         }
     }
@@ -181,7 +182,7 @@ fn main() -> Result<(), String> {
     for (i, (n, hops)) in imp.nets.iter().zip(&routes).enumerate() {
         for (grp, pin) in n.pin_groups.iter().zip(router::chosen_pins(n, hops)) {
             if pin.is_none() && missed.len() < 40 {
-                missed.push(json!([imp.names[i], g.node_name(n.driver.anchor()), format!("group {}", g.node_name(grp[0]))]));
+                missed.push(json!([imp.names[i], g.node_name(n.source), format!("group {}", g.node_name(grp[0]))]));
             }
         }
     }
@@ -195,6 +196,67 @@ fn main() -> Result<(), String> {
     } else {
         Vec::new()
     };
+    // What the routing uses: pips, the distinct wires of each net, and
+    // those wires' nominal span in tiles (7-series segment lengths: single
+    // 1, double 2, quad 4, hex 6, horizontal long 12, vertical long 18;
+    // site pins and wires within a tile 0).
+    let span_of = |wire: &str| -> u64 {
+        let has = |parts: &[&str]| parts.iter().any(|p| wire.contains(p));
+        if wire.starts_with("LV") {
+            18
+        } else if wire.starts_with("LH") {
+            12
+        } else if has(&["6BEG", "6END"]) {
+            6
+        } else if has(&["4BEG", "4END"]) {
+            4
+        } else if has(&["2BEG", "2END"]) {
+            2
+        } else if has(&["1BEG", "1END"]) {
+            1
+        } else {
+            0
+        }
+    };
+    let (mut pips, mut wires, mut span) = (0u64, 0u64, 0u64);
+    let mut wires_by: BTreeMap<&str, u64> = BTreeMap::new();
+    for hops in &routes {
+        pips += hops.len() as u64;
+        let nodes: HashSet<u32> = hops.iter().map(|h| h.dst).collect();
+        for &n in &nodes {
+            wires += 1;
+            let c = class[n as usize];
+            *wires_by.entry(if c == u8::MAX { "OTHER" } else { names[c as usize] }).or_default() += 1;
+            let name = g.node_name(n).to_string();
+            span += span_of(name.rsplit('/').next().unwrap_or(""));
+        }
+    }
+    // Sinks on the PS: where the net starts, where the PS pin's node is, and
+    // where the route leaves the general interconnect for it (the node the
+    // last interconnect pip on the way reads). For checking a placer's
+    // idea of where PS pins are against where their nets have to arrive.
+    let mut ps_sinks: Vec<serde_json::Value> = Vec::new();
+    for (n, hops) in imp.nets.iter().zip(&routes) {
+        let into: HashMap<u32, &router::Hop> = hops.iter().map(|h| (h.dst, h)).collect();
+        for &s in n.sinks.iter().filter(|&&s| g.node_name(s).to_string().starts_with("PSS")) {
+            let mut at = s;
+            let mut entry = None;
+            for _ in 0..hops.len() {
+                let Some(h) = into.get(&at) else { break };
+                if g.edge_pip(h.tile, h.pi).tile.starts_with("INT") {
+                    // The interconnect side: the PS wire the pip drives sits
+                    // at its PSS tile's anchor, not on the row it enters at.
+                    entry = Some(g.node_xy(h.src));
+                    break;
+                }
+                at = h.src;
+            }
+            let ((sx, sy), (px, py)) = (g.node_xy(n.source), g.node_xy(s));
+            ps_sinks.push(json!({"source": g.node_name(n.source).to_string(), "source_xy": [sx, sy], "pin_xy": [px, py], "entry_xy": entry.map(|(x, y)| [x, y])}));
+        }
+    }
+    line(json!({ "ps_sinks": ps_sinks }));
+    line(json!({"routed": {"pips": pips, "wires": wires, "span_tiles": span, "wires_by_class": wires_by}}));
     line(json!({"done": stats.to_json(), "six_pin_groups_by_pin": pos6, "groups_unreached": unreached, "group_pins_used": used.len(), "sinks_unreached": missed, "overused_nodes": shared}));
     if let Some(out_json) = out_json {
         let mut v = placed_v;

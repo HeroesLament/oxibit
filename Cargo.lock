@@ -78,6 +78,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 
 [[package]]
+name = "base64"
+version = "0.21.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9d297deb1925b89f2ccc13d7635fa0714f12c87adce1c75356b39ca9b7178567"
+
+[[package]]
 name = "batsat"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -91,6 +97,15 @@ name = "bit-vec"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f59bbe95d4e52a6398ec21238d31577f2b28a9d86807f06ca59d191d8440d0bb"
+
+[[package]]
+name = "bitflags"
+version = "2.13.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06"
+dependencies = [
+ "serde_core",
+]
 
 [[package]]
 name = "block-buffer"
@@ -341,6 +356,7 @@ dependencies = [
  "oxibit-guard",
  "oxibit-pnr",
  "oxibit-report",
+ "oxibit-timing",
  "oxibit-zynq7",
  "serde",
  "serde_json",
@@ -395,12 +411,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxibit-nexus"
+version = "0.1.0"
+dependencies = [
+ "oxibit-hdl",
+ "oxibit-report",
+ "oxibit-synth",
+ "ron",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "oxibit-place"
 version = "0.1.0"
 dependencies = [
  "oxibit-pnr",
- "oxibit-policy",
- "oxibit-report",
  "serde_json",
 ]
 
@@ -411,7 +437,6 @@ dependencies = [
  "oxibit-fasm",
  "oxibit-prof",
  "oxibit-report",
- "oxibit-sta",
  "serde_json",
  "tracing",
 ]
@@ -453,16 +478,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "oxibit-sta"
-version = "0.1.0"
-dependencies = [
- "oxibit-fasm",
- "oxibit-pnr",
- "oxibit-report",
- "serde_json",
-]
-
-[[package]]
 name = "oxibit-synth"
 version = "0.1.0"
 dependencies = [
@@ -473,6 +488,14 @@ dependencies = [
  "oxibit-report",
  "serde_json",
  "tracing",
+]
+
+[[package]]
+name = "oxibit-timing"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -530,6 +553,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47b34b781b31e5d73e9fbc8689c70551fd1ade9a19e3e28cfec8580a79290cc4"
 dependencies = [
  "bytemuck",
+]
+
+[[package]]
+name = "ron"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b91f7eff05f748767f183df4320a63d6936e9c6107d97c9e6bdd9784f4289c94"
+dependencies = [
+ "base64",
+ "bitflags",
+ "serde",
+ "serde_derive",
 ]
 
 [[package]]

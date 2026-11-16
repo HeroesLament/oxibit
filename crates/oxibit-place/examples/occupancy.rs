@@ -23,8 +23,37 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use oxibit_place::placer::Sites;
+use oxibit_place::device::Device;
+use oxibit_pnr::packed::Loc;
 use serde_json::{Value, json};
+
+/// One slice site of the device (the inventory the first placer kept).
+struct SliceSite {
+    x: i32,
+    y: i32,
+    /// Tile-relative site name (`SLICE_X0Y0`).
+    rel: String,
+    m: bool,
+}
+
+/// Every slice site, in grid order.
+fn slice_sites(dev: &Device) -> Vec<SliceSite> {
+    let mut tiles: Vec<_> = dev.tiles.values().collect();
+    tiles.sort_by_key(|t| (t.grid_x, t.grid_y, t.name.clone()));
+    let mut out = Vec::new();
+    for t in tiles.iter().filter(|t| t.ty.starts_with("CLBL")) {
+        for (site, ty) in &t.sites {
+            if ty == "SLICEL" || ty == "SLICEM" {
+                let rel = match dev.grid_loc(site, "") {
+                    Some(Loc::Grid { site, .. }) => site,
+                    _ => String::new(),
+                };
+                out.push(SliceSite { x: t.grid_x, y: t.grid_y, rel, m: ty == "SLICEM" });
+            }
+        }
+    }
+    out
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum LutKind {
@@ -95,7 +124,7 @@ fn run() -> Result<(), String> {
         return Err("usage: occupancy DB_FAMILY_DIR PART PLACED.json GRID.json".into());
     };
     let dev = oxibit_place::device::Device::open(std::path::Path::new(db), part)?;
-    let sites = Sites::from_device(&dev);
+    let sites = slice_sites(&dev);
     let v = read(placed)?;
     // the top: the module with the most cells (the file also lists cell modules)
     let module = v["modules"]
@@ -219,7 +248,7 @@ fn run() -> Result<(), String> {
 
     let mut tot: BTreeMap<&str, usize> = BTreeMap::new();
     let mut rows: Vec<Value> = Vec::new();
-    for site in &sites.slices {
+    for site in &sites {
         let s = slices
             .remove(&format!("X{}Y{}/{}", site.x, site.y, site.rel))
             .unwrap_or_default();
@@ -343,7 +372,7 @@ fn run() -> Result<(), String> {
     .map_err(|e| format!("{grid_out}: {e}"))?;
     println!(
         "{}",
-        json!({"occupancy": tot, "chain_single_input_sources": feed_src, "slices": sites.slices.len()})
+        json!({"occupancy": tot, "chain_single_input_sources": feed_src, "slices": sites.len()})
     );
     Ok(())
 }
