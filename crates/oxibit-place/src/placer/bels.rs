@@ -195,14 +195,21 @@ pub fn assign_macros(p: &mut Packer, dev: &Device, prob: &Problem, site_of: &[Op
         // An F7 mux with both inputs grounded: any slice whose A and B LUTs
         // stay empty, which a slice of its own does.
         let lone_mux = matches!(cells[..], [m] if p.nl.cell(m).ty == "SELMUX2_1" && ["0", "1"].iter().all(|port| p.nl.cell(m).net(port) == Some(p.nl.gnd)));
+        // A shift register or LUT RAM packing left on its own (no cluster):
+        // letter D of a SLICEM, whose data input needs no DI1MUX line.
+        let lone_memory = matches!(cells[..], [c] if !p.cluster_of.contains_key(&c) && {
+            let a = &p.nl.cell(c).attrs;
+            a.contains_key("X_LUT_AS_SRL") || a.contains_key("X_LUT_AS_DRAM")
+        });
         let root = cells.iter().copied().find(|c| p.cluster_of.get(c) == Some(c));
-        let Some(root) = root.or(lone_mux.then(|| cells[0])) else { continue };
+        let Some(root) = root.or((lone_mux || lone_memory).then(|| cells[0])) else { continue };
         let cl = p.clusters.get(&root).cloned().unwrap_or_default();
         // A mux root sits on the F8 slot if muxes hang off it, else on F7.
         let f8 = cl.members.iter().any(|(m, _)| p.nl.cell(*m).ty == "SELMUX2_1");
         let root_z = cl.root_abs_z.unwrap_or(match p.nl.cell(root).ty.as_str() {
             "SELMUX2_1" if f8 => slot::F8MUX,
             "SELMUX2_1" => slot::F7MUX,
+            _ if lone_memory => (3 << 4) | slot::LUT6,
             _ => slot::LUT6,
         });
         let slots = std::iter::once((root, root_z, true)).chain(cl.members.iter().map(|(m, off)| (*m, if off.abs { off.z } else { root_z + off.z }, (off.dx, off.dy) == (0, 0))));

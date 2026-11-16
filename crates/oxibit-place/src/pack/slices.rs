@@ -6,7 +6,7 @@
 //! `merging_score`. Either way the result is `Packer::slices`, for the
 //! placer to move as units. Cell ports and types are not touched.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::str::FromStr;
 
 use serde_json::{Value, json};
@@ -175,6 +175,49 @@ pub fn seeds(ctx: &PackCtx) -> Vec<Group> {
 /// Order-of-appearance packing.
 pub fn pack_in_order(ctx: &PackCtx) -> Vec<Group> {
     normalise(first_fit(seeds(ctx), ctx.cap, 0))
+}
+
+/// Packing for density alone, connectivity ignored: the least slices the
+/// capacity table and the control sets allow, near enough.
+///
+/// Order of appearance strands slices on a large design: a slice whose
+/// LUTs are full but whose flops are not stays open, and once `WINDOW` of
+/// those hold different control sets, every flop of another set and every
+/// LUT opens a slice of its own. Here the groups with flops go first,
+/// one control set at a time (so a set's flops share slices), and the
+/// groups without flops then fill the LUT slots left anywhere, largest
+/// first, before opening slices of their own.
+pub fn pack_dense(ctx: &PackCtx) -> Vec<Group> {
+    let (mut ff, mut lut): (Vec<Group>, Vec<Group>) = seeds(ctx).into_iter().partition(|g| g.ctrl.is_some());
+    // Control sets numbered by first appearance, so the order is stable.
+    let mut set_of: HashMap<Ctrl, usize> = HashMap::new();
+    for g in &ff {
+        let n = set_of.len();
+        set_of.entry(g.ctrl.clone().expect("partitioned")).or_insert(n);
+    }
+    ff.sort_by_key(|g| (set_of[g.ctrl.as_ref().expect("partitioned")], g.atoms[0]));
+    let mut out = first_fit(ff, ctx.cap, 0);
+    lut.sort_by_key(|g| (std::cmp::Reverse(g.luts), g.atoms[0]));
+    // Slices with a LUT slot free, ascending.
+    let mut room: Vec<usize> = (0..out.len()).filter(|&i| out[i].luts < ctx.cap.luts).collect();
+    for g in lut {
+        match room.iter().position(|&h| fits(&out[h], &g, ctx.cap)) {
+            Some(k) => {
+                let h = room[k];
+                out[h].absorb(g);
+                if out[h].luts >= ctx.cap.luts {
+                    room.remove(k);
+                }
+            }
+            None => {
+                if g.luts < ctx.cap.luts {
+                    room.push(out.len());
+                }
+                out.push(g);
+            }
+        }
+    }
+    normalise(out)
 }
 
 /// Merge the smallest groups, connected or not, until at most `max` remain
@@ -421,6 +464,34 @@ impl SliceReport {
     }
 }
 
+/// The fill best-choice is held to when the device is tight: this share of
+/// the free slice sites, in percent.
+pub const TIGHT_FILL: usize = 95;
+
+/// The slice count to compact best-choice to. Order of appearance's count
+/// (`rules`) while it leaves the device room to spare, as before; when it
+/// would fill more than `TIGHT_FILL` percent of the slice sites free for
+/// slice logic (`room`), that share instead, but never below what packing
+/// for density alone reaches (`dense`). Compacting further than needed
+/// costs connectivity, so a design that fits is packed as it always was.
+pub fn budget(rules: usize, dense: usize, room: Option<usize>) -> usize {
+    match room {
+        Some(room) if rules * 100 > room * TIGHT_FILL => (room * TIGHT_FILL / 100).max(dense),
+        _ => rules,
+    }
+}
+
+/// What `pack_dense` would make of `p`'s atoms, without keeping it.
+pub fn dense_report(p: &Packer, params: ScoreParams) -> SliceReport {
+    let ctx = PackCtx::new(p, params);
+    let groups = pack_dense(&ctx);
+    SliceReport {
+        stats: stats(&groups, &ctx),
+        scored_merges: 0,
+        illegal: verify(&groups, &ctx),
+    }
+}
+
 /// Pack `p`'s atoms into slices, leaving them in `p.slices`.
 pub fn pack_slices(p: &mut Packer, opts: &SliceOpts) -> SliceReport {
     let (slices, fractured, report) = {
@@ -460,4 +531,24 @@ pub fn pack_slices(p: &mut Packer, opts: &SliceOpts) -> SliceReport {
     p.stats.insert("slices".into(), slices.len());
     p.slices = slices;
     report
+}
+
+#[cfg(test)]
+mod tests {
+    use super::budget;
+
+    #[test]
+    fn budget_keeps_order_of_appearance_while_it_fits() {
+        // picoBEAM: 7,847 of 11,033 sites.
+        assert_eq!(budget(7847, 6551, Some(11033)), 7847);
+        assert_eq!(budget(7847, 6551, None), 7847);
+    }
+
+    #[test]
+    fn budget_on_a_tight_device_is_the_fill_share_but_not_below_dense() {
+        // mimohalow: 7,199 of 5,974 sites; 95% is 5,675.
+        assert_eq!(budget(7199, 4913, Some(5974)), 5675);
+        // Dense above the fill share: dense, and placement says if it fits.
+        assert_eq!(budget(7199, 5800, Some(5974)), 5800);
+    }
 }

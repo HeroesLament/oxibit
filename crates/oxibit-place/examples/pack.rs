@@ -101,8 +101,11 @@ fn run() -> Result<bool, String> {
     let mut ok = true;
     if let Some(kind) = packer {
         let t = std::time::Instant::now();
+        // Slice sites free for slice logic, for the budget below.
+        let room = placer::Problem::build(&p, &dev, 200, &pins).ok().map(|prob| prob.slice_room());
         // Order of appearance: reported, and its slice count is the budget
-        // best-choice is compacted to unless `--no-compact`.
+        // best-choice is compacted to unless `--no-compact` (or, on a tight
+        // device, `slices::budget`).
         let base = pack_slices(
             &mut p,
             &SliceOpts {
@@ -110,9 +113,14 @@ fn run() -> Result<bool, String> {
                 ..SliceOpts::default()
             },
         );
-        let budget = (!no_compact).then_some(base.stats.slices);
         ok &= base.illegal.is_empty();
         let mut v = json!({"packer": if kind == PackerKind::Rules { "rules" } else { "rules+score" }, "rules": base.to_json()});
+        let dense = oxibit_place::pack::slices::dense_report(&p, params);
+        ok &= dense.illegal.is_empty();
+        v["dense"] = dense.to_json();
+        let budget = (!no_compact).then(|| oxibit_place::pack::slices::budget(base.stats.slices, dense.stats.slices, room));
+        v["room"] = json!(room);
+        v["budget"] = json!(budget);
         if kind == PackerKind::RulesScore {
             let scored = pack_slices(
                 &mut p,

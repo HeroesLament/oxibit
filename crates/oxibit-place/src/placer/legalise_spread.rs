@@ -172,7 +172,13 @@ pub fn legalise_spread(prob: &Problem, grid: &BinGrid, gp: &PlacementState) -> R
 
     let free_sites = taken.iter().filter(|&&t| !t).count();
     if slices.len() > free_sites {
-        return Err(format!("{} slices, {} free slice sites", slices.len(), free_sites));
+        return Err(format!(
+            "{} slices, {} free slice sites ({} taken by carry chains, {} by memory macros)",
+            slices.len(),
+            free_sites,
+            stats.chain_slices,
+            stats.memory_macros
+        ));
     }
     // Room per bin: its sites the memories left.
     let room: Vec<usize> = (0..grid.len()).map(|b| grid.sites[b].iter().filter(|&&s| !taken[s as usize]).count()).collect();

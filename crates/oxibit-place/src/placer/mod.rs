@@ -324,6 +324,15 @@ impl Problem {
         Ok(prob)
     }
 
+    /// Slice sites left for slice logic once carry chains and memory
+    /// macros have theirs. Meaningful before slices are packed too: loose
+    /// cells then count as neither.
+    pub fn slice_room(&self) -> usize {
+        let chains: usize = self.chain_rows.iter().sum();
+        let memories = self.needs_slicem.iter().filter(|&&m| m).count();
+        self.sites.len().saturating_sub(chains + memories)
+    }
+
     /// Whether instance `i` needs a slice site of its own, so takes room in
     /// global placement: a slice, a memory macro (`needs_slicem`), or a
     /// carry chain (`chain_rows`).

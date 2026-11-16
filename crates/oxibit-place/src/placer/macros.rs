@@ -329,12 +329,15 @@ pub fn fix_dsp_cascades(p: &mut Packer, dev: &Device) -> usize {
         cols.entry(t.grid_x).or_default().push((t.grid_y, s0, s1));
     }
     for v in cols.values_mut() { v.sort_by_key(|(y, _, _)| *y); }
-    // site name -> occupying cell, for every cell on a DSP site now.
-    let mut occupied: BTreeMap<String, CellId> = BTreeMap::new();
+    // Site -> occupying cell, for every cell on a DSP site now. Keyed by
+    // tile and site within it (`SiteKey`): a bel's site is relative to
+    // its tile (`DSP48_X0Y0`), the column table's names are the device's
+    // (`DSP48_X1Y10`), and the two only meet through `site_key`.
+    let key = |s: &str| site_key(dev, s);
+    let mut occupied: BTreeMap<SiteKey, CellId> = BTreeMap::new();
     for c in p.nl.cell_ids() {
         if let Some(bel) = p.nl.cell(c).bel.clone() {
-            let s = site_name(&bel);
-            if s.starts_with("DSP48_") { occupied.insert(s, c); }
+            if site_name(&bel).starts_with("DSP48_") && let Some(k) = loc_key(dev, &bel) { occupied.insert(k, c); }
         }
     }
     let mut claimed: BTreeSet<String> = BTreeSet::new();
@@ -374,8 +377,10 @@ pub fn fix_dsp_cascades(p: &mut Packer, dev: &Device) -> usize {
                 let (_, s0, s1) = &col[si - k];
                 for s in [s0, s1] {
                     if claimed.contains(s) { blocked = true; }
-                    if let Some(&oc) = occupied.get(s) {
-                        if cascade_cells.contains(&oc) { blocked = true; }
+                    // Another chain's cell blocks; this chain's own does
+                    // not, so a chain already in place stays there.
+                    if let Some(&oc) = key(s).and_then(|k| occupied.get(&k)) {
+                        if cascade_cells.contains(&oc) && !chain.contains(&oc) { blocked = true; }
                     }
                 }
             }
@@ -394,45 +399,53 @@ pub fn fix_dsp_cascades(p: &mut Packer, dev: &Device) -> usize {
         for (i, &c) in chain.iter().enumerate() {
             let (_, s0, s1) = &col[si - i / 2];
             let site = if i % 2 == 0 { s0 } else { s1 };
-            if let Some(&oc) = occupied.get(site) {
+            let Some(k) = key(site) else { continue };
+            if let Some(&oc) = occupied.get(&k) {
                 if !cascade_cells.contains(&oc) {
                     displaced.push(oc);
-                    occupied.remove(site);
+                    occupied.remove(&k);
                 }
             }
             claimed.insert(site.clone());
             let Some(new_bel) = dev.grid_loc(site, &bel_str) else { continue };
             let old = p.nl.cell(c).bel.clone();
-            if let Some(o) = &old { occupied.remove(&site_name(o)); }
+            if let Some(ok) = old.as_ref().and_then(|o| loc_key(dev, o)) && occupied.get(&ok) == Some(&c) { occupied.remove(&ok); }
             if old.as_ref() != Some(&new_bel) { moved += 1; }
             p.nl.cell_mut(c).bel = Some(new_bel);
-            occupied.insert(site.clone(), c);
+            occupied.insert(k, c);
         }
     }
-    // Re-home displaced non-cascade cells on any free DSP site.
+    // Re-home displaced non-cascade cells on the free DSP site nearest
+    // where each was.
     for c in displaced {
-        let bel_str = p
-            .nl
-            .cell(c)
-            .bel
-            .as_ref()
-            .map(bel_bel)
-            .unwrap_or_else(|| "DSP48E1".to_string());
-        'outer: for col in cols.values() {
-            for (_, s0, s1) in col {
-                for s in [s0, s1] {
-                    if !occupied.contains_key(s) && !claimed.contains(s) {
-                        if let Some(nb) = dev.grid_loc(s, &bel_str) {
-                            p.nl.cell_mut(c).bel = Some(nb);
-                            occupied.insert(s.clone(), c);
-                        }
-                        break 'outer;
-                    }
-                }
-            }
+        let old = p.nl.cell(c).bel.clone();
+        let bel_str = old.as_ref().map(bel_bel).unwrap_or_else(|| "DSP48E1".to_string());
+        let (ox, oy) = match &old {
+            Some(Loc::Grid { x, y, .. }) => (*x, *y),
+            _ => (0, 0),
+        };
+        let best = cols
+            .iter()
+            .flat_map(|(&x, col)| col.iter().flat_map(move |(y, s0, s1)| [(x, *y, s0), (x, *y, s1)]))
+            .filter(|(_, _, s)| !claimed.contains(*s) && key(s).is_some_and(|k| !occupied.contains_key(&k)))
+            .min_by_key(|&(x, y, s)| ((x - ox).abs() + (y - oy).abs(), s.clone()));
+        if let Some((_, _, s)) = best
+            && let Some(nb) = dev.grid_loc(s, &bel_str)
+            && let Some(k) = key(s)
+        {
+            p.nl.cell_mut(c).bel = Some(nb);
+            occupied.insert(k, c);
         }
     }
     moved
+}
+
+/// The site a bel is on, as `site_key` names it.
+fn loc_key(dev: &Device, l: &Loc) -> Option<SiteKey> {
+    match l {
+        Loc::Grid { x, y, site, .. } => Some((*x, *y, site.clone())),
+        Loc::Site { site, .. } => site_key(dev, site),
+    }
 }
 
 fn site_name(l: &Loc) -> String {
