@@ -80,7 +80,7 @@ impl Cell {
         match self.kind {
             CellKind::Ff | CellKind::Bram => true,
             CellKind::Dsp => !self.clocks.is_empty(),
-            CellKind::Lut | CellKind::Mux => false,
+            CellKind::Lut | CellKind::Mux | CellKind::Carry => false,
         }
     }
 
@@ -108,7 +108,7 @@ fn is_clock_port(kind: CellKind, port: &str) -> bool {
         CellKind::Ff => matches!(port, "CK" | "C" | "CLK"),
         CellKind::Bram => port.starts_with("CLK"),
         CellKind::Dsp | CellKind::Lut => port == "CLK",
-        CellKind::Mux => false,
+        CellKind::Mux | CellKind::Carry => false,
     }
 }
 
@@ -200,6 +200,7 @@ impl Design {
                 "SLICE_LUTX" => CellKind::Lut,
                 "SLICE_FFX" => CellKind::Ff,
                 "SELMUX2_1" => CellKind::Mux,
+                "CARRY4" => CellKind::Carry,
                 t if t.starts_with("RAMB") => CellKind::Bram,
                 t if t.starts_with("DSP48E1") => CellKind::Dsp,
                 _ => {
@@ -425,7 +426,9 @@ pub struct CellSpec {
 
 impl CellSpec {
     /// The kind of a cell type as the packer writes it; `None` for a cell
-    /// the analysis leaves out.
+    /// the analysis leaves out. CARRY4 is still left out here (the
+    /// placer's timing weights): timing it there changes every placement
+    /// with carry chains, a change of its own to measure.
     pub fn kind_of(ty: &str) -> Option<CellKind> {
         match ty {
             "SLICE_LUTX" => Some(CellKind::Lut),
@@ -910,7 +913,7 @@ impl Timer {
                     let mut best = (UNSET, 0u32);
                     for (pi, pin) in c.ins.iter().enumerate() {
                         let t = arr[pin.bit as usize];
-                        if t == UNSET {
+                        if t == UNSET || !delay::has_arc(c.kind, &pin.port, op) {
                             continue;
                         }
                         let v = t + arc_ps(pin.arc) + delay::comb(c.kind, &pin.port, op).ps;
@@ -958,7 +961,12 @@ impl Timer {
                 for &ci in d.order.iter().rev() {
                     let c = &d.cells[ci as usize];
                     for pin in &c.ins {
-                        let need = c.outs.iter().filter(|o| req[o.1 as usize] != FREE).map(|(op, ob)| req[*ob as usize] - delay::comb(c.kind, &pin.port, op).ps).min();
+                        let need = c
+                            .outs
+                            .iter()
+                            .filter(|o| req[o.1 as usize] != FREE && delay::has_arc(c.kind, &pin.port, &o.0))
+                            .map(|(op, ob)| req[*ob as usize] - delay::comb(c.kind, &pin.port, op).ps)
+                            .min();
                         let Some(need) = need else { continue };
                         let a = arc_ps(pin.arc);
                         let r = &mut req[pin.bit as usize];

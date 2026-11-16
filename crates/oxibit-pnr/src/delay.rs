@@ -38,6 +38,8 @@ pub enum CellKind {
     Ff,
     Bram,
     Dsp,
+    /// CARRY4: combinational, from CIN / CYINIT / DI / S to O and CO.
+    Carry,
 }
 
 /// A cell delay in ps. `assumed`: a placeholder with no source behind it;
@@ -66,6 +68,62 @@ fn bus(port: &str) -> &str {
 // corner's maximum in prjxray-db's `timings/BRAM_L.sdf` and `DSP_L.sdf`
 // (the block RAM's data setup there, 0.737, is the 0.74 nextpnr prints).
 
+/// A CARRY4 pin: its family and bit (`S2` and `S[2]` are (`'S'`, 2); CIN
+/// and CYINIT have no bit).
+fn carry_pin(port: &str) -> Option<(&str, usize)> {
+    match port {
+        "CIN" | "CI" => return Some(("CIN", 0)),
+        "CYINIT" => return Some(("CYINIT", 0)),
+        _ => {}
+    }
+    let fam = bus(port);
+    let bit = port[fam.len()..].trim_matches(|c| c == '[' || c == ']').parse().ok()?;
+    matches!(fam, "S" | "DI" | "O" | "CO").then_some((fam, bit))
+}
+
+/// CARRY4, slow corner: the largest of rise and fall maxima in prjxray-db's
+/// `timings/CLBLL_L.sdf`, ps. Rows CIN, CYINIT, S0..S3; columns O0..O3,
+/// CO0..CO3. 0: no arc. DI has no IOPATH there; DIk is given Sk's arcs
+/// into the carries (COj, j >= k) and the sums above it (Oj, j > k).
+const CARRY4: [[i64; 8]; 6] = [
+    [222, 334, 239, 313, 271, 157, 228, 114],
+    [482, 598, 584, 642, 536, 494, 592, 580],
+    [223, 400, 523, 582, 340, 433, 512, 508],
+    [0, 205, 558, 618, 0, 469, 548, 528],
+    [0, 0, 226, 330, 0, 0, 292, 376],
+    [0, 0, 0, 227, 0, 0, 0, 380],
+];
+
+/// A CARRY4 arc's delay, `None` where `from` cannot reach `to`.
+fn carry_arc(from: &str, to: &str) -> Option<i64> {
+    let (fi, fb) = carry_pin(from)?;
+    let (ti, tb) = carry_pin(to)?;
+    if tb > 3 || fb > 3 {
+        return None;
+    }
+    let col = match ti {
+        "O" => tb,
+        "CO" => 4 + tb,
+        _ => return None,
+    };
+    let ps = match fi {
+        "CIN" => CARRY4[0][col],
+        "CYINIT" => CARRY4[1][col],
+        "S" => CARRY4[2 + fb][col],
+        // DIk feeds the carry out of bit k, so the sum of bit k never.
+        "DI" if ti == "O" && tb == fb => 0,
+        "DI" => CARRY4[2 + fb][col],
+        _ => return None,
+    };
+    (ps > 0).then_some(ps)
+}
+
+/// Whether a combinational cell has an arc from input `from` to output
+/// `to`. Every pair but a CARRY4's lower bits from its higher ones.
+pub fn has_arc(kind: CellKind, from: &str, to: &str) -> bool {
+    kind != CellKind::Carry || carry_arc(from, to).is_some()
+}
+
 /// Through a combinational cell, input pin `from` to output pin `to`.
 ///
 /// A DSP48E1 is timed as an unregistered multiplier (AREG, BREG, MREG and
@@ -89,6 +147,7 @@ pub fn comb(kind: CellKind, from: &str, to: &str) -> CellDelay {
             ("PCIN", _) => 1518,
             _ => 3841,
         }),
+        CellKind::Carry => known(carry_arc(from, to).unwrap_or(0)),
         // No combinational arcs.
         CellKind::Ff | CellKind::Bram => known(0),
     }
@@ -140,6 +199,8 @@ pub fn comb_min(kind: CellKind) -> CellDelay {
         CellKind::Lut => known(42),
         CellKind::Mux => known(19),
         CellKind::Dsp => known(132),
+        // CARRY4's smallest fast minimum (CIN to CO3).
+        CellKind::Carry => known(39),
         CellKind::Ff | CellKind::Bram => known(0),
     }
 }
@@ -150,7 +211,7 @@ pub fn clk_to_q_min(kind: CellKind) -> CellDelay {
         CellKind::Ff => known(99),
         CellKind::Bram => known(204),
         CellKind::Dsp => known(126),
-        CellKind::Lut | CellKind::Mux => assumed(99),
+        CellKind::Lut | CellKind::Mux | CellKind::Carry => assumed(99),
     }
 }
 
@@ -161,7 +222,7 @@ pub fn hold(kind: CellKind) -> CellDelay {
         CellKind::Bram => known(667),
         CellKind::Dsp => known(274),
         // A LUT RAM's write side: not among the SDF cells read.
-        CellKind::Lut | CellKind::Mux => assumed(241),
+        CellKind::Lut | CellKind::Mux | CellKind::Carry => assumed(241),
     }
 }
 
@@ -276,6 +337,22 @@ mod tests {
         assert!(setup(CellKind::Lut, "WE").assumed);
         assert!(clk_to_q(CellKind::Dsp, false).assumed);
         assert!(setup(CellKind::Dsp, "A0").assumed);
+    }
+
+    #[test]
+    fn carry_arcs_run_upward_only() {
+        assert_eq!(comb(CellKind::Carry, "CIN", "CO3").ps, 114);
+        assert_eq!(comb(CellKind::Carry, "S0", "O3").ps, 582);
+        assert_eq!(comb(CellKind::Carry, "S[1]", "CO[2]").ps, 548);
+        assert_eq!(comb(CellKind::Carry, "CYINIT", "O3").ps, 642);
+        assert!(has_arc(CellKind::Carry, "S1", "O1"));
+        assert!(!has_arc(CellKind::Carry, "S3", "O0"));
+        assert!(!has_arc(CellKind::Carry, "S2", "CO1"));
+        // DIk: the carry out of bit k and the sums above, not sum k.
+        assert!(has_arc(CellKind::Carry, "DI1", "CO1"));
+        assert!(has_arc(CellKind::Carry, "DI1", "O2"));
+        assert!(!has_arc(CellKind::Carry, "DI1", "O1"));
+        assert!(has_arc(CellKind::Lut, "A1", "O6"));
     }
 
     #[test]
