@@ -29,6 +29,20 @@ So the levers, in order of expected return:
 | + fat LTO, 1 codegen unit, FxHash, `by_f` gated | 18 passes, 533 s, 2.47 GB | 74cfbe71e882e0c0e757a09cf078f9b4 | kept, 4.3% |
 | + `NodeHot`: cost/hist/tag/occ in one 16 B record | 18 passes, 508 s, 2.48 GB | 74cfbe71e882e0c0e757a09cf078f9b4 | kept, 4.8% (8.9% cumulative) |
 
+All three rows above were measured with another router running on the same
+host. On a quiet box the same `NodeHot` build routes in 423 s, not 508: the
+contention was worth about 17%, which is larger than any single change
+measured here. Treat those rows as ordered, not as deltas. Pairs measured
+one at a time on an idle host:
+
+| arm | mimohalow reroute | `top.fasm` | verdict |
+|---|---|---|---|
+| `NodeHot` record (stage A) | 18 passes, 423.36 s, 2.48 GB | 74cfbe71e882e0c0e757a09cf078f9b4 | reference for stage B |
+| + the four node flags in the record's spare byte | 18 passes, 391.24 s, 2.47 GB | 74cfbe71e882e0c0e757a09cf078f9b4 | kept, 7.6% |
+
+The lesson for later rows: run the arms one at a time, on an idle host, or
+the measurement says more about the neighbours than the change.
+
 The 533 s run shared virt2 with another router, so it paid L3 contention
 the baseline may not have: 4.3% is a floor, not a ceiling. Same pass count,
 same peak RSS to within 0.4%, byte-identical FASM. None of these three
@@ -101,3 +115,17 @@ One pleasant consequence: the history update read `occ` and wrote `hist` in
 the same loop, which the packing turned into a borrow error and then into a
 single `iter_mut` sweep — correct, and better localised than the two-array
 version it replaced.
+
+## Folding the node flags into the record
+
+`reserved`, `vcc_kept`, `fabric` and `muxed` were four `Vec<bool>`s, and the
+first three are read on every edge relaxation. They fit in the padding byte
+`NodeHot` already carried, so the record stays 16 bytes and three more cache
+lines per node touched disappear. `muxed` and `fabric` never change once
+built, so they are folded in as the record is constructed.
+
+The packing also forced out something worse. Two rip-up attempts reserved
+every occupied node by cloning the whole `reserved` array, routing, then
+assigning the clone back: two full-array copies per attempt. They now record
+the nodes they actually marked and clear exactly those, which is what the
+packed record requires and also strictly less work than before.

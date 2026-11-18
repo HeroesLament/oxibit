@@ -326,21 +326,6 @@ pub struct Router<'g> {
     /// Nets using each node (counted once per net).
     /// Per-node hot fields: see `NodeHot`.
     hot: Vec<NodeHot>,
-    /// Nodes no routed net may enter (clock and default nets, kept as is).
-    reserved: Vec<bool>,
-    /// Nodes of the kept default nets: interconnect inputs reading VCC
-    /// because nothing drives them, and the hard wires behind them. Off
-    /// limits to every net but a VCC constant net, which puts the same
-    /// value there (a VCC tie bounced through FAN_ALT to a control input
-    /// also feeds the pin behind FAN, which a default net holds at VCC).
-    vcc_kept: Vec<bool>,
-    /// Nodes some configurable pip drives. A hard edge into such a node is
-    /// a mux's default input (DSP_FAN -> DSP_1_D17 next to the GND and VCC
-    /// tie pips), not a wire, so fixed fan-out stops there.
-    muxed: Vec<bool>,
-    /// Nodes of general routing, off limits to a global clock net
-    /// (`is_fabric_wire`).
-    fabric: Vec<bool>,
     // Search scratch.
     prev: Vec<(u32, u32, u32)>, // (from node, tile, pi); from == u32::MAX at a start node
     touched: Vec<u32>,
@@ -474,7 +459,38 @@ struct NodeHot {
     tag: u32,
     /// Nets other than the one being routed that occupy this node.
     occ: u16,
-    _pad: u16,
+    /// `NODE_*` bits. These were four `Vec<bool>`s; three of them are read on
+    /// every edge relaxation, so they ride in the byte the record padded with.
+    flags: u8,
+    _pad: u8,
+}
+
+/// Nodes no routed net may enter (clock and default nets, kept as is).
+const NODE_RESERVED: u8 = 1 << 0;
+/// Nodes of the kept default nets: interconnect inputs reading VCC because
+/// nothing drives them, and the hard wires behind them. Off limits to every
+/// net but a VCC constant net, which puts the same value there.
+const NODE_VCC_KEPT: u8 = 1 << 1;
+/// Nodes of general routing, off limits to a global clock net.
+const NODE_FABRIC: u8 = 1 << 2;
+/// Nodes some configurable pip drives. A hard edge into such a node is a
+/// mux's default input, not a wire, so fixed fan-out stops there.
+const NODE_MUXED: u8 = 1 << 3;
+
+impl NodeHot {
+    #[inline]
+    fn has(&self, bit: u8) -> bool {
+        self.flags & bit != 0
+    }
+
+    #[inline]
+    fn set(&mut self, bit: u8, on: bool) {
+        if on {
+            self.flags |= bit;
+        } else {
+            self.flags &= !bit;
+        }
+    }
 }
 
 struct Reroute<'a> {
@@ -529,16 +545,25 @@ impl<'g> Router<'g> {
                 }
             }
         }
-        let fabric: Vec<bool> = (0..n as u32).map(|m| is_fabric_wire(&g.node_name(m))).collect();
         let opts_bidir = opts.bidir;
+        // `muxed` and `fabric` never change once built, so they are folded
+        // into the record rather than kept as arrays of their own.
+        let hot: Vec<NodeHot> = (0..n as u32)
+            .map(|m| {
+                let mut flags = 0u8;
+                if muxed[m as usize] {
+                    flags |= NODE_MUXED;
+                }
+                if is_fabric_wire(&g.node_name(m)) {
+                    flags |= NODE_FABRIC;
+                }
+                NodeHot { cost: f32::INFINITY, hist: 0.0, tag: 0, occ: 0, flags, _pad: 0 }
+            })
+            .collect();
         Router {
-            muxed,
-            fabric,
             g,
             opts,
-            hot: vec![NodeHot { cost: f32::INFINITY, hist: 0.0, tag: 0, occ: 0, _pad: 0 }; n],
-            reserved: vec![false; n],
-            vcc_kept: vec![false; n],
+            hot,
             prev: vec![(NONE, 0, 0); n],
             touched: Vec::new(),
             cur_tag: 0,
@@ -560,7 +585,7 @@ impl<'g> Router<'g> {
     /// Keep every net off `nodes` (as off a kept net's).
     pub fn forbid(&mut self, nodes: impl IntoIterator<Item = u32>) {
         for n in nodes {
-            self.reserved[n as usize] = true;
+            self.hot[n as usize].set(NODE_RESERVED, true);
         }
     }
 
@@ -573,7 +598,7 @@ impl<'g> Router<'g> {
             }
             out.push(m);
             for &(d, tile, pi) in self.g.out_edges(m) {
-                if self.g.edge_kind(tile, pi) == EdgeKind::Fixed && !self.muxed[d as usize] && !seen.contains(&d) {
+                if self.g.edge_kind(tile, pi) == EdgeKind::Fixed && !self.hot[d as usize].has(NODE_MUXED) && !seen.contains(&d) {
                     stack.push(d);
                 }
             }
@@ -746,7 +771,7 @@ impl<'g> Router<'g> {
         };
         let clock = net.class == NetClass::GlobalClock;
         let blocked = |r: &Self, d: u32| {
-            r.hot[d as usize].tag != tag && (r.reserved[d as usize] || (r.vcc_kept[d as usize] && !f.vcc) || (clock && r.fabric[d as usize])) && !f.set.contains(&d)
+            r.hot[d as usize].tag != tag && (r.hot[d as usize].has(NODE_RESERVED) || (r.hot[d as usize].has(NODE_VCC_KEPT) && !f.vcc) || (clock && r.hot[d as usize].has(NODE_FABRIC))) && !f.set.contains(&d)
         };
 
         let mut fwd = BinaryHeap::new();
@@ -880,7 +905,7 @@ impl<'g> Router<'g> {
                 continue;
             }
             let mut back = 0;
-            if !self.muxed[n as usize] && depth < 8 {
+            if !self.hot[n as usize].has(NODE_MUXED) && depth < 8 {
                 for (s, tile, pi) in self.g.in_edges(n) {
                     if self.g.edge_kind(tile, pi) == EdgeKind::Fixed {
                         stack.push((s, depth + 1));
@@ -1132,7 +1157,7 @@ impl<'g> Router<'g> {
                         if !self.edge_ok(net, node, tile, pi) {
                             continue;
                         }
-                        if (self.reserved[d as usize] || (self.vcc_kept[d as usize] && !vcc) || (clock && self.fabric[d as usize])) && !set.contains(&d) {
+                        if (self.hot[d as usize].has(NODE_RESERVED) || (self.hot[d as usize].has(NODE_VCC_KEPT) && !vcc) || (clock && self.hot[d as usize].has(NODE_FABRIC))) && !set.contains(&d) {
                             continue;
                         }
                         if !set.contains(&d) && !inside(d) {
@@ -1395,11 +1420,11 @@ impl<'g> Router<'g> {
                     let mut took = 0;
                     for &n in &front {
                         for &(d, tile, pi) in self.g.out_edges(n) {
-                            if !self.edge_ok(net, n, tile, pi) || self.hot[d as usize].occ > 0 || self.reserved[d as usize] || self.vcc_kept[d as usize] || !seen.insert(d) {
+                            if !self.edge_ok(net, n, tile, pi) || self.hot[d as usize].occ > 0 || self.hot[d as usize].has(NODE_RESERVED) || self.hot[d as usize].has(NODE_VCC_KEPT) || !seen.insert(d) {
                                 continue;
                             }
                             next.push(d);
-                            if self.fabric[d as usize] && took < PER_DEPTH {
+                            if self.hot[d as usize].has(NODE_FABRIC) && took < PER_DEPTH {
                                 took += 1;
                                 cands.push(d);
                             }
@@ -1427,14 +1452,14 @@ impl<'g> Router<'g> {
                         continue;
                     }
                     // The second leg may not touch the tree or the first.
-                    let mine: Vec<u32> = std::iter::once(net.source).chain(h1.iter().map(|h| h.dst)).filter(|&n| n != w && !self.reserved[n as usize]).collect();
+                    let mine: Vec<u32> = std::iter::once(net.source).chain(h1.iter().map(|h| h.dst)).filter(|&n| n != w && !self.hot[n as usize].has(NODE_RESERVED)).collect();
                     for &n in &mine {
-                        self.reserved[n as usize] = true;
+                        self.hot[n as usize].set(NODE_RESERVED, true);
                     }
                     let leg2 = Net { source: w, sinks: vec![node], pin_groups: Vec::new(), edges: Vec::new(), class: net.class };
                     let (h2, f2) = self.route_net(&leg2, 1.0, &mut pops, &mut outside, Reroute { keep: &empty, margin: -1, crit: &none, first: false });
                     for &n in &mine {
-                        self.reserved[n as usize] = false;
+                        self.hot[n as usize].set(NODE_RESERVED, false);
                     }
                     if f2 != 0 {
                         continue;
@@ -1525,9 +1550,9 @@ impl<'g> Router<'g> {
                 let default = net.class == NetClass::Default;
                 for n in self.footprint(net, &hops) {
                     if default {
-                        self.vcc_kept[n as usize] = true;
+                        self.hot[n as usize].set(NODE_VCC_KEPT, true);
                     } else {
-                        self.reserved[n as usize] = true;
+                        self.hot[n as usize].set(NODE_RESERVED, true);
                     }
                 }
             }
@@ -1672,17 +1697,20 @@ impl<'g> Router<'g> {
                         for &m in &prints[i] {
                             self.hot[m as usize].occ -= 1;
                         }
-                        let saved = self.reserved.clone();
+                        let mut marked: Vec<u32> = Vec::new();
                         for m in 0..self.hot.len() {
-                            if self.hot[m].occ > 0 {
-                                self.reserved[m] = true;
+                            if self.hot[m].occ > 0 && !self.hot[m].has(NODE_RESERVED) {
+                                self.hot[m].set(NODE_RESERVED, true);
+                                marked.push(m as u32);
                             }
                         }
                         let none = |_: &[u32]| 0.0;
                         let (mut p, mut o) = (0u64, 0u64);
                         self.cur_net = usize::MAX;
                         let (hops, f) = self.route_net(&nets[i], 1.0, &mut p, &mut o, Reroute { keep: &Vec::new(), margin: 1 << 20, crit: &none, first: false });
-                        self.reserved = saved;
+                        for &m in &marked {
+                            self.hot[m as usize].set(NODE_RESERVED, false);
+                        }
                         stats.heap_pops += p;
                         let print = self.footprint(&nets[i], &hops);
                         let shared = print.iter().filter(|&&m| self.hot[m as usize].occ > 0).count();
@@ -1721,10 +1749,11 @@ impl<'g> Router<'g> {
                         for &m in &prints[i] {
                             self.hot[m as usize].occ -= 1;
                         }
-                        let was = std::mem::replace(&mut self.reserved[n as usize], true);
+                        let was = self.hot[n as usize].has(NODE_RESERVED);
+                        self.hot[n as usize].set(NODE_RESERVED, true);
                         self.cur_net = usize::MAX;
                         let (hops, f) = self.route_net(&nets[i], 1.0e3, &mut p, &mut o, Reroute { keep: &Vec::new(), margin: 1 << 20, crit: &none, first: false });
-                        self.reserved[n as usize] = was;
+                        self.hot[n as usize].set(NODE_RESERVED, was);
                         let print = self.footprint(&nets[i], &hops);
                         let crossed: HashSet<u32> = print.iter().copied().filter(|&m| self.hot[m as usize].occ > 0).collect();
                         let blockers: Vec<usize> = (0..nets.len()).filter(|&j| j != i && routed[j] && prints[j].iter().any(|m| crossed.contains(m))).collect();
@@ -1745,14 +1774,17 @@ impl<'g> Router<'g> {
                             for &m in &prints[j] {
                                 self.hot[m as usize].occ -= 1;
                             }
-                            let saved = self.reserved.clone();
+                            let mut marked: Vec<u32> = Vec::new();
                             for m in 0..self.hot.len() {
-                                if self.hot[m].occ > 0 {
-                                    self.reserved[m] = true;
+                                if self.hot[m].occ > 0 && !self.hot[m].has(NODE_RESERVED) {
+                                    self.hot[m].set(NODE_RESERVED, true);
+                                    marked.push(m as u32);
                                 }
                             }
                             let (hj, fj) = self.route_net(&nets[j], 1.0, &mut p, &mut o, Reroute { keep: &Vec::new(), margin: 1 << 20, crit: &none, first: false });
-                            self.reserved = saved;
+                            for &m in &marked {
+                                self.hot[m as usize].set(NODE_RESERVED, false);
+                            }
                             let pj = self.footprint(&nets[j], &hj);
                             if fj != 0 || pj.iter().any(|&m| self.hot[m as usize].occ > 0) {
                                 for &m in &prints[j] {
