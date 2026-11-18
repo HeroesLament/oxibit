@@ -12,7 +12,10 @@
 //! DELAY_MODEL=intrinsic (default) | fast | full. STA_SITE_PIP: ps per
 //! site pip (default 20). STA_PERIODS="clk=ps,...": slack against these.
 //! STA_TRACE=1: each path's steps. STA_ARCS=path: every timed arc as
-//! `driver cell, sink cell, ps, tile distance` (tab-separated).
+//! `driver cell, sink cell, ps, tile distance, dx, dy, driver kind,
+//! sink kind` (tab-separated; distance -1 and dx, dy 0 where a cell is
+//! unplaced). `oxibit-place`'s `delay_grid` turns it into the placer's
+//! delay table.
 //! STA_SHOW=path: for each `driver cell <tab> sink cell` line of that
 //! file, the arc's pips and their delays (a `show` line each, first).
 //!
@@ -68,8 +71,11 @@ fn main() -> Result<(), String> {
     let paths: Vec<Value> = timer.analyze().paths.iter().map(|p| p.to_json(trace)).collect();
     if let Ok(path) = std::env::var("STA_ARCS") {
         let mut text = String::new();
-        for (from, to, ps, dist) in timer.arcs(&|tile| g.tile_xy(tile)) {
-            text.push_str(&format!("{from}\t{to}\t{ps}\t{}\n", dist.map_or(-1, |d| d)));
+        for a in timer.arcs(&|tile| g.tile_xy(tile)) {
+            // The first four columns as before: readers of the old form still work.
+            let dist = a.delta.map_or(-1, |(dx, dy)| dx.abs() + dy.abs());
+            let (dx, dy) = a.delta.unwrap_or((0, 0));
+            text.push_str(&format!("{}\t{}\t{}\t{dist}\t{dx}\t{dy}\t{:?}\t{:?}\n", a.from, a.to, a.ps, a.from_kind, a.to_kind));
         }
         std::fs::write(&path, text).map_err(|e| format!("{path}: {e}"))?;
     }

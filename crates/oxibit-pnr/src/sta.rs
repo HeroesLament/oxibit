@@ -528,6 +528,19 @@ impl CriticalityMap {
     }
 }
 
+/// One timed arc of an analysis (`Timer::arcs`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimedArc {
+    pub from: String,
+    pub to: String,
+    /// Its delay as analysed.
+    pub ps: i64,
+    /// Sink tile minus driver tile, (x, y); `None` unless both are placed.
+    pub delta: Option<(i32, i32)>,
+    pub from_kind: CellKind,
+    pub to_kind: CellKind,
+}
+
 /// The slowest path between the registers of a clock pair.
 #[derive(Debug, Clone)]
 pub struct PathReport {
@@ -726,7 +739,7 @@ impl Timer {
     /// Every timed arc: (driver cell, sink cell, ps, the tile distance
     /// between their sites when `xy` knows both). For comparing two
     /// routings of one placement arc by arc.
-    pub fn arcs(&self, xy: &dyn Fn(&str) -> Option<(i32, i32)>) -> Vec<(String, String, i64, Option<i32>)> {
+    pub fn arcs(&self, xy: &dyn Fn(&str) -> Option<(i32, i32)>) -> Vec<TimedArc> {
         let d = &self.d;
         let at = |c: &Cell| c.site.as_ref().and_then(|s| xy(&s.0));
         let mut seen = vec![false; d.arcs.len()];
@@ -741,8 +754,15 @@ impl Timer {
                     continue;
                 }
                 let from = &d.cells[drv as usize];
-                let dist = at(from).zip(at(c)).map(|(a, b)| (a.0 - b.0).abs() + (a.1 - b.1).abs());
-                out.push((from.name.clone(), c.name.clone(), self.arc_ps[pin.arc as usize], dist));
+                let delta = at(from).zip(at(c)).map(|(a, b)| (b.0 - a.0, b.1 - a.1));
+                out.push(TimedArc {
+                    from: from.name.clone(),
+                    to: c.name.clone(),
+                    ps: self.arc_ps[pin.arc as usize],
+                    delta,
+                    from_kind: from.kind,
+                    to_kind: c.kind,
+                });
             }
         }
         out

@@ -440,6 +440,9 @@ pub struct GpOpts {
     pub macro_rounds: usize,
     /// `place_design`: timing-weighted nets (`timing`); off by default.
     pub timing: timing::TimingOpts,
+    /// `place_design`: the timing weights' wire delays from this measured
+    /// grid rather than `timing::wire_ps`; `None` for the built-in table.
+    pub delay_grid: Option<std::sync::Arc<timing::DelayGrid>>,
 }
 
 /// The run, stage by stage.
@@ -641,7 +644,7 @@ pub fn place_design(p: &mut Packer, dev: &Device, opts: &GpOpts, max_fanout: usi
         if opts.timing.every == 0 {
             return place(prob, opts);
         }
-        let mut t = timing::PlaceTiming::build(p, prob, opts.timing);
+        let mut t = timing::PlaceTiming::build(p, prob, opts.timing).with_grid(opts.delay_grid.clone());
         place_timed(prob, opts, Some(&mut t))
     };
     let forced = macros::place_forced(p, dev);

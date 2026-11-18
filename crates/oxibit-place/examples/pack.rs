@@ -32,6 +32,16 @@
 //! iterations (unset: `TimingOpts::default`, every 10). OXIBIT_PT=0 turns
 //! it off.
 //!
+//! OXIBIT_PT_SCHED=KEY=V[,KEY=V...]: the weights' schedule, keys
+//! `exp_first` (exponent at the first update, rising to EXP),
+//! `momentum` (share of the previous weights kept, 0 to below 1) and
+//! `start` (no update above this overflow). Unset: constant exponent,
+//! no momentum, from the first iteration, as before.
+//!
+//! OXIBIT_PT_DELAY=PATH: wire delays from that grid (`timing::DelayGrid`,
+//! made by `delay_grid` from `sta`'s STA_ARCS) instead of the built-in
+//! table.
+//!
 //! `--packer` also packs LUTs and flops into slices (`Packer::slices`) and
 //! reports what the slices cut: always for `rules` (order of appearance),
 //! and beside it for `rules+score` (best-choice by `merging_score`, held
@@ -153,6 +163,26 @@ fn run() -> Result<bool, String> {
             t.every = parts.next().transpose()?.unwrap_or(0.0) as usize;
             t.beta = parts.next().transpose()?.unwrap_or(t.beta);
             t.exp = parts.next().transpose()?.unwrap_or(t.exp);
+            // A constant exponent unless the schedule says otherwise.
+            t.exp_first = t.exp;
+        }
+        if let Ok(v) = std::env::var("OXIBIT_PT_SCHED") {
+            let t = &mut opts.timing;
+            for kv in v.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                let (k, val) = kv.split_once('=').ok_or(format!("OXIBIT_PT_SCHED: {kv} is not KEY=VALUE"))?;
+                let val: f64 = val.trim().parse().map_err(|_| format!("OXIBIT_PT_SCHED: {val} is not a number"))?;
+                match k.trim() {
+                    "exp_first" if val > 0.0 => t.exp_first = val,
+                    "momentum" if (0.0..1.0).contains(&val) => t.momentum = val,
+                    "start" if val > 0.0 => t.start_overflow = val,
+                    other => return Err(format!("OXIBIT_PT_SCHED: {other}={val} is not a key in range")),
+                }
+            }
+        }
+        if let Ok(path) = std::env::var("OXIBIT_PT_DELAY") {
+            let text = std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
+            let grid = placer::timing::DelayGrid::parse(&text).map_err(|e| format!("{path}: {e}"))?;
+            opts.delay_grid = Some(std::sync::Arc::new(grid));
         }
         let rep = placer::place_design(&mut p, &dev, &opts, 200, &pins)?;
         let lg = place::legalise(&mut p, &place::ps7_inputs(std::path::Path::new(meta))?);

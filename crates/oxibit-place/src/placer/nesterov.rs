@@ -320,14 +320,21 @@ pub fn run(prob: &Problem, grid: &BinGrid, start: PlacementState, opts: &Opts, m
         tw: vec![1.0; prob.nets.len()],
     };
     let mut tstats = timing::Stats::default();
-    // Refresh the timing weights from the instances at `x`, `y`.
-    let mut reweigh = |k: usize, model: &mut Model, x: &[f64], y: &[f64]| -> bool {
+    // Overflow at the first timing update: where the exponent schedule starts.
+    let mut first_ratio: Option<f64> = None;
+    // Refresh the timing weights from the instances at `x`, `y`, at
+    // overflow `ratio`.
+    let mut reweigh = |k: usize, ratio: f64, model: &mut Model, x: &[f64], y: &[f64]| -> bool {
         let Some(t) = timing.as_deref_mut() else { return false };
-        if t.opts.every == 0 || k % t.opts.every != 0 {
+        if t.opts.every == 0 || k % t.opts.every != 0 || ratio > t.opts.start_overflow {
             return false;
         }
+        // 0 at the first update, 1 once overflow reaches the target.
+        let o = *first_ratio.get_or_insert(ratio);
+        let target = opts.target_overflow;
+        let progress = if o > target { ((o - ratio) / (o - target)).clamp(0.0, 1.0) } else { 1.0 };
         let st = model.state(x, y);
-        let (w, up) = tstats.time(|| t.weights(&st, prob.nets.len()));
+        let (w, up) = tstats.time(|| t.weights(&st, prob.nets.len(), progress));
         model.tw = w;
         tstats.trace.push((k, up.worst_ns, up.heavy));
         true
@@ -353,7 +360,7 @@ pub fn run(prob: &Problem, grid: &BinGrid, start: PlacementState, opts: &Opts, m
     let mut over = of(&ux, &uy);
     let mut gamma = gamma_of(over.ratio);
     // The first weights, before the wirelength gradient's scale is taken.
-    reweigh(0, &mut model, &ux, &uy);
+    reweigh(0, over.ratio, &mut model, &ux, &uy);
     let of = |x: &[f64], y: &[f64]| overflow(prob, grid, &model_state(n, x, y), opts.target_density);
 
     // lambda_0: the gradient norms balance (ePlace).
@@ -419,7 +426,7 @@ pub fn run(prob: &Problem, grid: &BinGrid, start: PlacementState, opts: &Opts, m
         hpwl = now;
         gamma = gamma_of(over.ratio);
         // New weights change the gradient at `v`: take it again.
-        if reweigh(k + 1, &mut model, &ux, &uy) {
+        if reweigh(k + 1, over.ratio, &mut model, &ux, &uy) {
             raw = model.raw(&vx, &vy, gamma);
         }
         (gx, gy) = model.gradient(&raw, lambda);
