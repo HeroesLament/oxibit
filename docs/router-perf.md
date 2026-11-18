@@ -137,3 +137,20 @@ every occupied node by cloning the whole `reserved` array, routing, then
 assigning the clone back: two full-array copies per attempt. They now record
 the nodes they actually marked and clear exactly those, which is what the
 packed record requires and also strictly less work than before.
+
+## picoBEAM
+
+Rerouting the picoBEAM ms14c placement on current `main` took 2258.63 s and
+2.20 GB against the original route's 2183.79 s and 2.21 GB, and the FASM
+differs (`5c28be3d...` against `414885e6...`). Neither comparison is valid:
+the original ran with `OXIBIT_MAX_ITERS=160` and the rerun took the default
+of 200, so the two negotiated differently. A real equivalence check has to
+pin the same cap. Both routes are legal -- `overused 0`, `unroutable 0`.
+
+Note also that the `passes=` count in `pd_status.sh` counts `costliest`
+diagnostic lines, not router iterations; neither picoBEAM route exhausted
+its iteration limit.
+
+picoBEAM is a much harder route than mimohalow regardless: 48,228 nets and
+116,419 fixed sinks against mimohalow's 66,602 nets, but far more congested
+through the DSP and BRAM columns. Its timing is in `fmax.md`.
