@@ -324,8 +324,8 @@ pub struct Router<'g> {
     g: &'g Graph,
     opts: Opts,
     /// Nets using each node (counted once per net).
-    occ: Vec<u16>,
-    hist: Vec<f32>,
+    /// Per-node hot fields: see `NodeHot`.
+    hot: Vec<NodeHot>,
     /// Nodes no routed net may enter (clock and default nets, kept as is).
     reserved: Vec<bool>,
     /// Nodes of the kept default nets: interconnect inputs reading VCC
@@ -342,11 +342,9 @@ pub struct Router<'g> {
     /// (`is_fabric_wire`).
     fabric: Vec<bool>,
     // Search scratch.
-    cost: Vec<f32>,
     prev: Vec<(u32, u32, u32)>, // (from node, tile, pi); from == u32::MAX at a start node
     touched: Vec<u32>,
     /// Net-local tree membership: tag[n] == current net tag.
-    tag: Vec<u32>,
     cur_tag: u32,
     /// The costliest single search of the last routed net.
     diag: SearchDiag,
@@ -458,6 +456,27 @@ pub fn is_fabric_wire(node: &str) -> bool {
 }
 
 /// How one net is to be routed this time.
+/// The per-node fields a relaxation reads for every edge it considers, in one
+/// record so that one cache line serves them all. Relaxation is memory bound:
+/// as four `Vec`s these were four lines per node touched, and a congested pass
+/// touches tens of millions.
+///
+/// `cost` and `tag` are per-search scratch (`cost` reset through `touched`,
+/// `tag` by bumping `cur_tag`); `occ` and `hist` are the PathFinder congestion
+/// state and persist across passes. 16 bytes, four to a line.
+#[derive(Clone, Copy)]
+struct NodeHot {
+    /// Cost of the best path to this node in the search under way.
+    cost: f32,
+    /// History cost: how congested this node has been over past passes.
+    hist: f32,
+    /// Net-local tree membership: `tag == cur_tag` if in the current tree.
+    tag: u32,
+    /// Nets other than the one being routed that occupy this node.
+    occ: u16,
+    _pad: u16,
+}
+
 struct Reroute<'a> {
     /// The hops to start from: a subtree from the source; empty to route
     /// from scratch.
@@ -517,14 +536,11 @@ impl<'g> Router<'g> {
             fabric,
             g,
             opts,
-            occ: vec![0; n],
-            hist: vec![0.0; n],
+            hot: vec![NodeHot { cost: f32::INFINITY, hist: 0.0, tag: 0, occ: 0, _pad: 0 }; n],
             reserved: vec![false; n],
             vcc_kept: vec![false; n],
-            cost: vec![f32::INFINITY; n],
             prev: vec![(NONE, 0, 0); n],
             touched: Vec::new(),
-            tag: vec![0; n],
             cur_tag: 0,
             diag: SearchDiag::default(),
             dump_net: std::env::var("OXIBIT_DUMP_NET").map(|v| v.split(',').filter_map(|x| x.parse().ok()).collect()).unwrap_or_default(),
@@ -601,15 +617,15 @@ impl<'g> Router<'g> {
     }
 
     fn node_cost(&self, n: u32, pres: f32) -> f32 {
-        let others = self.occ[n as usize] as f32;
-        (1.0 + self.hist[n as usize]) * (1.0 + pres * others)
+        let others = self.hot[n as usize].occ as f32;
+        (1.0 + self.hot[n as usize].hist) * (1.0 + pres * others)
     }
 
     /// Congestion part of entering `n` during the current net's search: its
     /// cost as `route_net` charges it, less the uncongested cost of 1 that
     /// the distance term already stands for (tree nodes are free).
     fn enter_excess(&self, n: u32, pres: f32, tag: u32) -> f32 {
-        if self.tag[n as usize] == tag { 0.0 } else { self.node_cost(n, pres) - 1.0 }
+        if self.hot[n as usize].tag == tag { 0.0 } else { self.node_cost(n, pres) - 1.0 }
     }
 
     /// Lower bound on the congestion cost still to pay, beyond the
@@ -720,7 +736,7 @@ impl<'g> Router<'g> {
         let gap = |lo: i16, hi: i16, tlo: i16, thi: i16| (tlo as i32 - hi as i32).max(lo as i32 - thi as i32).max(0);
         let to_tree = |b: (i16, i16, i16, i16)| (gap(b.0, b.2, tb.0, tb.2) + gap(b.1, b.3, tb.1, tb.3)) as f32;
         let step = |r: &Self, d: u32, tile: u32, pi: u32| {
-            if r.tag[d as usize] == tag {
+            if r.hot[d as usize].tag == tag {
                 0.0
             } else if f.w > 0.0 || f.kd > 0.0 {
                 timed_step(r.node_cost(d, f.pres), g.edge_timing(tile, pi).delay as f32 / r.opts.delay_norm, f.w, f.kd, f.yields)
@@ -730,12 +746,12 @@ impl<'g> Router<'g> {
         };
         let clock = net.class == NetClass::GlobalClock;
         let blocked = |r: &Self, d: u32| {
-            r.tag[d as usize] != tag && (r.reserved[d as usize] || (r.vcc_kept[d as usize] && !f.vcc) || (clock && r.fabric[d as usize])) && !f.set.contains(&d)
+            r.hot[d as usize].tag != tag && (r.reserved[d as usize] || (r.vcc_kept[d as usize] && !f.vcc) || (clock && r.fabric[d as usize])) && !f.set.contains(&d)
         };
 
         let mut fwd = BinaryHeap::new();
         for &(t, start) in f.starts {
-            self.cost[t as usize] = start;
+            self.hot[t as usize].cost = start;
             self.prev[t as usize] = (NONE, 0, 0);
             self.touched.push(t);
             fwd.push(Item { f: start + f.astar * self.to_aims(t, f.aims) + (f.eb)(t), g: start, node: t });
@@ -757,7 +773,7 @@ impl<'g> Router<'g> {
             let forward = if fwd.is_empty() { false } else if bwd.is_empty() { true } else { forward_turn };
             if forward {
                 let Some(Item { g: gi, node, .. }) = fwd.pop() else { break };
-                if gi > self.cost[node as usize] {
+                if gi > self.hot[node as usize].cost {
                     continue;
                 }
                 *pops += 1;
@@ -766,17 +782,17 @@ impl<'g> Router<'g> {
                     meet = Some(node);
                     break;
                 }
-                let base = self.cost[node as usize];
+                let base = self.hot[node as usize].cost;
                 for &(d, tile, pi) in g.out_edges(node) {
                     if !self.edge_ok(net, node, tile, pi) || blocked(self, d) {
                         continue;
                     }
                     let c = base + step(self, d, tile, pi);
-                    if c < self.cost[d as usize] {
-                        if self.cost[d as usize].is_infinite() {
+                    if c < self.hot[d as usize].cost {
+                        if self.hot[d as usize].cost.is_infinite() {
                             self.touched.push(d);
                         }
-                        self.cost[d as usize] = c;
+                        self.hot[d as usize].cost = c;
                         self.prev[d as usize] = (node, tile, pi);
                         self.pushes += 1;
                         fwd.push(Item { f: c + f.astar * self.to_aims(d, f.aims) + (f.eb)(d), g: c, node: d });
@@ -816,7 +832,7 @@ impl<'g> Router<'g> {
         // forward half (a loop) or the tree.
         let mut out = None;
         if let Some(m) = meet {
-            let total = self.cost[m as usize] + self.cost_b[m as usize];
+            let total = self.hot[m as usize].cost + self.cost_b[m as usize];
             let mut forward_half: HashSet<u32> = HashSet::default();
             let mut n = m;
             while self.prev[n as usize].0 != NONE && forward_half.insert(n) {
@@ -826,19 +842,19 @@ impl<'g> Router<'g> {
             let mut ok = true;
             while self.next_b[n as usize].0 != NONE {
                 let (to, tile, pi) = self.next_b[n as usize];
-                if forward_half.contains(&to) || self.tag[to as usize] == tag {
+                if forward_half.contains(&to) || self.hot[to as usize].tag == tag {
                     ok = false;
                     break;
                 }
-                if self.cost[to as usize].is_infinite() {
+                if self.hot[to as usize].cost.is_infinite() {
                     self.touched.push(to);
-                    self.cost[to as usize] = total;
+                    self.hot[to as usize].cost = total;
                 }
                 self.prev[to as usize] = (n, tile, pi);
                 n = to;
             }
             if ok {
-                self.cost[n as usize] = total;
+                self.hot[n as usize].cost = total;
                 out = Some(n);
             }
         }
@@ -898,7 +914,7 @@ impl<'g> Router<'g> {
 
     fn reset_scratch(&mut self) {
         for &n in &self.touched {
-            self.cost[n as usize] = f32::INFINITY;
+            self.hot[n as usize].cost = f32::INFINITY;
             self.prev[n as usize] = (NONE, 0, 0);
         }
         self.touched.clear();
@@ -967,7 +983,7 @@ impl<'g> Router<'g> {
         let vcc = net.class == NetClass::Constant && self.g.node_name(net.source).to_string().contains("VCC");
         let clock = net.class == NetClass::GlobalClock;
         let mut tree: Vec<u32> = vec![net.source];
-        self.tag[net.source as usize] = tag;
+        self.hot[net.source as usize].tag = tag;
         // Delay (ps) from the source to each tree node.
         let mut arrival: HashMap<u32, f32> = HashMap::from_iter([(net.source, 0.0)]);
         let mut hops: Vec<Hop> = keep.to_vec();
@@ -983,10 +999,10 @@ impl<'g> Router<'g> {
                 let a = arrival.get(&n).copied().unwrap_or(0.0);
                 for &k in out.get(&n).map(Vec::as_slice).unwrap_or(&[]) {
                     let h = keep[k];
-                    if self.tag[h.dst as usize] == tag {
+                    if self.hot[h.dst as usize].tag == tag {
                         continue;
                     }
-                    self.tag[h.dst as usize] = tag;
+                    self.hot[h.dst as usize].tag = tag;
                     tree.push(h.dst);
                     arrival.insert(h.dst, a + self.g.edge_timing(h.tile, h.pi).delay as f32);
                     stack.push(h.dst);
@@ -1019,7 +1035,7 @@ impl<'g> Router<'g> {
         });
 
         for set in &targets {
-            if set.iter().any(|&t| self.tag[t as usize] == tag) {
+            if set.iter().any(|&t| self.hot[t as usize].tag == tag) {
                 continue; // already on the tree
             }
             let aims = self.aims(set);
@@ -1076,7 +1092,7 @@ impl<'g> Router<'g> {
                 let mut heap = BinaryHeap::new();
                 for &t in &tree {
                     let start = sw * arrival.get(&t).copied().unwrap_or(0.0) / self.opts.delay_norm;
-                    self.cost[t as usize] = start;
+                    self.hot[t as usize].cost = start;
                     self.prev[t as usize] = (NONE, 0, 0);
                     self.touched.push(t);
                     heap.push(Item { f: start + astar * self.to_aims(t, &aims) + eb(t), g: start, node: t });
@@ -1087,7 +1103,7 @@ impl<'g> Router<'g> {
                     std::fs::File::create(format!("/tmp/oxibit_pops_{d}_{}.csv", sd.dist)).ok().map(std::io::BufWriter::new)
                 });
                 while let Some(Item { f, g, node }) = heap.pop() {
-                    if self.opts.skip_stale && g > self.cost[node as usize] {
+                    if self.opts.skip_stale && g > self.hot[node as usize].cost {
                         continue;
                     }
                     *pops += 1;
@@ -1102,16 +1118,16 @@ impl<'g> Router<'g> {
                     if let Some(w) = dump.as_mut() {
                         use std::io::Write;
                         let (x, y) = self.g.node_xy(node);
-                        let _ = writeln!(w, "{x},{y},{},{f},{},{}", self.cost[node as usize], self.occ[node as usize], self.g.node_name(node));
+                        let _ = writeln!(w, "{x},{y},{},{f},{},{}", self.hot[node as usize].cost, self.hot[node as usize].occ, self.g.node_name(node));
                     }
-                    if self.occ[node as usize] > 0 && self.tag[node as usize] != tag {
+                    if self.hot[node as usize].occ > 0 && self.hot[node as usize].tag != tag {
                         sd.congested_pops += 1;
                     }
                     if set.contains(&node) {
                         reached = Some(node);
                         break;
                     }
-                    let base = self.cost[node as usize];
+                    let base = self.hot[node as usize].cost;
                     for &(d, tile, pi) in self.g.out_edges(node) {
                         if !self.edge_ok(net, node, tile, pi) {
                             continue;
@@ -1122,10 +1138,10 @@ impl<'g> Router<'g> {
                         if !set.contains(&d) && !inside(d) {
                             continue;
                         }
-                        if cleanup && self.occ[d as usize] > 0 && self.tag[d as usize] != tag {
+                        if cleanup && self.hot[d as usize].occ > 0 && self.hot[d as usize].tag != tag {
                             continue;
                         }
-                        let step = if self.tag[d as usize] == tag {
+                        let step = if self.hot[d as usize].tag == tag {
                             0.0
                         } else if cleanup {
                             self.g.edge_timing(tile, pi).delay as f32 / self.opts.delay_norm + CLEANUP_NODE
@@ -1135,15 +1151,15 @@ impl<'g> Router<'g> {
                             self.node_cost(d, pres)
                         };
                         let c = base + step;
-                        if c < self.cost[d as usize] {
+                        if c < self.hot[d as usize].cost {
                             let hd = self.to_aims(d, &aims);
                             if bounded && hd > factor * best + slack && !set.contains(&d) {
                                 continue;
                             }
-                            if self.cost[d as usize].is_infinite() {
+                            if self.hot[d as usize].cost.is_infinite() {
                                 self.touched.push(d);
                             }
-                            self.cost[d as usize] = c;
+                            self.hot[d as usize].cost = c;
                             self.prev[d as usize] = (node, tile, pi);
                             self.pushes += 1;
                             heap.push(Item { f: c + astar * hd + eb(d), g: c, node: d });
@@ -1151,7 +1167,7 @@ impl<'g> Router<'g> {
                     }
                 }
                 if let Some(t) = reached {
-                    let c = self.cost[t as usize].max(1e-3);
+                    let c = self.hot[t as usize].cost.max(1e-3);
                     for f in fs {
                         let r = f / c;
                         sd.by_f[if r < 0.5 { 0 } else if r < 1.0 { 1 } else if r < 2.0 { 2 } else { 3 }] += 1;
@@ -1162,20 +1178,20 @@ impl<'g> Router<'g> {
                 }
             }
             if let Some(t) = reached {
-                sd.cost = self.cost[t as usize];
+                sd.cost = self.hot[t as usize].cost;
             }
             match reached {
                 Some(target) => {
                     let mut n = target;
                     let first = hops.len();
-                    while self.prev[n as usize].0 != NONE && self.tag[n as usize] != tag {
+                    while self.prev[n as usize].0 != NONE && self.hot[n as usize].tag != tag {
                         let (from, tile, pi) = self.prev[n as usize];
                         hops.push(Hop { src: from, dst: n, tile, pi });
-                        self.tag[n as usize] = tag;
+                        self.hot[n as usize].tag = tag;
                         tree.push(n);
                         n = from;
                     }
-                    self.tag[target as usize] = tag;
+                    self.hot[target as usize].tag = tag;
                     sd.hops = hops.len() - first;
                     // The new branch's arrivals, from where it left the tree.
                     for h in hops[first..].iter().rev() {
@@ -1270,7 +1286,7 @@ impl<'g> Router<'g> {
                 st.tried += 1;
                 let keep = self.keep_hops(net, &routes[i], &HashSet::from_iter([node]));
                 for &n in &prints[i] {
-                    self.occ[n as usize] -= 1;
+                    self.hot[n as usize].occ -= 1;
                 }
                 self.cleanup = true;
                 let (mut pops, mut outside) = (0u64, 0u64);
@@ -1279,7 +1295,7 @@ impl<'g> Router<'g> {
                 self.cleanup = false;
                 st.pops += pops;
                 let print = self.footprint(net, &hops);
-                let clash = print.iter().any(|&n| self.occ[n as usize] > 0);
+                let clash = print.iter().any(|&n| self.hot[n as usize].occ > 0);
                 let new_at = self.arrivals(net.source, &hops);
                 let new = set.iter().filter_map(|n| new_at.get(n)).copied().fold(f32::INFINITY, f32::min);
                 if failed == 0 && !clash && new + 1.0 < old {
@@ -1290,7 +1306,7 @@ impl<'g> Router<'g> {
                     changed.push(i);
                 }
                 for &n in &prints[i] {
-                    self.occ[n as usize] += 1;
+                    self.hot[n as usize].occ += 1;
                 }
             }
             changed.sort_unstable();
@@ -1360,7 +1376,7 @@ impl<'g> Router<'g> {
                 let want = old + s.add_ps as f32;
                 let keep = self.keep_hops(net, &routes[i], &HashSet::from_iter([node]));
                 for &n in &prints[i] {
-                    self.occ[n as usize] -= 1;
+                    self.hot[n as usize].occ -= 1;
                 }
                 // Waypoint candidates: free general-routing nodes, breadth
                 // first out of the source and the branch being replaced.
@@ -1379,7 +1395,7 @@ impl<'g> Router<'g> {
                     let mut took = 0;
                     for &n in &front {
                         for &(d, tile, pi) in self.g.out_edges(n) {
-                            if !self.edge_ok(net, n, tile, pi) || self.occ[d as usize] > 0 || self.reserved[d as usize] || self.vcc_kept[d as usize] || !seen.insert(d) {
+                            if !self.edge_ok(net, n, tile, pi) || self.hot[d as usize].occ > 0 || self.reserved[d as usize] || self.vcc_kept[d as usize] || !seen.insert(d) {
                                 continue;
                             }
                             next.push(d);
@@ -1426,7 +1442,7 @@ impl<'g> Router<'g> {
                     let mut hops = h1;
                     hops.extend(h2);
                     let new = self.arrivals(net.source, &hops).get(&node).copied().unwrap_or(0.0);
-                    let clash = self.footprint(net, &hops).iter().any(|&n| self.occ[n as usize] > 0);
+                    let clash = self.footprint(net, &hops).iter().any(|&n| self.hot[n as usize].occ > 0);
                     if clash || new <= old {
                         continue;
                     }
@@ -1451,7 +1467,7 @@ impl<'g> Router<'g> {
                     changed.push(i);
                 }
                 for &n in &prints[i] {
-                    self.occ[n as usize] += 1;
+                    self.hot[n as usize].occ += 1;
                 }
             }
             changed.sort_unstable();
@@ -1522,7 +1538,7 @@ impl<'g> Router<'g> {
             if routed[i] {
                 prints[i] = self.footprint(net, &[]);
                 for &n in &prints[i] {
-                    self.occ[n as usize] += 1;
+                    self.hot[n as usize].occ += 1;
                 }
             }
         }
@@ -1569,7 +1585,7 @@ impl<'g> Router<'g> {
                 // Keep the branches that share no node with another net.
                 // A net ripped up for timing also gives up the branches to
                 // its critical sinks.
-                let mut bad: HashSet<u32> = prints[i].iter().copied().filter(|&n| self.occ[n as usize] > 1).collect();
+                let mut bad: HashSet<u32> = prints[i].iter().copied().filter(|&n| self.hot[n as usize].occ > 1).collect();
                 if let (Some(c), true) = (&crit, hot.contains(&i)) {
                     bad.extend(c.hot_sinks(i));
                 }
@@ -1582,7 +1598,7 @@ impl<'g> Router<'g> {
                 let weigh = |set: &[u32]| crit.as_ref().map_or(0.0, |c| c.of_sink(i, set));
                 kept += keep.len();
                 for &n in &prints[i] {
-                    self.occ[n as usize] -= 1;
+                    self.hot[n as usize].occ -= 1;
                 }
                 let before = pops;
                 self.cur_net = if iter == 1 { i } else { usize::MAX };
@@ -1599,7 +1615,7 @@ impl<'g> Router<'g> {
                 routed_with[i] = crit.as_ref().map_or(0.0, |c| c.of_net(i));
                 prints[i] = self.footprint(&nets[i], &hops);
                 for &n in &prints[i] {
-                    self.occ[n as usize] += 1;
+                    self.hot[n as usize].occ += 1;
                 }
                 routes[i] = hops;
             }
@@ -1609,10 +1625,11 @@ impl<'g> Router<'g> {
             // Overuse and history.
             let over = oxibit_prof::hot_block!("route.history", {
                 let mut over = 0usize;
-                for (n, &o) in self.occ.iter().enumerate() {
-                    if o > 1 {
+                let hist_fac = self.opts.hist_fac;
+                for h in self.hot.iter_mut() {
+                    if h.occ > 1 {
                         over += 1;
-                        self.hist[n] += self.opts.hist_fac * (o - 1) as f32;
+                        h.hist += hist_fac * (h.occ - 1) as f32;
                     }
                 }
                 over
@@ -1621,12 +1638,12 @@ impl<'g> Router<'g> {
             stats.overused = over;
             // The last few contested nodes, and who holds them.
             if over > 0 && over <= 8 && std::env::var_os("OXIBIT_ROUTE_CONTEST").is_some() {
-                for (n, &o) in self.occ.iter().enumerate().filter(|&(_, &o)| o > 1) {
+                for (n, o) in self.hot.iter().map(|h| h.occ).enumerate().filter(|&(_, o)| o > 1) {
                     let holders: Vec<String> = (0..nets.len())
                         .filter(|&i| prints[i].contains(&(n as u32)))
                         .map(|i| format!("{}({:?},{} sinks)", self.g.node_name(nets[i].source), nets[i].class, nets[i].sinks.len()))
                         .collect();
-                    eprintln!("\noxibit: route: contest: iter {iter} {} occ {o} hist {:.1}: {holders:?}", self.g.node_name(n as u32), self.hist[n]);
+                    eprintln!("\noxibit: route: contest: iter {iter} {} occ {o} hist {:.1}: {holders:?}", self.g.node_name(n as u32), self.hot[n].hist);
                 }
             }
             if over > 0 && over <= stuck_max {
@@ -1643,21 +1660,21 @@ impl<'g> Router<'g> {
             // pack or the placement, not to negotiate over.
             let mut gave_up = false;
             let over = if stuck_limit > 0 && over > 0 && ((stuck >= stuck_limit && over <= last_small) || (iter == self.opts.max_iters && over <= stuck_max)) {
-                let contested: Vec<u32> = self.occ.iter().enumerate().filter(|&(_, &o)| o > 1).map(|(n, _)| n as u32).collect();
+                let contested: Vec<u32> = self.hot.iter().map(|h| h.occ).enumerate().filter(|&(_, o)| o > 1).map(|(n, _)| n as u32).collect();
                 let mut report = Vec::new();
                 for &n in &contested {
                     let holders: Vec<usize> = (0..nets.len()).filter(|&i| routed[i] && prints[i].contains(&n)).collect();
                     let mut tried = Vec::new();
                     for &i in &holders {
-                        if self.occ[n as usize] <= 1 {
+                        if self.hot[n as usize].occ <= 1 {
                             break;
                         }
                         for &m in &prints[i] {
-                            self.occ[m as usize] -= 1;
+                            self.hot[m as usize].occ -= 1;
                         }
                         let saved = self.reserved.clone();
-                        for m in 0..self.occ.len() {
-                            if self.occ[m] > 0 {
+                        for m in 0..self.hot.len() {
+                            if self.hot[m].occ > 0 {
                                 self.reserved[m] = true;
                             }
                         }
@@ -1668,23 +1685,23 @@ impl<'g> Router<'g> {
                         self.reserved = saved;
                         stats.heap_pops += p;
                         let print = self.footprint(&nets[i], &hops);
-                        let shared = print.iter().filter(|&&m| self.occ[m as usize] > 0).count();
+                        let shared = print.iter().filter(|&&m| self.hot[m as usize].occ > 0).count();
                         if f == 0 && shared == 0 {
                             for &m in &print {
-                                self.occ[m as usize] += 1;
+                                self.hot[m as usize].occ += 1;
                             }
                             routes[i] = hops;
                             prints[i] = print;
                             tried.push(json!({"net": self.g.node_name(nets[i].source), "moved": true, "pops": p}));
                         } else {
                             for &m in &prints[i] {
-                                self.occ[m as usize] += 1;
+                                self.hot[m as usize].occ += 1;
                             }
                             tried.push(json!({"net": self.g.node_name(nets[i].source), "moved": false, "unreached_sinks": f, "still_shared": shared,
                                               "sinks": nets[i].sinks.len(), "groups": nets[i].pin_groups.len(), "pops": p}));
                         }
                     }
-                    report.push(json!({"node": self.g.node_name(n), "settled": self.occ[n as usize] <= 1, "nets": tried}));
+                    report.push(json!({"node": self.g.node_name(n), "settled": self.hot[n as usize].occ <= 1, "nets": tried}));
                 }
                 // The second ring. A node neither of its nets can leave alone
                 // may still be freed by moving a third: each net on it in
@@ -1692,28 +1709,28 @@ impl<'g> Router<'g> {
                 // cross others), then every net it now crosses is routed
                 // again with all else forbidden. Kept only if every one of
                 // those finds a clean route; otherwise put back as it was.
-                let still: Vec<u32> = contested.iter().copied().filter(|&n| self.occ[n as usize] > 1).collect();
+                let still: Vec<u32> = contested.iter().copied().filter(|&n| self.hot[n as usize].occ > 1).collect();
                 for &n in &still {
                     let holders: Vec<usize> = (0..nets.len()).filter(|&i| routed[i] && prints[i].contains(&n)).collect();
                     for &i in &holders {
-                        if self.occ[n as usize] <= 1 {
+                        if self.hot[n as usize].occ <= 1 {
                             break;
                         }
                         let none = |_: &[u32]| 0.0;
                         let (mut p, mut o) = (0u64, 0u64);
                         for &m in &prints[i] {
-                            self.occ[m as usize] -= 1;
+                            self.hot[m as usize].occ -= 1;
                         }
                         let was = std::mem::replace(&mut self.reserved[n as usize], true);
                         self.cur_net = usize::MAX;
                         let (hops, f) = self.route_net(&nets[i], 1.0e3, &mut p, &mut o, Reroute { keep: &Vec::new(), margin: 1 << 20, crit: &none, first: false });
                         self.reserved[n as usize] = was;
                         let print = self.footprint(&nets[i], &hops);
-                        let crossed: HashSet<u32> = print.iter().copied().filter(|&m| self.occ[m as usize] > 0).collect();
+                        let crossed: HashSet<u32> = print.iter().copied().filter(|&m| self.hot[m as usize].occ > 0).collect();
                         let blockers: Vec<usize> = (0..nets.len()).filter(|&j| j != i && routed[j] && prints[j].iter().any(|m| crossed.contains(m))).collect();
                         if f != 0 || blockers.len() > 6 {
                             for &m in &prints[i] {
-                                self.occ[m as usize] += 1;
+                                self.hot[m as usize].occ += 1;
                             }
                             report.push(json!({"node": self.g.node_name(n), "ring2": self.g.node_name(nets[i].source), "moved": false, "unreached_sinks": f, "blockers": blockers.len()}));
                             continue;
@@ -1721,31 +1738,31 @@ impl<'g> Router<'g> {
                         // Tentatively: the net on its new route, each blocker moved in turn.
                         let mut undo: Vec<(usize, Vec<Hop>, Vec<u32>)> = vec![(i, std::mem::replace(&mut routes[i], hops), std::mem::replace(&mut prints[i], print))];
                         for &m in &prints[i] {
-                            self.occ[m as usize] += 1;
+                            self.hot[m as usize].occ += 1;
                         }
                         let mut ok = true;
                         for &j in &blockers {
                             for &m in &prints[j] {
-                                self.occ[m as usize] -= 1;
+                                self.hot[m as usize].occ -= 1;
                             }
                             let saved = self.reserved.clone();
-                            for m in 0..self.occ.len() {
-                                if self.occ[m] > 0 {
+                            for m in 0..self.hot.len() {
+                                if self.hot[m].occ > 0 {
                                     self.reserved[m] = true;
                                 }
                             }
                             let (hj, fj) = self.route_net(&nets[j], 1.0, &mut p, &mut o, Reroute { keep: &Vec::new(), margin: 1 << 20, crit: &none, first: false });
                             self.reserved = saved;
                             let pj = self.footprint(&nets[j], &hj);
-                            if fj != 0 || pj.iter().any(|&m| self.occ[m as usize] > 0) {
+                            if fj != 0 || pj.iter().any(|&m| self.hot[m as usize].occ > 0) {
                                 for &m in &prints[j] {
-                                    self.occ[m as usize] += 1;
+                                    self.hot[m as usize].occ += 1;
                                 }
                                 ok = false;
                                 break;
                             }
                             for &m in &pj {
-                                self.occ[m as usize] += 1;
+                                self.hot[m as usize].occ += 1;
                             }
                             undo.push((j, std::mem::replace(&mut routes[j], hj), std::mem::replace(&mut prints[j], pj)));
                         }
@@ -1754,19 +1771,19 @@ impl<'g> Router<'g> {
                         if !ok {
                             for (j, h, pr) in undo.into_iter().rev() {
                                 for &m in &prints[j] {
-                                    self.occ[m as usize] -= 1;
+                                    self.hot[m as usize].occ -= 1;
                                 }
                                 routes[j] = h;
                                 prints[j] = pr;
                                 for &m in &prints[j] {
-                                    self.occ[m as usize] += 1;
+                                    self.hot[m as usize].occ += 1;
                                 }
                             }
                         }
                         report.push(json!({"node": self.g.node_name(n), "ring2": moved, "moved": ok, "blockers": blockers.len(), "pops": p}));
                     }
                 }
-                let left = self.occ.iter().filter(|&&o| o > 1).count();
+                let left = self.hot.iter().filter(|h| h.occ > 1).count();
                 eprintln!("\noxibit: route: stuck at {over} overused for {stuck} passes: exact step leaves {left}: {}", serde_json::Value::Array(report.clone()));
                 progress.emit(Event::progress("route", json!({"iter": iter, "stuck": {"passes": stuck, "before": over, "after": left, "nodes": report}})));
                 gave_up = left > 0;
@@ -1775,7 +1792,8 @@ impl<'g> Router<'g> {
             } else {
                 over
             };
-            observe(iter, &self.occ);
+            let occ: Vec<u16> = self.hot.iter().map(|h| h.occ).collect();
+            observe(iter, &occ);
             // Re-time the nets just routed; pick the next iteration's hot
             // nets while passes remain.
             let mut timing = serde_json::Value::Null;
@@ -1851,7 +1869,7 @@ impl<'g> Router<'g> {
                 && over > 0
                 && over <= e.overuse
             {
-                for (n, &o) in self.occ.iter().enumerate() {
+                for (n, o) in self.hot.iter().map(|h| h.occ).enumerate() {
                     if o > 1 {
                         let (x, y) = self.g.node_xy(n as u32);
                         for dx in -e.radius..=e.radius {
@@ -1867,7 +1885,7 @@ impl<'g> Router<'g> {
                     routed[i]
                         && (hot.contains(&i)
                             || prints[i].iter().any(|&n| {
-                                self.occ[n as usize] > 1 || (nets[i].class == NetClass::Signal && !near.is_empty() && near.contains(&self.g.node_xy(n)))
+                                self.hot[n as usize].occ > 1 || (nets[i].class == NetClass::Signal && !near.is_empty() && near.contains(&self.g.node_xy(n)))
                             }))
                 })
                 .collect();
@@ -1889,7 +1907,7 @@ impl<'g> Router<'g> {
         stats.heap_pushes = self.pushes;
         if let Some(path) = &self.opts.overuse_dump {
             let mut text = String::new();
-            for (n, &o) in self.occ.iter().enumerate() {
+            for (n, o) in self.hot.iter().map(|h| h.occ).enumerate() {
                 if o > 1 {
                     // The nets on it: source, class, and its sinks in this
                     // node's tile (a pin two nets both need shows here).
@@ -1907,7 +1925,7 @@ impl<'g> Router<'g> {
                             format!("{} {:?} [{}]", self.g.node_name(nets[i].source), nets[i].class, near.join(" "))
                         })
                         .collect();
-                    text.push_str(&format!("{}\t{o}\t{}\t{}\n", self.g.node_name(n as u32), self.hist[n], on.join(" | ")));
+                    text.push_str(&format!("{}\t{o}\t{}\t{}\n", self.g.node_name(n as u32), self.hot[n].hist, on.join(" | ")));
                 }
             }
             let _ = std::fs::write(path, text);
@@ -1918,6 +1936,15 @@ impl<'g> Router<'g> {
 
 #[cfg(test)]
 mod tests {
+
+    /// `NodeHot` exists to put four per-node fields on one cache line. If it
+    /// grows past 16 bytes it no longer does, and the relaxation quietly goes
+    /// back to paying two lines per node.
+    #[test]
+    fn node_hot_is_a_quarter_of_a_cache_line() {
+        assert_eq!(std::mem::size_of::<NodeHot>(), 16);
+        assert_eq!(64 / std::mem::size_of::<NodeHot>(), 4);
+    }
     use super::*;
     use crate::sta::Stub;
     use std::cell::RefCell;

@@ -27,6 +27,7 @@ So the levers, in order of expected return:
 |---|---|---|---|
 | baseline (merged `main`) | 18 passes, 557 s, 2.46 GB | 74cfbe71e882e0c0e757a09cf078f9b4 | reference |
 | + fat LTO, 1 codegen unit, FxHash, `by_f` gated | 18 passes, 533 s, 2.47 GB | 74cfbe71e882e0c0e757a09cf078f9b4 | kept, 4.3% |
+| + `NodeHot`: cost/hist/tag/occ in one 16 B record | 18 passes, 508 s, 2.48 GB | 74cfbe71e882e0c0e757a09cf078f9b4 | kept, 4.8% (8.9% cumulative) |
 
 The 533 s run shared virt2 with another router, so it paid L3 contention
 the baseline may not have: 4.3% is a floor, not a ceiling. Same pass count,
@@ -74,3 +75,29 @@ ride-along.
 - Release builds get `lto = "fat"` and `codegen-units = 1`. The hot path
   crosses crate boundaries into `oxibit-fabric` on every edge lookup, and
   those calls cannot inline across codegen units.
+
+## Packing the per-node hot fields
+
+The relaxation reads, for every edge it considers and indexed by the
+destination node: `reserved`, `vcc_kept`, `fabric` (clock nets), `occ` and
+`tag` (twice), `cost`, and `occ`/`hist` again inside `node_cost`. As separate
+`Vec`s that is one cache line per array per node touched, for arithmetic
+that is a handful of adds.
+
+`NodeHot` puts `cost`, `hist`, `tag` and `occ` in one 16-byte record, four to
+a line. `occ` is `u16` and the record carries 2 bytes of padding to land on
+16 exactly; a test pins the size, because the layout *is* the optimisation
+and a field added later would silently undo it.
+
+`prev` stays outside: it is written only when a relaxation improves a node
+and read only during traceback, so it would dilute the record for the common
+case. The whole-array sweeps (`hist` update, overuse counting, contested-node
+collection) become strided over 16-byte records instead of contiguous, but
+they run once per pass over the nodes against tens of millions of pops.
+`run_observed`'s public `&[u16]` of occupancy is materialised once per pass
+rather than changing the signature.
+
+One pleasant consequence: the history update read `occ` and wrote `hist` in
+the same loop, which the packing turned into a borrow error and then into a
+single `iter_mut` sweep — correct, and better localised than the two-array
+version it replaced.
