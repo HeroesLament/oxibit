@@ -70,3 +70,19 @@ the LUT bound.
   not run.
 - Shift registers four to a SLICEM would free about 600 sites.
 - Not on the boards yet.
+
+## Rejected: CARRY4 in the placer's timing weights (2026-11-17)
+
+`CellSpec::kind_of` with CARRY4, and arcs inside one carry-chain instance
+timed as local (0 ps), so the placer's timing graph sees carry paths.
+
+| design | before | with carries in the placer |
+|---|---|---|
+| mimohalow, timed route | 19 passes; data_clk 40.47 ns, axi_clk 12.76 ns | 19 passes; data_clk 40.52 ns, axi_clk 17.09 ns |
+| picoBEAM ms14c netlist, bins 24, routed as ms14c | routes (exact step 66 -> 0 at the 160-pass cap) | does not route (exact step 92 -> 15 at the cap) |
+
+mimohalow's data_clk path is logic-bound (84 levels, 20.3 ns of logic);
+its axi_clk worst is one wide-fanout control register (`axil_ctrl3_reg`)
+either way, its farthest sink differing between placements. Nothing
+gained, picoBEAM lost its route: not kept. The router and STA keep
+timing CARRY4 (61e79c9).
