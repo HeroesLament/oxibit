@@ -38,6 +38,11 @@ flate2 = "1"
 # status; unwinding with a live /dev/mem mapping has nothing to offer.
 panic = "abort"
 strip = true
+# Whole-program optimisation. The router is the hot path and crosses crate
+# boundaries constantly (oxibit-pnr -> oxibit-fabric lookups); fat LTO with a
+# single codegen unit lets those inline. Costs build time, not correctness.
+lto = "fat"
+codegen-units = 1
 
 # Release with line tables and symbols, for samply/perf stacks.
 #   cargo build --profile profiling [--features profile]

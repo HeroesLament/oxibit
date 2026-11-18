@@ -58,7 +58,9 @@
 //! connection changes, so nothing gets slower and nothing overlaps.
 
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::BinaryHeap;
+
+use crate::fx::{HashMap, HashSet};
 use std::time::Instant;
 
 use oxibit_fasm::route::{EdgeKind, Graph};
@@ -192,6 +194,9 @@ pub struct Opts {
     /// padded up to after a legal route with `timing` set
     /// (`Router::hold_pass`). None: no padding.
     pub hold_fix_ps: Option<i64>,
+    /// Seconds the hold pass may take; when spent it stops between
+    /// targets and says so (`budget_hit`).
+    pub hold_budget_s: f64,
 }
 
 /// The end of a negotiation, when few nodes are left overused: the nets
@@ -229,6 +234,7 @@ impl Default for Opts {
             bidir: false,
             cleanup_rounds: 0,
             hold_fix_ps: None,
+            hold_budget_s: 300.0,
         }
     }
 }
@@ -362,6 +368,9 @@ pub struct Router<'g> {
     /// `route_net` runs for the cleanup pass: cost is delay alone, and
     /// nodes other nets occupy are off limits.
     cleanup: bool,
+    /// OXIBIT_BY_F=1: keep every popped f of a search for `SearchDiag::by_f`
+    /// (one push per heap pop, on the hottest line; off by default).
+    by_f: bool,
 }
 
 /// Delay cost units per tile of distance in a cleanup search: just under
@@ -528,6 +537,7 @@ impl<'g> Router<'g> {
             popped_b: if opts_bidir { vec![0; n] } else { Vec::new() },
             search_no: 0,
             cleanup: false,
+            by_f: std::env::var_os("OXIBIT_BY_F").is_some(),
         }
     }
 
@@ -563,7 +573,7 @@ impl<'g> Router<'g> {
     #[oxibit_prof::hot(name = "Router::footprint")]
     fn footprint(&self, net: &Net, hops: &[Hop]) -> Vec<u32> {
         let mut out = Vec::new();
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::default();
         if net.class == NetClass::Constant {
             // A tie-off source's hard fan-out (DSP_GND_L to every DSP
             // control pin) is a default the pin's own routing overrides.
@@ -608,7 +618,7 @@ impl<'g> Router<'g> {
     /// worth on theirs; every other node pays at least three hops' worth
     /// (`far`). Delay terms are ignored (a lower bound).
     fn entry_bound(&self, set: &[u32], pres: f32, tag: u32) -> (HashMap<u32, f32>, f32) {
-        let mut near: HashMap<u32, f32> = HashMap::new();
+        let mut near: HashMap<u32, f32> = HashMap::default();
         let mut far = f32::INFINITY;
         for &t in set {
             near.insert(t, 0.0);
@@ -807,7 +817,7 @@ impl<'g> Router<'g> {
         let mut out = None;
         if let Some(m) = meet {
             let total = self.cost[m as usize] + self.cost_b[m as usize];
-            let mut forward_half: HashSet<u32> = HashSet::new();
+            let mut forward_half: HashSet<u32> = HashSet::default();
             let mut n = m;
             while self.prev[n as usize].0 != NONE && forward_half.insert(n) {
                 n = self.prev[n as usize].0;
@@ -847,7 +857,7 @@ impl<'g> Router<'g> {
             return vec![self.g.node_xy(set[0])];
         }
         let mut out: Vec<(i16, i16)> = Vec::new();
-        let mut seen: HashSet<u32> = HashSet::new();
+        let mut seen: HashSet<u32> = HashSet::default();
         let mut stack: Vec<(u32, u32)> = set.iter().map(|&t| (t, 0)).collect();
         while let Some((n, depth)) = stack.pop() {
             if !seen.insert(n) || out.len() >= 16 {
@@ -916,7 +926,7 @@ impl<'g> Router<'g> {
                 if terminals.contains(&h.dst) {
                     return false;
                 }
-                let (mut out, mut seen) = (Vec::new(), HashSet::new());
+                let (mut out, mut seen) = (Vec::new(), HashSet::default());
                 self.closure(h.dst, &mut out, &mut seen);
                 out.iter().any(|n| bad.contains(n))
             })
@@ -959,12 +969,12 @@ impl<'g> Router<'g> {
         let mut tree: Vec<u32> = vec![net.source];
         self.tag[net.source as usize] = tag;
         // Delay (ps) from the source to each tree node.
-        let mut arrival: std::collections::HashMap<u32, f32> = std::collections::HashMap::from([(net.source, 0.0)]);
+        let mut arrival: HashMap<u32, f32> = HashMap::from_iter([(net.source, 0.0)]);
         let mut hops: Vec<Hop> = keep.to_vec();
         let mut failed = 0;
         // The kept subtree, its arrivals in order out from the source.
         if !keep.is_empty() {
-            let mut out: HashMap<u32, Vec<usize>> = HashMap::new();
+            let mut out: HashMap<u32, Vec<usize>> = HashMap::default();
             for (k, h) in keep.iter().enumerate() {
                 out.entry(h.src).or_default().push(k);
             }
@@ -1014,7 +1024,7 @@ impl<'g> Router<'g> {
             }
             let aims = self.aims(set);
             let cleanup = self.cleanup;
-            let (near, far) = if self.opts.estimate.entry && !cleanup { self.entry_bound(set, pres, tag) } else { (HashMap::new(), 0.0) };
+            let (near, far) = if self.opts.estimate.entry && !cleanup { self.entry_bound(set, pres, tag) } else { (HashMap::default(), 0.0) };
             let w = self.opts.delay_weight;
             // The sink's own delay weight, on top of the net-blind `w`,
             // and how much of the congestion cost it still pays.
@@ -1072,6 +1082,7 @@ impl<'g> Router<'g> {
                     heap.push(Item { f: start + astar * self.to_aims(t, &aims) + eb(t), g: start, node: t });
                 }
                 let mut fs: Vec<f32> = Vec::new();
+                let by_f = self.by_f;
                 let mut dump: Option<std::io::BufWriter<std::fs::File>> = self.dump_net.contains(&self.cur_net).then_some(self.cur_net).and_then(|d| {
                     std::fs::File::create(format!("/tmp/oxibit_pops_{d}_{}.csv", sd.dist)).ok().map(std::io::BufWriter::new)
                 });
@@ -1085,7 +1096,9 @@ impl<'g> Router<'g> {
                     best = best.min(dd as f32);
                     sd.far = sd.far.max(dd);
                     sd.by_dist[match dd { 0..=2 => 0, 3..=5 => 1, 6..=10 => 2, 11..=20 => 3, 21..=40 => 4, _ => 5 }] += 1;
-                    fs.push(f);
+                    if by_f {
+                        fs.push(f);
+                    }
                     if let Some(w) = dump.as_mut() {
                         use std::io::Write;
                         let (x, y) = self.g.node_xy(node);
@@ -1191,11 +1204,11 @@ impl<'g> Router<'g> {
 
     /// Intrinsic delay (ps) from `source` to every node `hops` reach.
     fn arrivals(&self, source: u32, hops: &[Hop]) -> HashMap<u32, f32> {
-        let mut out: HashMap<u32, Vec<usize>> = HashMap::new();
+        let mut out: HashMap<u32, Vec<usize>> = HashMap::default();
         for (k, h) in hops.iter().enumerate() {
             out.entry(h.src).or_default().push(k);
         }
-        let mut at = HashMap::from([(source, 0.0)]);
+        let mut at = HashMap::from_iter([(source, 0.0)]);
         let mut stack = vec![source];
         while let Some(n) = stack.pop() {
             let a = at[&n];
@@ -1255,7 +1268,7 @@ impl<'g> Router<'g> {
                 let at = self.arrivals(net.source, &routes[i]);
                 let Some((node, old)) = set.iter().find_map(|n| at.get(n).map(|&a| (*n, a))) else { continue };
                 st.tried += 1;
-                let keep = self.keep_hops(net, &routes[i], &HashSet::from([node]));
+                let keep = self.keep_hops(net, &routes[i], &HashSet::from_iter([node]));
                 for &n in &prints[i] {
                     self.occ[n as usize] -= 1;
                 }
@@ -1306,8 +1319,14 @@ impl<'g> Router<'g> {
         const DEPTH: usize = 32;
         const PER_DEPTH: usize = 4;
         const FRONT: usize = 96;
+        // Candidates in a row without a better detour before a target is
+        // given up: a target nothing fixes would otherwise try all of
+        // DEPTH x PER_DEPTH, two searches each.
+        const GIVE_UP: usize = 24;
         let t0 = Instant::now();
         let (mut tried, mut met, mut partial, mut short_first, mut short_last) = (0usize, 0usize, 0usize, 0usize, 0usize);
+        let (mut given_up, mut budget_hit) = (0usize, false);
+        let budget = std::time::Duration::from_secs_f64(self.opts.hold_budget_s);
         let mut worst_first = 0i64;
         let mut changed: Vec<usize> = Vec::new();
         let none = |_: &[u32]| 0.0_f32;
@@ -1323,6 +1342,10 @@ impl<'g> Router<'g> {
             }
             short_last = shorts.len();
             for s in &shorts {
+                if t0.elapsed() > budget {
+                    budget_hit = true;
+                    break;
+                }
                 let i = s.net;
                 if !routed[i] || nets[i].class != NetClass::Signal {
                     continue;
@@ -1335,7 +1358,7 @@ impl<'g> Router<'g> {
                 }
                 tried += 1;
                 let want = old + s.add_ps as f32;
-                let keep = self.keep_hops(net, &routes[i], &HashSet::from([node]));
+                let keep = self.keep_hops(net, &routes[i], &HashSet::from_iter([node]));
                 for &n in &prints[i] {
                     self.occ[n as usize] -= 1;
                 }
@@ -1374,9 +1397,15 @@ impl<'g> Router<'g> {
                 }
                 let mut best: Option<(f32, Vec<Hop>)> = None;
                 self.cleanup = true;
+                let mut dry = 0usize;
                 for &w in &cands {
+                    if dry >= GIVE_UP {
+                        given_up += 1;
+                        break;
+                    }
+                    dry += 1;
                     let (mut pops, mut outside) = (0u64, 0u64);
-                    let leg1 = Net { sinks: vec![w], pin_groups: Vec::new(), ..net.clone() };
+                    let leg1 = Net { source: net.source, sinks: vec![w], pin_groups: Vec::new(), edges: Vec::new(), class: net.class };
                     let (h1, f1) = self.route_net(&leg1, 1.0, &mut pops, &mut outside, Reroute { keep: &keep, margin: -1, crit: &none, first: false });
                     if f1 != 0 {
                         continue;
@@ -1386,7 +1415,7 @@ impl<'g> Router<'g> {
                     for &n in &mine {
                         self.reserved[n as usize] = true;
                     }
-                    let leg2 = Net { source: w, sinks: vec![node], pin_groups: Vec::new(), ..net.clone() };
+                    let leg2 = Net { source: w, sinks: vec![node], pin_groups: Vec::new(), edges: Vec::new(), class: net.class };
                     let (h2, f2) = self.route_net(&leg2, 1.0, &mut pops, &mut outside, Reroute { keep: &empty, margin: -1, crit: &none, first: false });
                     for &n in &mine {
                         self.reserved[n as usize] = false;
@@ -1404,6 +1433,7 @@ impl<'g> Router<'g> {
                     let done = new >= want;
                     if done || best.as_ref().is_none_or(|b| new > b.0) {
                         best = Some((new, hops));
+                        dry = 0;
                     }
                     if done {
                         break;
@@ -1426,12 +1456,13 @@ impl<'g> Router<'g> {
             }
             changed.sort_unstable();
             changed.dedup();
-            if changed.is_empty() {
+            if changed.is_empty() || budget_hit {
                 break;
             }
         }
         let left = view.hold_targets(self.g, nets, routes, &changed, margin_ps);
         json!({"margin_ps": margin_ps, "short": short_first, "worst_ps": worst_first, "tried": tried, "met": met, "partial": partial,
+               "given_up": given_up, "budget_s": self.opts.hold_budget_s, "budget_hit": budget_hit,
                "short_last_round": short_last, "left": left.len(), "left_worst_ps": left.iter().map(|s| s.slack_ps).min().unwrap_or(0),
                "seconds": t0.elapsed().as_secs_f64()})
     }
@@ -1439,7 +1470,7 @@ impl<'g> Router<'g> {
     /// Nodes two or more nets occupy under `routes` (one hop list per net),
     /// with the nets on each.
     pub fn audit(&self, nets: &[Net], routes: &[Vec<Hop>]) -> Vec<(u32, Vec<usize>)> {
-        let mut on: std::collections::HashMap<u32, Vec<usize>> = std::collections::HashMap::new();
+        let mut on: HashMap<u32, Vec<usize>> = HashMap::default();
         for (i, (net, hops)) in nets.iter().zip(routes).enumerate() {
             for n in self.footprint(net, hops) {
                 on.entry(n).or_default().push(i);
@@ -1505,9 +1536,9 @@ impl<'g> Router<'g> {
         let view = self.opts.timing.clone();
         let mut crit: Option<CriticalityMap> = None;
         let mut routed_with: Vec<f32> = vec![0.0; nets.len()];
-        let mut hot: HashSet<usize> = HashSet::new();
+        let mut hot: HashSet<usize> = HashSet::default();
         // The end game's area: tiles within its radius of an overused node.
-        let mut near: HashSet<(i16, i16)> = HashSet::new();
+        let mut near: HashSet<(i16, i16)> = HashSet::default();
         // With a handful of nodes left overused the capped present cost can
         // lose to a detour for good: one net then takes a different shared
         // node every pass (ms5: 1 overused from pass 187 to 200 at cap 8,

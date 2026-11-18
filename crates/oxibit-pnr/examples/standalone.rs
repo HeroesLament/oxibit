@@ -162,6 +162,10 @@ fn run() -> Result<Outcome, String> {
     if let Some(n) = std::env::var("OXIBIT_HOLD_FIX").ok().and_then(|n| n.parse().ok()) {
         opts.hold_fix_ps = Some(n);
     }
+    // OXIBIT_HOLD_BUDGET=S: seconds the hold pass may take (default 300).
+    if let Some(s) = std::env::var("OXIBIT_HOLD_BUDGET").ok().and_then(|s| s.parse().ok()) {
+        opts.hold_budget_s = s;
+    }
     if let Ok(v) = std::env::var("OXIBIT_DETOUR") {
         let (f, m) = v.split_once(',').ok_or("OXIBIT_DETOUR: want FACTOR,MARGIN")?;
         let num = |s: &str| s.trim().parse::<f32>().map_err(|_| format!("OXIBIT_DETOUR: {s} is not a number"));

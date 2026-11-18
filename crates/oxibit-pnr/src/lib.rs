@@ -15,6 +15,7 @@ pub mod delay;
 pub mod dsp_patch;
 pub mod fasm_out;
 pub mod flow;
+pub mod fx;
 pub mod iocfg;
 pub mod lutinit;
 pub mod mmcm;
