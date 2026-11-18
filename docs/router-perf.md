@@ -37,8 +37,16 @@ one at a time on an idle host:
 
 | arm | mimohalow reroute | `top.fasm` | verdict |
 |---|---|---|---|
+| merge baseline, `c038bec`, no LTO | 18 passes, 546.09 s, 2.47 GB | 74cfbe71e882e0c0e757a09cf078f9b4 | reference |
 | `NodeHot` record (stage A) | 18 passes, 423.36 s, 2.48 GB | 74cfbe71e882e0c0e757a09cf078f9b4 | reference for stage B |
 | + the four node flags in the record's spare byte | 18 passes, 391.24 s, 2.47 GB | 74cfbe71e882e0c0e757a09cf078f9b4 | kept, 7.6% |
+
+546.09 s to 391.24 s: **28.4% off the wall clock, a 1.40x speedup**, for
+byte-identical output. Stage A was 22.5% of it and stage B 7.6% of what
+stage A left. The quiet baseline also settles the earlier measurements: at
+546 s it is close to the 557 s first recorded, so the original figure was
+taken on a near-idle box and it was the 533 s and 508 s rows that were
+distorted. The contention understated the work rather than flattering it.
 
 The lesson for later rows: run the arms one at a time, on an idle host, or
 the measurement says more about the neighbours than the change.
