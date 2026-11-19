@@ -85,3 +85,45 @@ already sits where a different placement decides whether it routes.
 
 Also open: about a quarter of the planned sinks did not resolve to
 netlist cells (packed carry and LUT RAM names).
+
+## Noise floor
+
+Five runs per design, each copying 5 LUTs that cannot matter: two sinks,
+every arc with over 3 ns of slack, one sink moved to the copy. A different
+5 per run. Everything else as the base run.
+
+| mimohalow | base | five runs | spread |
+|---|---|---|---|
+| axi_clk | 13.142 ns | 13.801 13.497 11.237 12.855 14.383 | 3.1 ns |
+| data_clk | 42.274 ns | 42.230 43.144 43.056 42.625 45.183 | 3.0 ns |
+| route passes | 18 | 14 13 15 25 21 | |
+
+| picoBEAM | route | axi_clk | pb_clk |
+|---|---|---|---|
+| base | 200 passes + stuck rescue | 9.962 ns | 64.146 ns |
+| run 1 | 200 passes + stuck rescue | 9.686 ns | 62.456 ns |
+| run 2 | failed, 126 nodes overused | | |
+| run 3 | failed, 88 overused | | |
+| run 4 | failed, 47 overused | | |
+| run 5 | failed, 134 overused | | |
+
+Five LUTs in 50,000 move mimohalow's clocks by 3 ns, and picoBEAM routes
+in one run of five. Read against that:
+
+- Timing under either method is inside the band on mimohalow, except
+  data_clk by slack (47.381 ns), 2.2 ns past the worst of five.
+- picoBEAM failing to route by slack is what four of five harmless
+  changes do. It says nothing about the method.
+- Route effort by total delay is outside the band both ways: 58 passes
+  on mimohalow against 13 to 25, and picoBEAM converged in 85 where no
+  other run has converged at all. picoBEAM's axi_clk at 7.154 ns is
+  also well past the one routed noise run.
+
+Runs 2 and 4 exit with "LUT pin taken twice or out of range" after the
+cap, as the by-slack picoBEAM run did; runs 3 and 5 exit 1. Whether the
+first is only a symptom of the unresolved overuse is unchecked.
+
+A single run cannot rank two placer or replication settings on these
+designs. Either compare over several perturbed runs, or take the best
+of several as the result: run 3 on mimohalow gave axi_clk 11.237 ns,
+better than any method tried here.
