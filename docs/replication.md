@@ -48,3 +48,40 @@ mimohalow is 94% full of LUTs and its copies averaged 92 sinks; picoBEAM
 has room and its copies averaged 48. Whether that is the difference is
 not shown. Choosing by slack remains the next step, and both designs are
 its test.
+
+## Second run: chosen by slack
+
+`replicate_plan ... slack_ps=0`: STA_ARCS now carries each arc's slack, and
+a cell is copied only for its sinks on arcs that miss their clock's target
+and are routed 1000 ps or longer; the original keeps the other sinks.
+Worst slack first, 400 copies at most. Targets: axi_clk 10 ns, data_clk
+31.25 ns, pb_clk 50 ns.
+
+| mimohalow | none | by total delay (397) | by slack (96 copies of 52 cells) |
+|---|---|---|---|
+| axi_clk | 13.142 ns | 12.396 ns | 14.149 ns |
+| data_clk | 42.274 ns | 43.696 ns | 47.381 ns |
+| route passes | 18 | 58 | 17 |
+
+| picoBEAM | none | by total delay (398) | by slack (378 copies of 244 cells) |
+|---|---|---|---|
+| axi_clk | 9.962 ns | 7.154 ns | not routed |
+| pb_clk | 64.146 ns | 61.220 ns | not routed |
+| route | 200 passes + stuck rescue | 85 passes, converged | 200 passes, 115 nodes overused |
+
+Worse than no replication on both. Leaving the large nets alone did put
+mimohalow's routing effort back (17 passes), so that part of the reading
+of the first run holds. The rest does not: copying the cells on failing
+paths made the paths slower, and picoBEAM unroutable.
+
+Two things are not separated by these runs. mimohalow's data_clk target is
+at its floor, so nearly every deep arc fails and the worst-slack cells are
+the cells of one path, each of them split; and picoBEAM's pb_clk fails its
+target on 2,299 nets. And 5 ns on data_clk from 96 cells in 50,000 is a
+large answer to a small change: how far these results move under any
+change to the netlist has not been measured, and until it is no single
+run here ranks one method over another. picoBEAM without replication
+already sits where a different placement decides whether it routes.
+
+Also open: about a quarter of the planned sinks did not resolve to
+netlist cells (packed carry and LUT RAM names).

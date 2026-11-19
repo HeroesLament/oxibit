@@ -13,8 +13,8 @@
 //! site pip (default 20). STA_PERIODS="clk=ps,...": slack against these.
 //! STA_TRACE=1: each path's steps. STA_ARCS=path: every timed arc as
 //! `driver cell, sink cell, ps, tile distance, dx, dy, driver kind,
-//! sink kind` (tab-separated; distance -1 and dx, dy 0 where a cell is
-//! unplaced). `oxibit-place`'s `delay_grid` turns it into the placer's
+//! sink kind, slack ps` (tab-separated; distance -1 and dx, dy 0 where a
+//! cell is unplaced; slack `-` on no path with a period, see STA_PERIODS). `oxibit-place`'s `delay_grid` turns it into the placer's
 //! delay table.
 //! STA_SHOW=path: for each `driver cell <tab> sink cell` line of that
 //! file, the arc's pips and their delays (a `show` line each, first).
@@ -120,7 +120,8 @@ fn main() -> Result<(), String> {
             // The first four columns as before: readers of the old form still work.
             let dist = a.delta.map_or(-1, |(dx, dy)| dx.abs() + dy.abs());
             let (dx, dy) = a.delta.unwrap_or((0, 0));
-            text.push_str(&format!("{}\t{}\t{}\t{dist}\t{dx}\t{dy}\t{:?}\t{:?}\n", a.from, a.to, a.ps, a.from_kind, a.to_kind));
+            let slack = a.slack_ps.map_or("-".to_string(), |s| s.to_string());
+            text.push_str(&format!("{}\t{}\t{}\t{dist}\t{dx}\t{dy}\t{:?}\t{:?}\t{slack}\n", a.from, a.to, a.ps, a.from_kind, a.to_kind));
         }
         std::fs::write(&path, text).map_err(|e| format!("{path}: {e}"))?;
     }

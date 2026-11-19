@@ -560,6 +560,8 @@ pub struct TimedArc {
     pub ps: i64,
     /// Sink tile minus driver tile, (x, y); `None` unless both are placed.
     pub delta: Option<(i32, i32)>,
+    /// Its slack at the last analysis; `None` on no constrained path.
+    pub slack_ps: Option<i64>,
     pub from_kind: CellKind,
     pub to_kind: CellKind,
 }
@@ -706,6 +708,8 @@ pub struct Timer {
     period: Vec<Option<i64>>,
     arc_ps: Vec<i64>,
     arc_state: Vec<ArcState>,
+    /// Per arc, its slack at the last `analyze`; `FREE` on no constrained path.
+    arc_slack: Vec<i64>,
     table: SlackTable,
 }
 
@@ -713,7 +717,7 @@ impl Timer {
     pub fn new(d: Design, cons: &Constraints, model: Model) -> Self {
         let period = d.clocks.iter().map(|c| cons.period(c)).collect();
         let n = d.arcs.len();
-        Timer { d, model, site_pip: 20, period, arc_ps: vec![0; n], arc_state: vec![ArcState::Unknown; n], table: SlackTable::default() }
+        Timer { d, model, site_pip: 20, period, arc_ps: vec![0; n], arc_state: vec![ArcState::Unknown; n], arc_slack: vec![FREE; n], table: SlackTable::default() }
     }
 
     pub fn design(&self) -> &Design {
@@ -849,6 +853,7 @@ impl Timer {
                     to: c.name.clone(),
                     ps: self.arc_ps[pin.arc as usize],
                     delta,
+                    slack_ps: self.arc_slack.get(pin.arc as usize).copied().filter(|&s| s != FREE),
                     from_kind: from.kind,
                     to_kind: c.kind,
                 });
@@ -1172,6 +1177,7 @@ impl Timer {
             s.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.total_cmp(&a.1)));
             s.dedup_by_key(|e| e.0);
         }
+        self.arc_slack = arc_slack;
         self.table = SlackTable {
             net_slack: net_slack.into_iter().map(|s| (s != FREE).then_some(s)).collect(),
             net_arrival: net_arrival.into_iter().map(|t| (t != UNSET).then_some(t)).collect(),

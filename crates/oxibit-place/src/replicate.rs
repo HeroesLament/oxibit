@@ -26,12 +26,19 @@ pub struct PlanOpts {
     pub max_groups: usize,
     /// Most copies over the whole design.
     pub budget: usize,
+    /// Choose by slack: copy a cell only for its sinks on failing paths.
+    /// Arcs with slack under this, ps, fail; `None` chooses by fan-out and
+    /// delay as above.
+    pub slack_ps: Option<i64>,
+    /// By slack, a failing arc counts only if routed at least this long, ps:
+    /// a sink already beside its driver gains nothing from a copy.
+    pub min_arc_ps: i64,
 }
 
 impl Default for PlanOpts {
     /// Ours, not swept.
     fn default() -> PlanOpts {
-        PlanOpts { min_fanout: 8, min_mean_ps: 1500.0, span: 24, max_groups: 8, budget: 2000 }
+        PlanOpts { min_fanout: 8, min_mean_ps: 1500.0, span: 24, max_groups: 8, budget: 2000, slack_ps: None, min_arc_ps: 1000 }
     }
 }
 
@@ -53,6 +60,8 @@ struct Sink {
     dx: i64,
     dy: i64,
     name: String,
+    ps: i64,
+    slack: Option<i64>,
 }
 
 /// Halve `sinks` along their wider axis until each group fits `span` or
@@ -90,10 +99,24 @@ pub fn plan(arcs: &str, o: &PlanOpts) -> Result<(String, PlanStats), String> {
         }
         let e = by.entry(f[0]).or_default();
         // One entry per sink cell, however many of its pins the net enters.
-        if !e.0.iter().any(|s| s.name == f[1]) {
-            e.0.push(Sink { dx: num(f[4])?, dy: num(f[5])?, name: f[1].to_string() });
-            e.1 += num(f[2])?;
+        let slack = match f.get(8).map(|s| s.trim()) {
+            None | Some("-") => None,
+            Some(s) => Some(num(s)?),
+        };
+        if o.slack_ps.is_some() && f.len() < 9 {
+            return Err(format!("line {}: no slack column; choosing by slack needs sta run with STA_PERIODS", ln + 1));
         }
+        match e.0.iter_mut().find(|s| s.name == f[1]) {
+            // A sink entered twice is as late as its later pin.
+            Some(s) => s.slack = s.slack.min(slack).or(s.slack).or(slack),
+            None => {
+                e.0.push(Sink { dx: num(f[4])?, dy: num(f[5])?, name: f[1].to_string(), ps: num(f[2])?, slack });
+                e.1 += num(f[2])?;
+            }
+        }
+    }
+    if let Some(limit) = o.slack_ps {
+        return Ok(plan_by_slack(by, limit, o));
     }
     let mut st = PlanStats { drivers: by.len(), ..Default::default() };
     let mut cands: Vec<(&str, Vec<Sink>, i64)> = by
@@ -132,6 +155,44 @@ pub fn plan(arcs: &str, o: &PlanOpts) -> Result<(String, PlanStats), String> {
         st.copies += k;
     }
     Ok((text, st))
+}
+
+/// `plan`, choosing by slack: a copy per group of a cell's failing sinks,
+/// the original keeping the rest. Cells in order of their worst slack.
+fn plan_by_slack(by: BTreeMap<&str, (Vec<Sink>, i64)>, limit: i64, o: &PlanOpts) -> (String, PlanStats) {
+    let mut st = PlanStats { drivers: by.len(), ..Default::default() };
+    let mut cands: Vec<(i64, &str, Vec<Sink>, bool)> = Vec::new();
+    for (driver, (sinks, _)) in by {
+        let failing = |s: &Sink| s.slack.is_some_and(|v| v < limit) && s.ps >= o.min_arc_ps;
+        let (late, rest): (Vec<Sink>, Vec<Sink>) = sinks.into_iter().partition(failing);
+        if let Some(worst) = late.iter().filter_map(|s| s.slack).min() {
+            cands.push((worst, driver, late, rest.is_empty()));
+        }
+    }
+    st.candidates = cands.len();
+    cands.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(b.1)));
+    let mut text = String::new();
+    for (_, driver, late, alone) in cands {
+        let mut groups = Vec::new();
+        split(late, o.span, o.max_groups, &mut groups);
+        // With no other sinks the original keeps the first group.
+        let keep = usize::from(alone);
+        if groups.len() <= keep {
+            continue;
+        }
+        if st.copies + groups.len() - keep > o.budget {
+            break;
+        }
+        for (k, g) in groups.iter().skip(keep).enumerate() {
+            for s in g {
+                text.push_str(&format!("{driver}\t{}\t{}\n", k + 1, s.name));
+                st.sinks_moved += 1;
+            }
+            st.copies += 1;
+        }
+        st.copied += 1;
+    }
+    (text, st)
 }
 
 /// What `apply` did.
@@ -227,13 +288,33 @@ mod tests {
 
     #[test]
     fn a_plan_copies_a_spread_cell_for_its_far_sinks() {
-        let o = PlanOpts { min_fanout: 8, min_mean_ps: 1500.0, span: 24, max_groups: 8, budget: 10 };
+        let o = PlanOpts { budget: 10, ..PlanOpts::default() };
         let (text, st) = plan(&arcs(), &o).unwrap();
         assert_eq!(st, PlanStats { drivers: 2, candidates: 1, copied: 1, copies: 1, sinks_moved: 4 });
         assert_eq!(text, "drv\t1\tfar0\ndrv\t1\tfar1\ndrv\t1\tfar2\ndrv\t1\tfar3\n");
         // Same arcs, same plan; no budget, no copies.
         assert_eq!(plan(&arcs(), &o).unwrap().0, text);
         assert_eq!(plan(&arcs(), &PlanOpts { budget: 0, ..o }).unwrap().1.copies, 0);
+    }
+
+    #[test]
+    fn by_slack_a_cell_is_copied_only_for_its_failing_far_sinks() {
+        // drv: ok0 meets timing, late0 and late1 fail far away together,
+        // near fails but sits beside the driver. met: nothing fails.
+        let arcs = "drv\tok0\t2000\t9\t9\t0\tLut\tFf\t500\n\
+                    drv\tlate0\t3000\t40\t40\t0\tLut\tFf\t-900\n\
+                    drv\tlate1\t3000\t41\t41\t0\tLut\tFf\t-100\n\
+                    drv\tnear\t300\t1\t1\t0\tLut\tFf\t-50\n\
+                    met\ta\t5000\t50\t50\t0\tFf\tLut\t10\n\
+                    met\tb\t5000\t50\t-50\t0\tFf\tLut\t-\n";
+        let o = PlanOpts { slack_ps: Some(0), ..PlanOpts::default() };
+        let (text, st) = plan(arcs, &o).unwrap();
+        assert_eq!(text, "drv\t1\tlate0\ndrv\t1\tlate1\n");
+        assert_eq!(st, PlanStats { drivers: 2, candidates: 1, copied: 1, copies: 1, sinks_moved: 2 });
+        // A margin makes `met`'s sink at 10 ps count too.
+        assert_eq!(plan(arcs, &PlanOpts { slack_ps: Some(100), ..o }).unwrap().1.copied, 2);
+        // Without the slack column there is nothing to choose by.
+        assert!(plan("d\ts\t1\t1\t1\t0\tLut\tFf\n", &o).is_err());
     }
 
     #[test]

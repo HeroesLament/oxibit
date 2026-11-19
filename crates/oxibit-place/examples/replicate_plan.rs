@@ -7,6 +7,9 @@
 //! Keys, each defaulting to `PlanOpts::default`: `fanout` (fewest sinks),
 //! `mean_ps` (least mean routed delay to them), `span` (tiles a group may
 //! cover), `groups` (most groups per cell), `budget` (most copies in all).
+//! `slack_ps=N` chooses by slack instead: a copy per group of a cell's sinks
+//! whose arcs have slack under N ps and are routed `arc_ps` or longer (ARCS
+//! from `sta` run with STA_PERIODS); the original keeps the other sinks.
 //! `pack` applies the plan with OXIBIT_REPLICATE=plan.tsv.
 //!
 //! stderr: one JSON line of counts. Same arcs and keys, same plan.
@@ -27,6 +30,8 @@ fn main() -> Result<(), String> {
             "span" => o.span = n as i64,
             "groups" => o.max_groups = n as usize,
             "budget" => o.budget = n as usize,
+            "slack_ps" => o.slack_ps = Some(n as i64),
+            "arc_ps" => o.min_arc_ps = n as i64,
             other => return Err(format!("unknown key {other}")),
         }
     }
