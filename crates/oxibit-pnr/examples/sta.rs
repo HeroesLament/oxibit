@@ -25,6 +25,10 @@
 //! (`docs/sypher.md`): the worst same-clock path as routed, with arcs held
 //! to the packing's floor and to the netlist's, and Sy = floor / routed
 //! with its losses in dB. STA_W0: the minimal routed hop, ps (default 301).
+//!
+//! ROUTED.fasm given as `-`: no routing is read. Only `sypher_floor` lines
+//! are printed, the netlist's floor and the packing's from the placement
+//! alone, so two syntheses of a design can be compared unrouted.
 
 use std::path::Path;
 
@@ -34,6 +38,18 @@ use oxibit_pnr::delay::Model;
 use oxibit_pnr::placed::{self, Meta, Perm};
 use oxibit_pnr::sta::{Constraints, Design, FasmRouting, Floor, SlackTable, Timer};
 use serde_json::{Value, json};
+
+/// Per clock, the slowest same-clock path: (delay ps, logic ps, levels).
+fn worst(t: &SlackTable) -> std::collections::BTreeMap<String, (i64, i64, usize)> {
+    let mut m = std::collections::BTreeMap::new();
+    for p in t.paths.iter().filter(|p| p.from_clk == p.to_clk) {
+        let e = m.entry(p.from_clk.clone()).or_insert((p.delay_ps, p.logic_ps, p.levels));
+        if p.delay_ps > e.0 {
+            *e = (p.delay_ps, p.logic_ps, p.levels);
+        }
+    }
+    m
+}
 
 fn main() -> Result<(), String> {
     let args: Vec<String> = std::env::args().collect();
@@ -59,6 +75,32 @@ fn main() -> Result<(), String> {
     let mut timer = Timer::new(Design::build(&g, &sites, &design, &imp)?, &cons, model);
     if let Some(ps) = std::env::var("STA_SITE_PIP").ok().and_then(|s| s.parse().ok()) {
         timer.site_pip = ps;
+    }
+    if fasm_path == "-" {
+        // Unrouted: the floors alone.
+        let w0: i64 = std::env::var("STA_W0").ok().and_then(|s| s.parse().ok()).unwrap_or(301);
+        let packed_arcs = timer.floor_unrouted(Floor::Packed, w0);
+        let pack = worst(timer.analyze());
+        let floor_arcs = timer.floor_unrouted(Floor::Netlist, w0);
+        let floor = worst(timer.analyze());
+        let d = timer.design();
+        println!("{}", json!({"sta": {"unrouted": true, "cells": d.cell_counts(), "ignored": d.ignored, "unplaced": d.unplaced, "in_loops": d.in_loops, "clocks": d.clocks()}}));
+        for (clk, &(t_floor, logic, levels)) in &floor {
+            let Some(&(t_pack, ..)) = pack.get(clk) else { continue };
+            if t_floor <= 0 || t_pack <= 0 {
+                continue;
+            }
+            println!(
+                "{}",
+                json!({"sypher_floor": {"clock": clk, "w0_ps": w0, "t_floor_ns": t_floor as f64 / 1000.0, "t_pack_ns": t_pack as f64 / 1000.0,
+                                         "f_floor_mhz": (1e9 / t_floor as f64).round() / 1000.0,
+                                         "sy_pack": (1000.0 * t_floor as f64 / t_pack as f64).round() / 1000.0,
+                                         "floor_path": {"logic_ns": logic as f64 / 1000.0, "levels": levels},
+                                         "arcs": {"packed_in_slice": packed_arcs.in_slice, "could_be_in_slice": floor_arcs.in_slice,
+                                                  "dedicated": floor_arcs.dedicated, "routed": floor_arcs.routed}}})
+            );
+        }
+        return Ok(());
     }
     let routing = FasmRouting::new(&g, &read(fasm_path)?, model);
     let counts = routing.annotate(&mut timer, &imp.nets, perm == Perm::None);
@@ -98,17 +140,6 @@ fn main() -> Result<(), String> {
 
     // The Sypher number. Last: the floors overwrite the routed delays.
     let w0: i64 = std::env::var("STA_W0").ok().and_then(|s| s.parse().ok()).unwrap_or(301);
-    // Per clock, the slowest same-clock path: (delay ps, logic ps, levels).
-    let worst = |t: &SlackTable| -> std::collections::BTreeMap<String, (i64, i64, usize)> {
-        let mut m = std::collections::BTreeMap::new();
-        for p in t.paths.iter().filter(|p| p.from_clk == p.to_clk) {
-            let e = m.entry(p.from_clk.clone()).or_insert((p.delay_ps, p.logic_ps, p.levels));
-            if p.delay_ps > e.0 {
-                *e = (p.delay_ps, p.logic_ps, p.levels);
-            }
-        }
-        m
-    };
     let crit = worst(timer.table());
     let packed_arcs = timer.floor(Floor::Packed, w0);
     let pack = worst(timer.analyze());

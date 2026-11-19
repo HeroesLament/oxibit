@@ -731,28 +731,55 @@ impl Timer {
     }
 
     /// Hold every timed arc to its floor: the delay it would have were
-    /// nothing lost to placement or routing. 0 for a LUT, mux or carry
-    /// into a flop, mux or carry (at `Floor::Packed`, only where both sit
-    /// in one site); its routed delay for carry to carry, whose wires
-    /// are dedicated; `w0_ps`, one minimal routed hop, for the rest. An
+    /// nothing lost to placement or routing. 0 for what a slice wires
+    /// inside itself, a LUT into a flop, mux or carry, a mux into a flop
+    /// or mux, a carry into a flop (at `Floor::Packed`, only where both
+    /// sit in one site); its routed delay for a carry out into the next
+    /// CIN, the one dedicated wire; `w0_ps`, one minimal routed hop, for
+    /// the rest. An
     /// arc is never raised, so the path delays of routed, `Packed` and
     /// `Netlist` analyses fall in that order. `analyze` afterwards times
     /// the floor; the routed delays are gone from this timer.
     pub fn floor(&mut self, level: Floor, w0_ps: i64) -> FloorCounts {
+        self.floor_arcs(level, w0_ps, false)
+    }
+
+    /// `floor` for a design that was never routed: every arc with a
+    /// driving cell is timed at its floor, carry to carry at 0. From a
+    /// placement alone this gives `T_pack`, and `T_floor` needs only the
+    /// netlist, so two syntheses of one design can be compared before
+    /// either is routed.
+    pub fn floor_unrouted(&mut self, level: Floor, w0_ps: i64) -> FloorCounts {
+        self.floor_arcs(level, w0_ps, true)
+    }
+
+    fn floor_arcs(&mut self, level: Floor, w0_ps: i64, unrouted: bool) -> FloorCounts {
         use CellKind::{Carry, Ff, Lut, Mux};
+        // Arcs into a carry's CIN: the one dedicated wire, CO to CIN up a
+        // chain. A carry into any other carry pin is routed like the rest.
+        let mut cin = vec![false; self.d.arcs.len()];
+        for c in self.d.cells.iter().filter(|c| c.kind == Carry) {
+            for pin in c.ins.iter().filter(|p| p.arc != NONE && matches!(p.port.as_str(), "CIN" | "CI")) {
+                cin[pin.arc as usize] = true;
+            }
+        }
         let mut n = FloorCounts::default();
         for (a, arc) in self.d.arcs.iter().enumerate() {
-            if self.arc_state[a] != ArcState::Timed {
-                continue;
-            }
             let sink = &self.d.cells[arc.sink as usize];
             let drv = self.d.driver.get(arc.bit as usize).copied().filter(|&c| c != NONE).map(|c| &self.d.cells[c as usize]);
-            let dedicated = drv.is_some_and(|c| c.kind == Carry) && sink.kind == Carry;
-            let could = drv.is_some_and(|c| matches!(c.kind, Lut | Mux | Carry)) && matches!(sink.kind, Ff | Mux | Carry);
+            // Routed: only what the routing timed. Unrouted: only what a cell drives.
+            let (skip, now) = if unrouted { (drv.is_none(), i64::MAX) } else { (self.arc_state[a] != ArcState::Timed, self.arc_ps[a]) };
+            if skip {
+                continue;
+            }
+            let dedicated = cin[a] && drv.is_some_and(|c| c.kind == Carry);
+            // What a slice wires inside itself: a LUT to its flop, mux or
+            // carry; a mux to a flop or the next mux; a carry to its flop.
+            let could = drv.is_some_and(|c| matches!((c.kind, sink.kind), (Lut, Ff | Mux | Carry) | (Mux, Ff | Mux) | (Carry, Ff)));
             let together = drv.is_some_and(|c| c.site.is_some() && c.site == sink.site);
             let floor = if dedicated {
                 n.dedicated += 1;
-                self.arc_ps[a]
+                if unrouted { 0 } else { now }
             } else if could && (level == Floor::Netlist || together) {
                 n.in_slice += 1;
                 0
@@ -760,8 +787,9 @@ impl Timer {
                 n.routed += 1;
                 w0_ps
             };
-            if floor < self.arc_ps[a] {
+            if floor < now {
                 self.arc_ps[a] = floor;
+                self.arc_state[a] = ArcState::Timed;
                 n.lowered += 1;
             }
         }
@@ -1606,6 +1634,18 @@ mod tests {
         let (netlist, n) = timed(Some(Floor::Netlist));
         assert_eq!(netlist, 690 + 301 + 301);
         assert_eq!(n, Some(FloorCounts { in_slice: 1, dedicated: 0, routed: 3, lowered: 3 }));
+    }
+
+    #[test]
+    fn an_unrouted_floor_needs_no_routing() {
+        let mut t = Timer::new(chain_from_cells(), &Constraints::default(), Model::Intrinsic);
+        // Nothing annotated: every arc at a hop, but for the LUT into ff1.
+        let n = t.floor_unrouted(Floor::Netlist, 301);
+        assert_eq!(n, FloorCounts { in_slice: 1, dedicated: 0, routed: 3, lowered: 4 });
+        assert_eq!(t.analyze().paths[0].delay_ps, 690 + 301 + 301);
+        // Packed, with no sites: that arc is a hop too.
+        t.floor_unrouted(Floor::Packed, 301);
+        assert_eq!(t.analyze().paths[0].delay_ps, 690 + 301 + 301 + 301);
     }
 
     #[test]

@@ -32,10 +32,13 @@ target period leaves the physical flow; above 1, no backend can meet it.
 
 Per arc (`sta::Timer::floor`):
 
-- 0 for a LUT, F7/F8 mux or carry into a flop, mux or carry: a connection
-  that can stay inside a slice. At `Floor::Netlist`, wherever it could; at
-  `Floor::Packed`, only where driver and sink share a site.
-- its routed delay for carry to carry: dedicated wires, no router's doing.
+- 0 for what a slice wires inside itself: a LUT into a flop, F7/F8 mux or
+  carry; a mux into a flop or the next mux; a carry into a flop. At
+  `Floor::Netlist`, wherever it could; at `Floor::Packed`, only where
+  driver and sink share a site.
+- its routed delay for a carry out into the next CIN: the one dedicated
+  wire, no router's doing (0 where nothing was routed). A carry into any
+  other carry pin is routed like the rest.
 - `w0` for the rest: one minimal routed hop. 301 ps for now, the (0, 0)
   cell of the delay grid measured from picoBEAM's and mimohalow's routes;
   per pin class once the empty-fabric grid exists.
@@ -59,20 +62,26 @@ Current `main` routes (40745de placements, default options), w0 = 301 ps:
 
 | design, clock | T_floor | T_crit | F_floor | Fmax | Sy | loss | levels (floor / routed) |
 |---|---|---|---|---|---|---|---|
-| picoBEAM pb_clk | 29.804 ns | 64.146 ns | 33.55 MHz | 15.59 MHz | 0.465 | 3.33 dB | 49 / 53 |
+| picoBEAM pb_clk | 24.238 ns | 64.146 ns | 41.26 MHz | 15.59 MHz | 0.378 | 4.23 dB | 55 / 53 |
 | picoBEAM axi_clk | 3.102 ns | 9.962 ns | 322.4 MHz | 100.4 MHz | 0.311 | 5.07 dB | 4 / 4 |
-| mimohalow data_clk | 35.481 ns | 42.274 ns | 28.18 MHz | 23.66 MHz | 0.839 | 0.76 dB | 45 / 73 |
+| mimohalow data_clk | 31.039 ns | 42.274 ns | 32.22 MHz | 23.66 MHz | 0.734 | 1.34 dB | 88 / 73 |
 | mimohalow axi_clk | 4.956 ns | 13.142 ns | 201.8 MHz | 76.09 MHz | 0.377 | 4.24 dB | 11 / 1 |
 
-picoBEAM at a 50 ns target: Sy_req 0.596 (2.25 dB of budget), 1.08 dB
-short. Its worst path is 53 cells deep, so its ceiling is 33.5 MHz
-whatever the backend does, and its routed arcs average 950 ps against a
-301 ps hop: to meet 50 ns they must average 683 ps.
-
-mimohalow's data_clk is at 84% of its ceiling: the physical flow has
-0.76 dB left to give, and the rest is the RTL's depth. Its axi_clk worst
-path is one flop-to-BRAM arc of 12.1 ns.
+picoBEAM at a 50 ns target: Sy_req 0.485 (3.14 dB of budget), 1.09 dB
+short. Levels count carry cells: picoBEAM's worst routed path is a BRAM,
+31 LUTs, 22 carries and a BRAM, and the 32 routed hops carry 99% of its
+50.4 ns of wire, 12.6 ns of it on the two hops at the BRAMs.
 
 `Sy_pack` reads 1.000 on all four: no connection that could have stayed
 in a slice is split on any worst floor path. Connections inside a site
 carry no routed arc and are 0 in every analysis.
+
+The unrouted floor (`sta ... placed.json -`) agrees with the routed one:
+24.204 against 24.238 ns on pb_clk, 30.579 against 31.039 on data_clk,
+the difference being the 20 ps site pip each routed CO-to-CIN hop keeps.
+
+An earlier version of this table (commit f5c7109) read T_floor 29.804 ns
+and Sy 0.465 for pb_clk, 35.481 ns and 0.839 for data_clk. It classed
+every carry-to-carry arc as dedicated and so kept routed delays on
+carries feeding other chains through general routing. The two floor
+analyses disagreeing by 5 ns is what found it.
