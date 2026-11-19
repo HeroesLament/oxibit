@@ -528,6 +528,29 @@ impl CriticalityMap {
     }
 }
 
+/// What `Timer::floor` holds the arcs to: the two idealised ends of the
+/// Sypher number's chain (`docs/sypher.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Floor {
+    /// The netlist alone: a connection that could stay inside a slice does.
+    Netlist,
+    /// The packing as placed: only a connection inside one site does.
+    Packed,
+}
+
+/// What one `Timer::floor` did, in arcs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FloorCounts {
+    /// Held to 0: inside a slice.
+    pub in_slice: usize,
+    /// Left as routed: carry to carry, on dedicated wires.
+    pub dedicated: usize,
+    /// Held to one minimal hop.
+    pub routed: usize,
+    /// Arcs whose delay fell.
+    pub lowered: usize,
+}
+
 /// One timed arc of an analysis (`Timer::arcs`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct TimedArc {
@@ -705,6 +728,44 @@ impl Timer {
     pub fn set_arc_ps(&mut self, arc: usize, ps: i64) {
         self.arc_ps[arc] = ps;
         self.arc_state[arc] = ArcState::Timed;
+    }
+
+    /// Hold every timed arc to its floor: the delay it would have were
+    /// nothing lost to placement or routing. 0 for a LUT, mux or carry
+    /// into a flop, mux or carry (at `Floor::Packed`, only where both sit
+    /// in one site); its routed delay for carry to carry, whose wires
+    /// are dedicated; `w0_ps`, one minimal routed hop, for the rest. An
+    /// arc is never raised, so the path delays of routed, `Packed` and
+    /// `Netlist` analyses fall in that order. `analyze` afterwards times
+    /// the floor; the routed delays are gone from this timer.
+    pub fn floor(&mut self, level: Floor, w0_ps: i64) -> FloorCounts {
+        use CellKind::{Carry, Ff, Lut, Mux};
+        let mut n = FloorCounts::default();
+        for (a, arc) in self.d.arcs.iter().enumerate() {
+            if self.arc_state[a] != ArcState::Timed {
+                continue;
+            }
+            let sink = &self.d.cells[arc.sink as usize];
+            let drv = self.d.driver.get(arc.bit as usize).copied().filter(|&c| c != NONE).map(|c| &self.d.cells[c as usize]);
+            let dedicated = drv.is_some_and(|c| c.kind == Carry) && sink.kind == Carry;
+            let could = drv.is_some_and(|c| matches!(c.kind, Lut | Mux | Carry)) && matches!(sink.kind, Ff | Mux | Carry);
+            let together = drv.is_some_and(|c| c.site.is_some() && c.site == sink.site);
+            let floor = if dedicated {
+                n.dedicated += 1;
+                self.arc_ps[a]
+            } else if could && (level == Floor::Netlist || together) {
+                n.in_slice += 1;
+                0
+            } else {
+                n.routed += 1;
+                w0_ps
+            };
+            if floor < self.arc_ps[a] {
+                self.arc_ps[a] = floor;
+                n.lowered += 1;
+            }
+        }
+        n
     }
 
     /// Re-time the arcs of import net `net`: `arrival(node)` is the delay
@@ -1521,6 +1582,30 @@ mod tests {
         let table = t.analyze();
         assert_eq!(table.paths[0].delay_ps, 2490);
         assert_eq!(table.net_slack, vec![Some(7510), Some(7510), Some(7510)]);
+    }
+
+    #[test]
+    fn the_floor_keeps_logic_and_one_hop_per_routed_arc() {
+        // Routed: 690 of logic and 1000 + 500 + 300 of wire to ff1.
+        let routed = [(0, 1000), (1, 500), (2, 300), (3, 200)];
+        let timed = |level: Option<Floor>| {
+            let mut t = Timer::new(chain_from_cells(), &Constraints::default(), Model::Intrinsic);
+            for (a, ps) in routed {
+                t.set_arc_ps(a, ps);
+            }
+            let n = level.map(|l| t.floor(l, 301));
+            (t.analyze().paths[0].delay_ps, n)
+        };
+        assert_eq!(timed(None).0, 2490);
+        // No sites here, so nothing is packed together: the LUT into ff1
+        // keeps its 300 (under a hop), the two longer arcs fall to 301.
+        let (packed, n) = timed(Some(Floor::Packed));
+        assert_eq!(packed, 690 + 301 + 301 + 300);
+        assert_eq!(n, Some(FloorCounts { in_slice: 0, dedicated: 0, routed: 4, lowered: 2 }));
+        // The netlist alone: that LUT could share ff1's slice.
+        let (netlist, n) = timed(Some(Floor::Netlist));
+        assert_eq!(netlist, 690 + 301 + 301);
+        assert_eq!(n, Some(FloorCounts { in_slice: 1, dedicated: 0, routed: 3, lowered: 3 }));
     }
 
     #[test]

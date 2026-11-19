@@ -21,7 +21,10 @@
 //!
 //! stdout: one JSON line of counts, then one per clock pair, slowest first,
 //! then each clock's tightest same-clock hold check (`hold`, fast corner,
-//! no skew; `sta::Timer::hold`).
+//! no skew; `sta::Timer::hold`), then a `sypher` line per clock
+//! (`docs/sypher.md`): the worst same-clock path as routed, with arcs held
+//! to the packing's floor and to the netlist's, and Sy = floor / routed
+//! with its losses in dB. STA_W0: the minimal routed hop, ps (default 301).
 
 use std::path::Path;
 
@@ -29,7 +32,7 @@ use oxibit_fasm::db::Database;
 use oxibit_fasm::route::{Graph, GraphOpts};
 use oxibit_pnr::delay::Model;
 use oxibit_pnr::placed::{self, Meta, Perm};
-use oxibit_pnr::sta::{Constraints, Design, FasmRouting, Timer};
+use oxibit_pnr::sta::{Constraints, Design, FasmRouting, Floor, SlackTable, Timer};
 use serde_json::{Value, json};
 
 fn main() -> Result<(), String> {
@@ -91,6 +94,49 @@ fn main() -> Result<(), String> {
     }
     for h in timer.hold(oxibit_pnr::delay::HOLD_ROUTE_SCALE, 300) {
         println!("{}", json!({"hold": h.to_json(), "margin_ns": 0.3}));
+    }
+
+    // The Sypher number. Last: the floors overwrite the routed delays.
+    let w0: i64 = std::env::var("STA_W0").ok().and_then(|s| s.parse().ok()).unwrap_or(301);
+    // Per clock, the slowest same-clock path: (delay ps, logic ps, levels).
+    let worst = |t: &SlackTable| -> std::collections::BTreeMap<String, (i64, i64, usize)> {
+        let mut m = std::collections::BTreeMap::new();
+        for p in t.paths.iter().filter(|p| p.from_clk == p.to_clk) {
+            let e = m.entry(p.from_clk.clone()).or_insert((p.delay_ps, p.logic_ps, p.levels));
+            if p.delay_ps > e.0 {
+                *e = (p.delay_ps, p.logic_ps, p.levels);
+            }
+        }
+        m
+    };
+    let crit = worst(timer.table());
+    let packed_arcs = timer.floor(Floor::Packed, w0);
+    let pack = worst(timer.analyze());
+    let floor_arcs = timer.floor(Floor::Netlist, w0);
+    let floor = worst(timer.analyze());
+    // Loss in dB, two places; `+ 0.0` turns a negative zero positive.
+    let db = |ratio: f64| (-1000.0 * ratio.log10()).round() / 100.0 + 0.0;
+    let r3 = |v: f64| (v * 1000.0).round() / 1000.0;
+    for (clk, &(t_crit, crit_logic, crit_levels)) in &crit {
+        let (Some(&(t_pack, ..)), Some(&(t_floor, floor_logic, floor_levels))) = (pack.get(clk), floor.get(clk)) else { continue };
+        if t_crit <= 0 || t_pack <= 0 || t_floor <= 0 {
+            continue;
+        }
+        let (sy, sy_pack, sy_pr) = (t_floor as f64 / t_crit as f64, t_floor as f64 / t_pack as f64, t_pack as f64 / t_crit as f64);
+        let mut v = json!({"clock": clk, "w0_ps": w0,
+                           "t_floor_ns": t_floor as f64 / 1000.0, "t_pack_ns": t_pack as f64 / 1000.0, "t_crit_ns": t_crit as f64 / 1000.0,
+                           "f_floor_mhz": r3(1e6 / t_floor as f64), "fmax_mhz": r3(1e6 / t_crit as f64),
+                           "sy": r3(sy), "sy_pack": r3(sy_pack), "sy_place_route": r3(sy_pr),
+                           "loss_db": {"pack": db(sy_pack), "place_route": db(sy_pr), "total": db(sy)},
+                           "floor_path": {"logic_ns": floor_logic as f64 / 1000.0, "levels": floor_levels},
+                           "crit_path": {"logic_ns": crit_logic as f64 / 1000.0, "levels": crit_levels},
+                           "arcs": {"packed_in_slice": packed_arcs.in_slice, "could_be_in_slice": floor_arcs.in_slice,
+                                    "dedicated": floor_arcs.dedicated, "routed": floor_arcs.routed}});
+        if let Some(period) = cons.period(clk) {
+            let req = t_floor as f64 / period as f64;
+            v["target"] = json!({"period_ns": period as f64 / 1000.0, "sy_req": r3(req), "budget_db": db(req), "short_db": r3(db(sy) - db(req))});
+        }
+        println!("{}", json!({"sypher": v}));
     }
     Ok(())
 }
