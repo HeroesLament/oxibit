@@ -33,3 +33,18 @@ sinks each on average: resets and enables, not the cells on failing
 paths. Each copy of such a net is also a new net under the placer's
 200-sink fan-out limit, so it now pulls on placement where the original
 was left out. The plan should be chosen by slack, not by total delay.
+
+picoBEAM, same selection (398 copies of 76 cells), went the other way:
+
+| picoBEAM | no replication | 398 copies of 76 cells |
+|---|---|---|
+| axi_clk worst path (target 10 ns) | 9.962 ns, Sy 0.311 | 7.154 ns, Sy 0.434 |
+| pb_clk worst path (goal 50 ns) | 64.146 ns, Sy 0.378 | 61.220 ns, Sy 0.393 |
+| route | 200 passes, then the stuck rescue (27 nodes) | 85 passes, converged |
+
+Every figure better, and the first picoBEAM route to converge by
+negotiation alone. So the same rule helps one design and hurts the other.
+mimohalow is 94% full of LUTs and its copies averaged 92 sinks; picoBEAM
+has room and its copies averaged 48. Whether that is the difference is
+not shown. Choosing by slack remains the next step, and both designs are
+its test.
