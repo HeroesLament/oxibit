@@ -9,4 +9,5 @@ pub mod pack;
 pub mod par;
 pub mod place;
 pub mod placer;
+pub mod replicate;
 pub mod xdc;

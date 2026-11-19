@@ -38,6 +38,9 @@
 //! `start` (no update above this overflow). Unset: constant exponent,
 //! no momentum, from the first iteration, as before.
 //!
+//! OXIBIT_REPLICATE=PATH: copy the cells of that plan before packing
+//! (`replicate`; `replicate_plan` makes one from `sta`'s STA_ARCS).
+//!
 //! OXIBIT_PT_DELAY=PATH: wire delays from that grid (`timing::DelayGrid`,
 //! made by `delay_grid` from `sta`'s STA_ARCS) instead of the built-in
 //! table.
@@ -97,7 +100,15 @@ fn run() -> Result<bool, String> {
     let t0 = std::time::Instant::now();
     let dev = oxibit_place::device::Device::open(std::path::Path::new(db), part)?;
     let props = oxibit_place::xdc::parse(&std::fs::read_to_string(xdc).map_err(|e| format!("{xdc}: {e}"))?);
-    let nl = Netlist::from_json(&read(synth)?)?;
+    let mut nl = Netlist::from_json(&read(synth)?)?;
+    if let Ok(path) = std::env::var("OXIBIT_REPLICATE") {
+        let plan = std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
+        let st = oxibit_place::replicate::apply(&mut nl, &plan)?;
+        println!(
+            "{}",
+            json!({"replicate": {"copies": st.copies, "pins_moved": st.pins_moved, "drivers_skipped": st.drivers_skipped, "sinks_skipped": st.sinks_skipped}})
+        );
+    }
     let mut p = pack::pack(nl, &dev, &props)?;
     let mut types: std::collections::BTreeMap<String, usize> = Default::default();
     for c in p.nl.cell_ids() {
