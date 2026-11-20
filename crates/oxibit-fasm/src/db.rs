@@ -239,7 +239,7 @@ fn read_segbits(p: &Path) -> R<HashMap<String, Vec<SegBit>>> {
             continue;
         }
         let mut parts = l.split(' ');
-        let feature = parts.next().unwrap().to_string();
+        let feature = parts.next().expect("split yields at least one item").to_string();
         let mut bits = Vec::new();
         for b in parts {
             let (set, b) = match b.strip_prefix('!') {

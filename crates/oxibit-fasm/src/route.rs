@@ -241,7 +241,7 @@ pub struct Graph {
     /// Reverse adjacency over fixed edges only, built on first use.
     rev_fixed: OnceLock<HashMap<u32, Vec<u32>>>,
     /// sink node -> bitset of nodes that can reach it.
-    reach: Mutex<HashMap<u32, Arc<Vec<u64>>>>,
+    reach: Mutex<HashMap<u32, Arc<[u64]>>>,
     opts: GraphOpts,
 }
 
@@ -466,7 +466,7 @@ impl Graph {
             }
         }
         let types: HashMap<String, Arc<TypeData>> = types.into_iter().map(|(k, v)| (k, Arc::new(v))).collect();
-        let tile_td: Vec<Arc<TypeData>> = tiles.iter().map(|(_, ty, _, _)| types[ty].clone()).collect();
+        let tile_td: Vec<Arc<TypeData>> = tiles.iter().map(|(_, ty, _, _)| Arc::clone(&types[ty])).collect();
         Ok(Graph {
             coords,
             node_xy,
@@ -1192,7 +1192,7 @@ impl Graph {
     /// not expand because they are in `dead`. With `region`, a miss that was
     /// not cut short by `max_depth` leaves there every node it reached: a
     /// region with no goal node reachable from it.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "private search core; each argument is an independent per-call input")]
     fn search_counted(
         &self,
         srcs: &[u32],
@@ -1356,12 +1356,12 @@ impl Graph {
 
     /// Nodes from which `dst` can be reached (ignoring blocking), as a
     /// bitset; cached per sink.
-    fn reaches(&self, dst: u32) -> Arc<Vec<u64>> {
-        if let Some(r) = self.reach.lock().unwrap().get(&dst) {
-            return r.clone();
+    fn reaches(&self, dst: u32) -> Arc<[u64]> {
+        if let Some(r) = self.reach.lock().expect("reach cache lock poisoned").get(&dst) {
+            return Arc::clone(r);
         }
-        let r = Arc::new(self.reverse_closure(&[dst]));
-        self.reach.lock().unwrap().insert(dst, r.clone());
+        let r: Arc<[u64]> = Arc::from(self.reverse_closure(&[dst]));
+        self.reach.lock().expect("reach cache lock poisoned").insert(dst, Arc::clone(&r));
         r
     }
 
@@ -1401,7 +1401,7 @@ impl Graph {
         let (src, dst) = (self.node(from)?, self.node(to)?);
         // Backward reach from the sink through unblocked nodes only.
         self.reaches(dst); // builds the reverse adjacency
-        let rev = self.rev.get().unwrap();
+        let rev = self.rev();
         let mut back = vec![0u64; self.edges.len().div_ceil(64)];
         back[(dst / 64) as usize] |= 1 << (dst % 64);
         let mut stack = vec![dst];
@@ -1615,7 +1615,6 @@ impl Graph {
     /// `blocked` or another chain, and never letting a fixed edge from its
     /// nodes reach anything already in use. Targets used are removed from
     /// `targets`. A pair that cannot be routed at all gets an error.
-    #[allow(clippy::too_many_arguments)]
     pub fn pack(
         &self,
         ends: &[(String, String)],
@@ -1640,7 +1639,7 @@ impl Graph {
         // source"; a bit test answers almost all of them without hashing.
         let mut is_src = NodeSet::new(self.edges.len());
         for (i, t) in pool.iter().enumerate() {
-            let a = t.as_ref().unwrap().a;
+            let a = t.as_ref().expect("pool holds only resolved targets before packing").a;
             by_src.entry(a).or_default().push(i);
             is_src.insert(a);
         }
@@ -1687,7 +1686,7 @@ impl Graph {
         out
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "per-chain worker for pack; shares pack's state by reference")]
     fn pack_one(
         &self,
         from: &str,
@@ -1764,13 +1763,13 @@ impl Graph {
                     stats.target_hit_max = stats.target_hit_max.max(visited);
                 }
                 if let Some((a, mut path)) = found {
-                    let i = by_src[&a].iter().copied().find(|&i| usable(i, &local, &skip)).unwrap();
-                    let b = pool[i].as_ref().unwrap().b;
+                    let i = by_src[&a].iter().copied().find(|&i| usable(i, &local, &skip)).expect("the search stops only at the source of a usable target");
+                    let b = pool[i].as_ref().expect("a usable target is still in the pool").b;
                     if path.iter().any(|&(n, _, _)| n == b) {
                         skip.insert(i);
                         continue;
                     }
-                    let target = pool[i].take().unwrap();
+                    let target = pool[i].take().expect("a usable target is still in the pool");
                     path.push((target.b, target.tile, target.pi));
                     let added: Vec<u32> =
                         self.fixed_closure(path.iter().map(|&(n, _, _)| n)).into_iter().filter(|n| !local.contains(n)).collect();
@@ -2081,7 +2080,7 @@ fn load_type(db: &Database, ty: &str) -> R<TypeData> {
                 }
             }
             if let (Some(i), Some(o)) = (input.and_then(|w| index.get(&w).copied()), output.and_then(|w| index.get(&w).copied())) {
-                pips.push(TypePip { src: i, dst: o, feature: None, relay: Some((name.clone(), lines)), default: false, through: false, timing: PipTiming::default() });
+                pips.push(TypePip { src: i, dst: o, feature: None, relay: Some((name, lines)), default: false, through: false, timing: PipTiming::default() });
             }
         }
     }

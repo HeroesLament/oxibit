@@ -131,17 +131,16 @@ impl<'a> Assembler<'a> {
         let db_k = format!("{}.{}", info.tile_type, feature);
         let own = self.segbits(&info.tile_type)?;
 
-        let aliased = info.bits.iter().any(|(_, _, a)| a.is_some());
         if own.ppips.contains(&db_k) {
             return Ok((None, vec![]));
         }
-        if !aliased {
+        let Some(first_alias) = info.bits.iter().find_map(|(_, _, a)| a.as_ref()) else {
             let bits_map: Vec<(u32, Bits)> = info.bits.iter().map(|(b, bits, _)| (*b, bits.clone())).collect();
             return to_bits(own, &bits_map, &db_k, address).ok_or_else(|| missing(info, &db_k));
-        }
+        };
 
         // TileSegbitsAlias: rename tile type and sites, shift the offset.
-        let alias_type = info.bits.iter().find_map(|(_, _, a)| a.as_ref()).unwrap().tile_type.clone();
+        let alias_type = first_alias.tile_type.clone();
         let mut parts: Vec<String> = db_k.split('.').map(String::from).collect();
         parts[0] = alias_type.clone();
         for (_, _, alias) in &info.bits {
