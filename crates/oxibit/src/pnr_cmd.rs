@@ -82,7 +82,7 @@ pub fn route(a: RouteArgs) -> ExitCode {
     finish(r, ok, exit, res.stats.cancelled, res.stats_json(), res.check_json(), vec![a.output.display().to_string()], a.json)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "assembles one Done event from the run's parts")]
 fn finish(r: &Reporter, ok: bool, exit: u8, cancelled: bool, stats: serde_json::Value, check: serde_json::Value, outputs: Vec<String>, json: bool) -> ExitCode {
     let done = Event::Done { ok, exit: exit as i32, cancelled, phases: r.phases(), peak_rss_mb: peak_rss_mb(), stats, check, outputs };
     if json {
@@ -96,8 +96,10 @@ fn finish(r: &Reporter, ok: bool, exit: u8, cancelled: bool, stats: serde_json::
 
 /// Peak resident set of this process, in MB.
 fn peak_rss_mb() -> Option<u64> {
+    // SAFETY: rusage is a plain C type; all-zero is a valid value.
     let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
-    if unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut ru) } != 0 {
+    // SAFETY: `ru` is a valid, writable rusage for getrusage to fill.
+    if unsafe { libc::getrusage(libc::RUSAGE_SELF, &raw mut ru) } != 0 {
         return None;
     }
     // ru_maxrss: bytes on macOS, kilobytes on Linux.

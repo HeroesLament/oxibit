@@ -53,7 +53,7 @@ pub fn load(path: &Path) -> Result<(Option<BootImage>, Vec<Found>)> {
 
 
 /// Exactly one bitstream from `path`.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(not(target_os = "linux"), expect(dead_code, reason = "used only by the Zynq (Linux) subcommands"))]
 pub fn load_one(path: &Path) -> Result<Found> {
     let (_, mut found) = load(path)?;
     match found.len() {

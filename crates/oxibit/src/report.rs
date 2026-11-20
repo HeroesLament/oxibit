@@ -93,37 +93,46 @@ fn open(p: &Path) -> Result<File, String> {
 /// Call before starting any other thread, so every thread inherits the mask.
 #[cfg(unix)]
 pub fn serve_signals(r: Arc<Reporter>) {
-    unsafe {
-        let mut set: libc::sigset_t = std::mem::zeroed();
-        libc::sigemptyset(&mut set);
-        for s in signals() {
-            libc::sigaddset(&mut set, s);
-        }
-        if libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut()) != 0 {
+    // SAFETY: sigset_t is a plain C type; all-zero is a valid value to hand to sigemptyset.
+    let mut set: libc::sigset_t = unsafe { std::mem::zeroed() };
+    // SAFETY: `set` is a valid, writable sigset_t.
+    unsafe { libc::sigemptyset(&raw mut set) };
+    for s in signals() {
+        // SAFETY: `set` was initialised by sigemptyset; `s` is a valid signal number.
+        unsafe { libc::sigaddset(&raw mut set, s) };
+    }
+    // SAFETY: `set` is initialised; a null old-mask pointer is permitted.
+    if unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, &raw const set, std::ptr::null_mut()) } != 0 {
+        return;
+    }
+    // `set` is Copy: the thread waits on its own copy of the initialised mask.
+    std::thread::spawn(move || loop {
+        let mut sig: libc::c_int = 0;
+        // SAFETY: `set` is an initialised mask of signals blocked in every thread; `sig` is writable.
+        if unsafe { libc::sigwait(&raw const set, &raw mut sig) } != 0 {
             return;
         }
-        std::thread::spawn(move || loop {
-            let mut sig: libc::c_int = 0;
-            if libc::sigwait(&set, &mut sig) != 0 {
-                return;
+        if sig == libc::SIGINT || sig == libc::SIGTERM {
+            if CANCEL.swap(true, Ordering::SeqCst) {
+                eprintln!("\noxibit: interrupted again, exiting");
+                // SAFETY: _exit ends the process at once without running destructors or atexit
+                // handlers, which is the intent of a second interrupt.
+                unsafe { libc::_exit(130) };
             }
-            if sig == libc::SIGINT || sig == libc::SIGTERM {
-                if CANCEL.swap(true, Ordering::SeqCst) {
-                    eprintln!("\noxibit: interrupted again, exiting");
-                    libc::_exit(130);
-                }
-                eprintln!("\noxibit: interrupted; stopping at the next check and writing what is done (again to exit now)");
-            } else {
-                let line = r.last_status().unwrap_or_else(|| "starting".into());
-                eprintln!("\noxibit: {line}");
-            }
-        });
-    }
+            eprintln!("\noxibit: interrupted; stopping at the next check and writing what is done (again to exit now)");
+        } else {
+            let line = r.last_status().unwrap_or_else(|| "starting".into());
+            eprintln!("\noxibit: {line}");
+        }
+    });
 }
 
 #[cfg(unix)]
 fn signals() -> Vec<libc::c_int> {
-    #[allow(unused_mut)]
+    #[cfg_attr(
+        not(any(target_os = "macos", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd")),
+        expect(unused_mut, reason = "mut is needed only where SIGINFO exists")
+    )]
     let mut v = vec![libc::SIGINT, libc::SIGTERM, libc::SIGUSR1];
     #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd"))]
     v.push(libc::SIGINFO);

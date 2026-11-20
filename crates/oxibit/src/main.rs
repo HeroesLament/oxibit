@@ -341,7 +341,7 @@ enum Command {
 
 /// The PL register window.
 #[derive(clap::Args, Clone, Copy)]
-#[allow(dead_code)]
+#[cfg_attr(not(target_os = "linux"), expect(dead_code, reason = "used only by the Zynq (Linux) subcommands"))]
 struct ApertureArgs {
     /// Physical base of the PL aperture (M_AXI_GP0 is 0x40000000).
     #[arg(long, default_value = "0x40000000", value_parser = parse_u64)]
@@ -368,7 +368,7 @@ fn parse_u32(s: &str) -> std::result::Result<u32, String> {
     parse_u64(s).and_then(|v| u32::try_from(v).map_err(|e| e.to_string()))
 }
 
-#[allow(dead_code)]
+#[cfg_attr(not(target_os = "linux"), expect(dead_code, reason = "used only by the Zynq (Linux) subcommands"))]
 fn parse_expect(s: &str) -> std::result::Result<(usize, u32), String> {
     let (off, val) = s.split_once('=').ok_or_else(|| format!("{s:?}: expected OFFSET=VALUE"))?;
     Ok((parse_usize(off)?, parse_u32(val)?))

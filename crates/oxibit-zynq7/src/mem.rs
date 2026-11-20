@@ -59,7 +59,7 @@ impl PhysMap {
         // The mapping holds its own reference; the fd can go.
         drop(file);
 
-        Ok(PhysMap { base: addr as *mut u8, phys, len })
+        Ok(PhysMap { base: addr.cast::<u8>(), phys, len })
     }
 
     pub fn phys(&self) -> u64 {
@@ -74,21 +74,27 @@ impl PhysMap {
     /// crate pass constants or checked offsets, so that is a bug, not input.
     pub fn r32(&self, off: usize) -> u32 {
         assert!(off % 4 == 0 && off + 4 <= self.len, "PhysMap read 0x{off:X} out of range");
+        // SAFETY: `off + 4 <= len` per the assert, so the offset stays inside the mapping.
+        #[expect(clippy::cast_ptr_alignment, reason = "4-byte alignment of `off` is asserted; the base is page-aligned")]
+        let p = unsafe { self.base.add(off) }.cast::<u32>();
         // SAFETY: in bounds and aligned per the assert; mapping live for &self.
-        unsafe { std::ptr::read_volatile(self.base.add(off) as *const u32) }
+        unsafe { std::ptr::read_volatile(p) }
     }
 
     pub fn w32(&self, off: usize, v: u32) {
         assert!(off % 4 == 0 && off + 4 <= self.len, "PhysMap write 0x{off:X} out of range");
+        // SAFETY: `off + 4 <= len` per the assert, so the offset stays inside the mapping.
+        #[expect(clippy::cast_ptr_alignment, reason = "4-byte alignment of `off` is asserted; the base is page-aligned")]
+        let p = unsafe { self.base.add(off) }.cast::<u32>();
         // SAFETY: as r32.
-        unsafe { std::ptr::write_volatile(self.base.add(off) as *mut u32, v) }
+        unsafe { std::ptr::write_volatile(p, v) }
     }
 }
 
 impl Drop for PhysMap {
     fn drop(&mut self) {
         // SAFETY: exactly what mmap returned.
-        unsafe { libc::munmap(self.base as *mut libc::c_void, self.len) };
+        unsafe { libc::munmap(self.base.cast::<libc::c_void>(), self.len) };
     }
 }
 
@@ -106,8 +112,11 @@ impl PhysMap {
         let pairs = words.len() / 2;
         for i in 0..pairs {
             let v = (words[2 * i] as u64) | ((words[2 * i + 1] as u64) << 32);
+            // SAFETY: `i * 8 + 8 <= words.len() * 4 <= len` (asserted), inside the mapping.
+            #[expect(clippy::cast_ptr_alignment, reason = "8-byte steps from a page-aligned base")]
+            let p = unsafe { self.base.add(i * 8) }.cast::<u64>();
             // SAFETY: in bounds (asserted), 8-byte aligned (page-aligned base).
-            unsafe { std::ptr::write_volatile(self.base.add(i * 8) as *mut u64, v) }
+            unsafe { std::ptr::write_volatile(p, v) }
         }
         if words.len() % 2 == 1 {
             self.w32((words.len() - 1) * 4, words[words.len() - 1]);
@@ -119,8 +128,11 @@ impl PhysMap {
         assert!(words.len() * 4 <= self.len(), "read past the end of the mapping");
         let pairs = words.len() / 2;
         for i in 0..pairs {
+            // SAFETY: `i * 8 + 8 <= words.len() * 4 <= len` (asserted), inside the mapping.
+            #[expect(clippy::cast_ptr_alignment, reason = "8-byte steps from a page-aligned base")]
+            let p = unsafe { self.base.add(i * 8) }.cast::<u64>();
             // SAFETY: as in write_words.
-            let v = unsafe { std::ptr::read_volatile(self.base.add(i * 8) as *const u64) };
+            let v = unsafe { std::ptr::read_volatile(p) };
             if v as u32 != words[2 * i] {
                 return Some(2 * i);
             }
