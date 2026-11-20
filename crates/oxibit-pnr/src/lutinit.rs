@@ -190,6 +190,7 @@ pub type Located = (String, String, String, String);
 /// Resolves nextpnr bel names to `Located`, from the tilegrid: grid
 /// coordinates (`X14Y142/SLICE_X0Y0.A6LUT`) or the absolute site name of
 /// older builds (`SLICE_X43Y98/A6LUT`).
+#[derive(Debug)]
 pub struct Locator {
     at: HashMap<(i64, i64), (String, String)>,
     tile_type: HashMap<String, String>,

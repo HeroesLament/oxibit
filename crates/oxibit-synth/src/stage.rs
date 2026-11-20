@@ -25,15 +25,19 @@ use crate::lower::Lowered;
 use crate::policy::{PassSet, Policy, PostCheckEvidence};
 
 /// Word-level netlist before lowering.
+#[derive(Debug)]
 pub struct Rtl(pub(crate) Module);
 
 /// The netlist emit produced, before the checking view is taken.
+#[derive(Debug)]
 pub struct Mapped(pub(crate) Module);
 
 /// The netlist the equivalence check sees.
+#[derive(Debug)]
 pub struct CheckView(Module);
 
 /// The netlist after the checking view; only `PhysicalPass`es touch it.
+#[derive(Debug)]
 pub struct Physical(pub(crate) Module);
 
 impl Rtl {
@@ -96,6 +100,17 @@ pub trait PhysicalPass: Pass {
 }
 
 pub use oxibit_policy::{Outcome, PassRecord};
+
+// `rep` is a `dyn Progress` with no Debug bound.
+impl std::fmt::Debug for Flow<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Flow")
+            .field("caps", &self.caps)
+            .field("policy", &self.policy)
+            .field("records", &self.records)
+            .finish_non_exhaustive()
+    }
+}
 
 /// Runs passes under a policy and records the result of each.
 pub struct Flow<'a> {

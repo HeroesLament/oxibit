@@ -320,6 +320,21 @@ pub fn chosen_pins(net: &Net, hops: &[Hop]) -> Vec<Option<u32>> {
     net.pin_groups.iter().map(|g| g.iter().copied().find(|p| reached.contains(p))).collect()
 }
 
+// Per-node arrays run to millions of entries; show the search state.
+impl std::fmt::Debug for Router<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Router")
+            .field("opts", &self.opts)
+            .field("nodes", &self.hot.len())
+            .field("cur_net", &self.cur_net)
+            .field("pushes", &self.pushes)
+            .field("search_no", &self.search_no)
+            .field("cleanup", &self.cleanup)
+            .field("diag", &self.diag)
+            .finish_non_exhaustive()
+    }
+}
+
 pub struct Router<'g> {
     g: &'g Graph,
     opts: Opts,

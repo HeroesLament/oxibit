@@ -211,6 +211,7 @@ pub fn merge(m: &mut Module) -> usize {
 
 /// Read-data flops into memory read ports (always on: the RAM mapping
 /// needs synchronous read ports).
+#[derive(Debug)]
 pub struct MemDff;
 
 impl crate::stage::Pass for MemDff {

@@ -191,6 +191,7 @@ pub fn merge(m: &mut Module) -> FfMergeStats {
     }
 }
 
+#[derive(Debug)]
 pub struct FfMerge;
 
 impl crate::stage::Pass for FfMerge {

@@ -29,6 +29,7 @@ impl Config {
     }
 }
 
+#[derive(Debug)]
 pub struct Zynq7 {
     regs: PhysMap,
     dma: Option<PhysMap>,

@@ -43,6 +43,7 @@ use caps::{DeviceCaps, Mode};
 use policy::Policy;
 use stage::{Flow, Mapped, PassRecord, Rtl};
 
+#[derive(Debug)]
 pub struct Report {
     pub ands: usize,
     pub aig_inputs: usize,
@@ -74,6 +75,7 @@ pub struct Report {
 }
 
 /// What `synth` returns.
+#[derive(Debug)]
 pub struct Synth {
     /// The netlist for place and route.
     pub netlist: Module,

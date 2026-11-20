@@ -42,6 +42,7 @@ use crate::router::{Hop, Opts, Router, Stats};
 type R<T> = Result<T, String>;
 
 /// What `standalone` made.
+#[derive(Debug)]
 pub struct Standalone {
     pub fasm: FasmOut,
     /// Every net: the import's, then the constant and default nets.

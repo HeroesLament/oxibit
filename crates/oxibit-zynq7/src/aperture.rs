@@ -15,6 +15,7 @@ use crate::mem::PhysMap;
 const PL_START: u64 = 0x4000_0000;
 const PL_END: u64 = 0xC000_0000;
 
+#[derive(Debug)]
 pub struct ZynqAperture {
     map: PhysMap,
 }

@@ -700,6 +700,7 @@ pub struct ArcCounts {
 }
 
 /// Routing delays of a design's arcs, and the analysis over them.
+#[derive(Debug)]
 pub struct Timer {
     d: Design,
     model: Model,
@@ -1236,6 +1237,7 @@ impl TimingSource for Timer {
 
 /// A source that answers one table whatever the routes: a router under
 /// test needs no design and no clock.
+#[derive(Debug)]
 pub struct Stub(pub SlackTable);
 
 impl Stub {
@@ -1324,6 +1326,7 @@ impl std::fmt::Debug for TimingView {
 
 /// A routed design's FASM as routing delays: every pip it turns on, by
 /// source node.
+#[derive(Debug)]
 pub struct FasmRouting<'g> {
     g: &'g Graph,
     model: Model,

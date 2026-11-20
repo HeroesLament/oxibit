@@ -33,6 +33,7 @@ impl std::fmt::Display for Error {
 
 type Key = (u32, i64, u32); // frame, word (may be negative, see db::Bits), bit
 
+#[derive(Debug)]
 pub struct Assembler<'a> {
     db: &'a Database,
     bits: HashMap<Key, (bool, usize)>,

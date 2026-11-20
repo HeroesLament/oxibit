@@ -109,6 +109,7 @@ pub struct Cluster {
     pub members: Vec<(CellId, Offset)>,
 }
 
+#[derive(Debug)]
 pub struct Packer {
     pub nl: Netlist,
     pub autoidx: usize,

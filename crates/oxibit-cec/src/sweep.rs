@@ -478,6 +478,7 @@ impl<'a> Sweeper<'a> {
     }
 }
 
+#[derive(Debug)]
 pub struct Stats {
     pub sat_calls: u64,
     pub merges: u64,

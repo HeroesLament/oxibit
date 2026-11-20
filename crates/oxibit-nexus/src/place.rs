@@ -30,6 +30,7 @@ pub struct CtrlSet {
     pub async_sr: bool,
 }
 
+#[derive(Debug)]
 pub struct Placement {
     /// Graph bel index of each cell.
     pub bel: Vec<usize>,

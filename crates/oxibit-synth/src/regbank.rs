@@ -819,6 +819,7 @@ fn enable(m: &mut Module, out: &mut Vec<Cell>, nodes: &[Node], ix: usize, memo: 
 }
 
 /// Banks of per-context registers to memories.
+#[derive(Debug)]
 pub struct RegBank;
 
 impl crate::stage::Pass for RegBank {

@@ -16,6 +16,7 @@ use std::fmt::Write;
 use crate::chip::Chip;
 use crate::graph::{Arc, ArcKind, Graph, NodeId, PlacedBel};
 
+#[derive(Debug)]
 pub struct Emit<'c, 'd> {
     pub chip: &'c Chip<'d>,
     pub g: &'c Graph,

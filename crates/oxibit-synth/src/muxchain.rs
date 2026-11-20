@@ -282,6 +282,7 @@ pub fn pack(m: &mut Module) -> MuxChainStats {
     st
 }
 
+#[derive(Debug)]
 pub struct MuxPack;
 
 impl crate::stage::Pass for MuxPack {

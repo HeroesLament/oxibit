@@ -87,6 +87,17 @@ pub struct Guard {
     inner: Option<imp::Inner>,
 }
 
+// The collector guards are not Debug; say whether any are installed.
+impl std::fmt::Debug for Guard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        #[cfg(feature = "profile")]
+        let active = self.inner.is_some();
+        #[cfg(not(feature = "profile"))]
+        let active = false;
+        f.debug_struct("Guard").field("active", &active).finish_non_exhaustive()
+    }
+}
+
 impl Drop for Guard {
     fn drop(&mut self) {
         #[cfg(feature = "profile")]

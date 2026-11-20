@@ -82,6 +82,7 @@ impl Const {
     }
 }
 
+#[derive(Debug)]
 pub struct Elab {
     pub m: Module,
     params: HashMap<String, Const>,

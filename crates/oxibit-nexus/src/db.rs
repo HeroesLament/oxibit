@@ -201,6 +201,7 @@ impl IoDb {
 /// IP types prjoxide has a bit database for.
 pub const IP_TYPES: [&str; 5] = ["EBR_INIT", "LRAM_INIT", "PLL_CORE", "DPHY_CORE", "PCIE_CORE"];
 
+#[derive(Debug)]
 pub struct DeviceDb {
     pub root: PathBuf,
     pub family: String,

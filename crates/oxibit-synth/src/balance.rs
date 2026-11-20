@@ -315,6 +315,7 @@ pub fn balance(lw: &mut Lowered) -> (usize, usize) {
     (before, lw.aig.ands())
 }
 
+#[derive(Debug)]
 pub struct Balance;
 
 #[derive(Debug, Default, Clone, Copy)]

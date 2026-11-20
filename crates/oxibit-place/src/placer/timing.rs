@@ -169,6 +169,7 @@ impl Default for TimingOpts {
 }
 
 /// The timing graph of one `Problem`, ready to be weighed.
+#[derive(Debug)]
 pub struct PlaceTiming {
     timer: Timer,
     /// Per arc: driver and sink instance, and whether it stays inside one

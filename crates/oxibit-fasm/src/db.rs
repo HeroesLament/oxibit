@@ -62,6 +62,7 @@ pub struct TileSegbits {
     pub ppips_default: HashSet<String>,
 }
 
+#[derive(Debug)]
 pub struct Database {
     pub root: PathBuf,
     pub part: String,

@@ -72,6 +72,7 @@ pub struct Settings {
     pub compress: bool,
 }
 
+#[derive(Debug)]
 pub struct Chip<'d> {
     pub db: &'d DeviceDb,
     pub variant: String,

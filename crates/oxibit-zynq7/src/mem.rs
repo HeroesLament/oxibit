@@ -7,6 +7,7 @@ use std::os::unix::io::AsRawFd;
 
 /// A mapped physical window. Access is volatile, 32-bit, and the caller
 /// checks bounds; this type only guarantees the mapping outlives it.
+#[derive(Debug)]
 pub struct PhysMap {
     base: *mut u8,
     phys: u64,

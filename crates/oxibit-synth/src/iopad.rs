@@ -169,6 +169,7 @@ pub fn insert(m: &mut Module) -> IoPadStats {
     st
 }
 
+#[derive(Debug)]
 pub struct IoPad;
 
 impl crate::stage::Pass for IoPad {

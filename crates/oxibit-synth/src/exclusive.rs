@@ -46,6 +46,19 @@ pub struct ExclusiveStats {
     pub cone_bits: usize,
 }
 
+// The SAT solver and canonical-bit map are not Debug; show the search state.
+impl std::fmt::Debug for Exclusive<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Exclusive")
+            .field("nodes", &self.nodes)
+            .field("depth", &self.depth)
+            .field("node_limit", &self.node_limit)
+            .field("conflict_limit", &self.conflict_limit)
+            .field("stats", &self.stats)
+            .finish_non_exhaustive()
+    }
+}
+
 pub struct Exclusive<'m> {
     m: &'m Module,
     cn: Canon,

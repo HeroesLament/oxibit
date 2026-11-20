@@ -21,6 +21,7 @@ use crate::netlist::{CellId, CellKind, NetId, Netlist};
 use crate::place::Placement;
 use crate::{Result, err};
 
+#[derive(Debug)]
 pub struct Routes {
     /// Arcs of each net's tree, source to sinks.
     pub arcs: Vec<Vec<Arc>>,

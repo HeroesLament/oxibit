@@ -17,6 +17,7 @@ use crate::nets::{self, Net, NetClass};
 use crate::router::{Opts, Router, Stats};
 
 /// Outcome of `run`.
+#[derive(Debug)]
 pub struct Reroute {
     pub fasm: String,
     pub stats: Stats,

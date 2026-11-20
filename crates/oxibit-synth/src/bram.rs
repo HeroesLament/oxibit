@@ -646,6 +646,7 @@ fn tile(m: &mut Module, mem: &Memory, s: Shape, t: usize, mi: usize) -> Cell {
     }
 }
 
+#[derive(Debug)]
 pub struct Bram;
 
 impl crate::stage::Pass for Bram {

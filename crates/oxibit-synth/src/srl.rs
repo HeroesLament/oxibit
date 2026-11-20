@@ -263,6 +263,7 @@ pub fn map(m: &mut Module) -> SrlStats {
     st
 }
 
+#[derive(Debug)]
 pub struct Srl;
 
 impl crate::stage::Pass for Srl {

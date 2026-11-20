@@ -279,6 +279,7 @@ impl RunDir {
 }
 
 /// Exclusive owner of a PL region.
+#[derive(Debug)]
 pub struct Guard<B: Backend> {
     backend: B,
     run: RunDir,

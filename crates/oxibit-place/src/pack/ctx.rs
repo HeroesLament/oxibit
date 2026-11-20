@@ -106,6 +106,7 @@ pub struct ScoredNet {
     pub open: bool,
 }
 
+#[derive(Debug)]
 pub struct PackCtx<'a> {
     pub nl: &'a Netlist,
     pub atoms: Vec<Atom>,

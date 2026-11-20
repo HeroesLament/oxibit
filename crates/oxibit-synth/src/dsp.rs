@@ -545,6 +545,7 @@ pub fn infer_with(m: &mut Module, opt_max: usize, cascade: bool) -> DspStats {
     st
 }
 
+#[derive(Debug)]
 pub struct Dsp {
     pub max_per_mul: usize,
     pub cascade: bool,

@@ -287,6 +287,7 @@ fn binary_prec(op: &str) -> Option<u8> {
     })
 }
 
+#[derive(Debug)]
 pub struct Parser {
     pub toks: Vec<Tok>,
     pub pos: usize,

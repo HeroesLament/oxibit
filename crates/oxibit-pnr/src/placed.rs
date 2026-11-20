@@ -80,6 +80,7 @@ struct Variant {
 }
 
 /// The site types of nextpnr-xilinx-meta for one family directory.
+#[derive(Debug)]
 pub struct Meta {
     dir: PathBuf,
     /// Primary site type -> variant name -> variant.

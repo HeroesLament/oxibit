@@ -44,6 +44,7 @@ type Potential = HashMap<(String, String), Vec<(i32, i32, String, String)>>;
 /// Forward adjacency in compressed rows: node `n`'s out-edges
 /// `(dst, tile, pip)` are `e[off[n]..off[n + 1]]`. Indexes like the
 /// `Vec<Vec<_>>` it replaced.
+#[derive(Debug)]
 pub struct Adj {
     off: Vec<u32>,
     e: Vec<(u32, u32, u32)>,
@@ -67,6 +68,7 @@ impl std::ops::Index<usize> for Adj {
 
 /// Reverse adjacency in compressed rows: the sources of edges into node
 /// `n` are `src[off[n]..off[n + 1]]`.
+#[derive(Debug)]
 pub struct Rev {
     off: Vec<u32>,
     src: Vec<u32>,
@@ -216,6 +218,17 @@ impl Pip {
     }
 }
 
+// The tables run to millions of entries; show their sizes.
+impl std::fmt::Debug for Graph {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Graph")
+            .field("tiles", &self.tiles.len())
+            .field("nodes", &self.node_xy.len())
+            .field("tile_types", &self.types.len())
+            .finish_non_exhaustive()
+    }
+}
+
 pub struct Graph {
     tiles: Vec<(String, String)>, // (instance, type)
     tile_index: HashMap<String, u32>,
@@ -247,7 +260,7 @@ pub struct Graph {
 
 /// A dense node set (one bit per node): what the packer tests on every
 /// edge it looks at.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct NodeSet {
     bits: Vec<u64>,
 }

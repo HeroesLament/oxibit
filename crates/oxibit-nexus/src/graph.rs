@@ -74,6 +74,7 @@ impl PlacedBel {
     }
 }
 
+#[derive(Debug)]
 pub struct Graph {
     pub width: i32,
     pub height: i32,

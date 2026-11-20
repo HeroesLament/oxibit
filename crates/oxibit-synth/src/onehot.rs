@@ -572,6 +572,7 @@ pub fn rewrite(m: &mut Module) -> OneHotStats {
 }
 
 /// One-hot selection sums (`(s == k) * v + ...`) to ORs.
+#[derive(Debug)]
 pub struct OneHotSums;
 
 impl crate::stage::Pass for OneHotSums {

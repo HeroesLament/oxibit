@@ -373,6 +373,7 @@ pub fn reshape(m: &mut Module) -> MemPortsStats {
 
 /// Multi-port memories into shapes `bram` maps (copies per read port) or
 /// into flops (several write ports).
+#[derive(Debug)]
 pub struct MemPorts;
 
 impl crate::stage::Pass for MemPorts {
