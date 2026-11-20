@@ -80,7 +80,7 @@ impl Event {
 
 /// An event as it goes on the wire: version and time since start, then the
 /// event's own fields.
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct Envelope<'a> {
     pub v: u32,
     pub t_ms: u64,
@@ -99,6 +99,7 @@ pub trait Progress: Sync {
 }
 
 /// Reports nothing; never cancelled.
+#[derive(Debug, Clone, Copy, Default)]
 pub struct Silent;
 impl Progress for Silent {
     fn emit(&self, _: Event) {}
@@ -119,6 +120,17 @@ pub struct Reporter {
     phase_ms: Mutex<BTreeMap<String, u64>>,
     cancel: &'static AtomicBool,
     status: Mutex<Option<String>>,
+}
+
+// Sinks are `dyn Sink` with no Debug bound; show the timing state only.
+impl std::fmt::Debug for Reporter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Reporter")
+            .field("start", &self.start)
+            .field("phase_ms", &self.phase_ms)
+            .field("cancel", &self.cancel)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Reporter {
@@ -148,17 +160,17 @@ impl Reporter {
 
     /// Phase durations so far (for `Done`).
     pub fn phases(&self) -> BTreeMap<String, u64> {
-        self.phase_ms.lock().unwrap().clone()
+        self.phase_ms.lock().expect("reporter lock poisoned").clone()
     }
 
     /// The latest one-line status (`status_line` of the last event that has
     /// one), for SIGINFO/SIGUSR1.
     pub fn last_status(&self) -> Option<String> {
-        self.status.lock().unwrap().clone()
+        self.status.lock().expect("reporter lock poisoned").clone()
     }
 
     pub fn finish(&self) {
-        for s in self.sinks.lock().unwrap().iter_mut() {
+        for s in self.sinks.lock().expect("reporter lock poisoned").iter_mut() {
             s.finish();
         }
     }
@@ -170,19 +182,19 @@ impl Progress for Reporter {
         if let Event::Phase { phase, state, ms } = &mut event {
             match state {
                 PhaseState::Begin => {
-                    self.phase_start.lock().unwrap().insert(phase.clone(), t);
+                    self.phase_start.lock().expect("reporter lock poisoned").insert(phase.clone(), t);
                 }
                 PhaseState::End => {
-                    let began = self.phase_start.lock().unwrap().remove(phase).unwrap_or(t);
+                    let began = self.phase_start.lock().expect("reporter lock poisoned").remove(phase).unwrap_or(t);
                     *ms = Some(t - began);
-                    *self.phase_ms.lock().unwrap().entry(phase.clone()).or_default() += t - began;
+                    *self.phase_ms.lock().expect("reporter lock poisoned").entry(phase.clone()).or_default() += t - began;
                 }
             }
         }
         if let Some(line) = status_line(&event) {
-            *self.status.lock().unwrap() = Some(format!("{line} [{:.1} s]", t as f64 / 1000.0));
+            *self.status.lock().expect("reporter lock poisoned") = Some(format!("{line} [{:.1} s]", t as f64 / 1000.0));
         }
-        for s in self.sinks.lock().unwrap().iter_mut() {
+        for s in self.sinks.lock().expect("reporter lock poisoned").iter_mut() {
             s.write(t, &event);
         }
     }
@@ -193,6 +205,7 @@ impl Progress for Reporter {
 }
 
 /// JSON Lines, flushed per event.
+#[derive(Debug)]
 pub struct JsonLines<W: Write + Send>(pub W);
 
 impl<W: Write + Send> Sink for JsonLines<W> {
@@ -215,6 +228,7 @@ pub enum HumanStyle {
 }
 
 /// Human-readable output on stderr (or any writer).
+#[derive(Debug)]
 pub struct Human<W: Write + Send> {
     out: W,
     style: HumanStyle,
@@ -306,6 +320,7 @@ impl<W: Write + Send> Sink for Human<W> {
 /// progress (at most once a second), and the outcome at the end, so
 /// `systemctl status UNIT` shows where a run is.
 #[cfg(target_os = "linux")]
+#[derive(Debug)]
 pub struct SdNotify {
     sock: std::os::unix::net::UnixDatagram,
     addr: std::os::unix::net::SocketAddr,
