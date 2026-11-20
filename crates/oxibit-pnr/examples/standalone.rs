@@ -178,6 +178,7 @@ fn run() -> Result<Outcome, String> {
         opts.delay_norm = v;
     }
     opts.overuse_dump = std::env::var("OXIBIT_OVERUSE_DUMP").ok();
+    opts.hist_dump = std::env::var("OXIBIT_HIST_DUMP").ok();
     if let Ok(v) = std::env::var("OXIBIT_ENTRY_BOUND") {
         opts.estimate.entry = v != "0";
     }

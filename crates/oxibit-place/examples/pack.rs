@@ -41,6 +41,9 @@
 //! OXIBIT_REPLICATE=PATH: copy the cells of that plan before packing
 //! (`replicate`; `replicate_plan` makes one from `sta`'s STA_ARCS).
 //!
+//! OXIBIT_CONGEST=PATH[:STRENGTH]: keep that share (0.3) of the sites empty
+//! where an earlier route was congested (`standalone`'s OXIBIT_HIST_DUMP).
+//!
 //! OXIBIT_PT_DELAY=PATH: wire delays from that grid (`timing::DelayGrid`,
 //! made by `delay_grid` from `sta`'s STA_ARCS) instead of the built-in
 //! table.
@@ -194,6 +197,25 @@ fn run() -> Result<bool, String> {
             let text = std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
             let grid = placer::timing::DelayGrid::parse(&text).map_err(|e| format!("{path}: {e}"))?;
             opts.delay_grid = Some(std::sync::Arc::new(grid));
+        }
+        if let Ok(spec) = std::env::var("OXIBIT_CONGEST") {
+            // PATH or PATH:STRENGTH; lines of tile<TAB>history from the router.
+            let (path, strength) = match spec.rsplit_once(':') {
+                Some((p, s)) if s.parse::<f64>().is_ok() => (p.to_string(), s.parse::<f64>().unwrap_or(0.3)),
+                _ => (spec.clone(), 0.3),
+            };
+            let text = std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
+            let mut points = Vec::new();
+            let mut lines = 0usize;
+            for line in text.lines() {
+                let Some((tile, v)) = line.split_once('\t') else { continue };
+                lines += 1;
+                if let (Some(t), Ok(v)) = (dev.tiles.get(tile), v.trim().parse::<f64>()) {
+                    points.push((t.grid_x as f64, t.grid_y as f64, v));
+                }
+            }
+            println!("{}", json!({"congest": {"tiles": lines, "matched": points.len(), "strength": strength}}));
+            opts.congest = Some(std::sync::Arc::new(placer::density::Congest { points, strength }));
         }
         let rep = placer::place_design(&mut p, &dev, &opts, 200, &pins)?;
         let lg = place::legalise(&mut p, &place::ps7_inputs(std::path::Path::new(meta))?);

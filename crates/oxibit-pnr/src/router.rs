@@ -157,6 +157,9 @@ pub struct Opts {
     /// After routing, write the nodes still used by two or more nets
     /// (name, occupancy, history) to this file.
     pub overuse_dump: Option<String>,
+    /// Write each tile's summed congestion history here after the run
+    /// (`tile<TAB>history`): where the passes fought, for the placer.
+    pub hist_dump: Option<String>,
     /// Route for timing: where criticalities come from and how they weigh.
     pub timing: Option<TimingView>,
     /// Measure the A* distance from the nearest tile of a node, not from
@@ -227,6 +230,7 @@ impl Default for Opts {
             bbox_margin: -1,
             entry_aim: false,
             overuse_dump: None,
+            hist_dump: None,
             timing: None,
             span_aware: true,
             skip_stale: false,
@@ -1975,6 +1979,18 @@ impl<'g> Router<'g> {
                     text.push_str(&format!("{}\t{o}\t{}\t{}\n", self.g.node_name(n as u32), self.hot[n].hist, on.join(" | ")));
                 }
             }
+            let _ = std::fs::write(path, text);
+        }
+        if let Some(path) = &self.opts.hist_dump {
+            let mut by_tile: std::collections::BTreeMap<String, f64> = std::collections::BTreeMap::new();
+            for (n, h) in self.hot.iter().enumerate() {
+                if h.hist > 0.0 {
+                    let name = self.g.node_name(n as u32).to_string();
+                    let tile = name.split('/').next().unwrap_or("").to_string();
+                    *by_tile.entry(tile).or_default() += h.hist as f64;
+                }
+            }
+            let text: String = by_tile.iter().map(|(t, v)| format!("{t}\t{v}\n")).collect();
             let _ = std::fs::write(path, text);
         }
         (routes, stats)

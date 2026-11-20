@@ -298,11 +298,24 @@ fn axpy(a: &[f64], k: f64, b: &[f64]) -> Vec<f64> {
 /// refreshed from the current iterate every `TimingOpts::every`
 /// iterations from the first (`PlaceTiming::weights`). The wirelength
 /// the schedule and the stops read stays unweighted.
-pub fn run(prob: &Problem, grid: &BinGrid, start: PlacementState, opts: &Opts, mut timing: Option<&mut PlaceTiming>) -> (PlacementState, Report) {
+pub fn run(prob: &Problem, grid: &BinGrid, start: PlacementState, opts: &Opts, timing: Option<&mut PlaceTiming>) -> (PlacementState, Report) {
+    run_withheld(prob, grid, start, opts, timing, None)
+}
+
+/// `run`, with `withheld[b]` of bin `b`'s sites kept empty (`BinGrid::withheld`).
+pub fn run_withheld(
+    prob: &Problem,
+    grid: &BinGrid,
+    start: PlacementState,
+    opts: &Opts,
+    mut timing: Option<&mut PlaceTiming>,
+    withheld: Option<&[f64]>,
+) -> (PlacementState, Report) {
     let n = prob.insts.len();
     let slices = (0..n).map(|i| prob.site_area(i)).sum::<f64>().round() as usize;
     let cap: f64 = (0..grid.len()).map(|b| grid.cap(b)).sum();
-    let fillers = ((cap * opts.target_density).round() as usize).saturating_sub(slices);
+    let held: f64 = withheld.map_or(0.0, |w| w.iter().sum());
+    let fillers = (((cap - held) * opts.target_density).round() as usize).saturating_sub(slices);
     let total = n + fillers;
 
     let mut q: Vec<f64> = (0..n).map(|i| prob.site_area(i)).collect();
@@ -316,7 +329,7 @@ pub fn run(prob: &Problem, grid: &BinGrid, start: PlacementState, opts: &Opts, m
         n,
         q,
         deg,
-        fixed: (0..grid.len()).map(|b| grid.cap_max - grid.cap(b)).collect(),
+        fixed: (0..grid.len()).map(|b| grid.cap_max - grid.cap(b) + withheld.map_or(0.0, |w| w[b])).collect(),
         tw: vec![1.0; prob.nets.len()],
     };
     let mut tstats = timing::Stats::default();

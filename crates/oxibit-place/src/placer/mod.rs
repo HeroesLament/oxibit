@@ -443,6 +443,8 @@ pub struct GpOpts {
     /// `place_design`: the timing weights' wire delays from this measured
     /// grid rather than `timing::wire_ps`; `None` for the built-in table.
     pub delay_grid: Option<std::sync::Arc<timing::DelayGrid>>,
+    /// Sites withheld where an earlier route was congested; `None` for none.
+    pub congest: Option<std::sync::Arc<density::Congest>>,
 }
 
 /// The run, stage by stage.
@@ -490,7 +492,8 @@ pub fn place_timed(prob: &Problem, opts: &GpOpts, timing: Option<&mut timing::Pl
     let start = b2b::initial_place(prob, &opts.qp, &qp::Cg::default());
     let hpwl_quadratic = prob.hpwl(&start);
     let grid = density::BinGrid::new(prob, opts.nesterov.bins);
-    let (global, nesterov) = nesterov::run(prob, &grid, start, &opts.nesterov, timing);
+    let withheld = opts.congest.as_ref().map(|c| grid.withheld(c));
+    let (global, nesterov) = nesterov::run_withheld(prob, &grid, start, &opts.nesterov, timing, withheld.as_deref());
     let hpwl_global = prob.hpwl(&global);
     let legal = legalise_spread::legalise_spread(prob, &grid, &global)?;
     let slice_insts = prob.insts.iter().filter(|i| i.kind == InstKind::Slice).count();

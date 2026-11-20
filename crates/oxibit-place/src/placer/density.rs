@@ -34,7 +34,35 @@ pub struct BinGrid {
     pub cap_max: f64,
 }
 
+/// Router congestion fed back to the placer: history weight at grid
+/// points, and the share of its sites the most congested bins give up.
+#[derive(Debug, Clone, Default)]
+pub struct Congest {
+    pub points: Vec<(f64, f64, f64)>,
+    pub strength: f64,
+}
+
 impl BinGrid {
+    /// Per bin, the capacity withheld for `c`: `strength` of the bin's sites
+    /// at or above the 90th percentile of weight among bins that have any,
+    /// in proportion below it. Points outside the region count for nothing.
+    pub fn withheld(&self, c: &Congest) -> Vec<f64> {
+        let mut w = vec![0.0f64; self.len()];
+        let r = &self.region;
+        for &(x, y, v) in &c.points {
+            if x >= r.x0 && x <= r.x1 && y >= r.y0 && y <= r.y1 {
+                w[self.bin_at(x, y)] += v;
+            }
+        }
+        let mut some: Vec<f64> = w.iter().copied().filter(|&v| v > 0.0).collect();
+        if some.is_empty() {
+            return w;
+        }
+        some.sort_by(|a, b| a.total_cmp(b));
+        let top = some[(some.len() * 9 / 10).min(some.len() - 1)];
+        (0..self.len()).map(|b| c.strength * self.cap(b) * (w[b] / top).min(1.0)).collect()
+    }
+
     /// `n` bins a side over the problem's region.
     pub fn new(prob: &Problem, n: usize) -> BinGrid {
         let n = n.max(1);
