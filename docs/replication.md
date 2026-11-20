@@ -127,3 +127,40 @@ A single run cannot rank two placer or replication settings on these
 designs. Either compare over several perturbed runs, or take the best
 of several as the result: run 3 on mimohalow gave axi_clk 11.237 ns,
 better than any method tried here.
+
+## Giant nets only, over five perturbed runs
+
+`replicate_plan arcs.tsv fanout=200 mean_ps=0 budget=400`: only cells
+driving 200 sinks or more (picoBEAM 81 cells, 373 copies; mimohalow 73,
+398). This is nearly the plan of the first run, which was giant nets in
+all but name. Each run adds the same 5-LUT perturbation as the noise runs.
+
+| picoBEAM | route | axi_clk | pb_clk |
+|---|---|---|---|
+| run 1 | 120 passes + stuck rescue | 7.942 ns | 62.859 ns |
+| run 2 | 200 passes + stuck rescue | 7.819 ns | 61.060 ns |
+| run 3 | failed, 56 nodes overused | | |
+| run 4 | 136 passes + stuck rescue | 8.833 ns | 61.666 ns |
+| run 5 | 135 passes, converged | 8.749 ns | 61.371 ns |
+| without (noise runs) | 1 of 5 routed | 9.686 ns | 62.456 ns |
+
+| mimohalow | five runs | without (noise runs) |
+|---|---|---|
+| route passes | 102 33 45 71 70 | 13 to 25 |
+| axi_clk | 13.607 14.227 11.855 11.041 11.845 | 11.237 to 14.383 ns |
+| data_clk | 45.031 43.500 44.590 47.660 49.401 | 42.230 to 45.183 ns |
+
+picoBEAM: 4 of 5 route against 1 of 5, axi_clk about 1.5 ns better in
+every routed run, pb_clk unchanged. Three of the four still need the
+stuck rescue, so the first run's 85-pass convergence was the lucky end of
+this. mimohalow: two to five times the route passes and data_clk slower
+in most runs. A picoBEAM setting, not a default.
+
+Of the planned sinks, 2,711 of 21,376 (picoBEAM) and 2,259 of 37,019
+(mimohalow) stayed on the original. `resolve` now also takes packed carry
+and suffixed names, and `pack` prints the first skipped sinks with the
+reason; how many that recovers is not yet measured.
+
+The "LUT pin taken twice or out of range" exit is lutinit::permute being
+handed two routes that end on one LUT input, which only an unresolved
+route produces. Every run that hit it had nodes overused at the cap.

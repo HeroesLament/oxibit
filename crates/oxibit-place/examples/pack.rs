@@ -106,7 +106,7 @@ fn run() -> Result<bool, String> {
         let st = oxibit_place::replicate::apply(&mut nl, &plan)?;
         println!(
             "{}",
-            json!({"replicate": {"copies": st.copies, "pins_moved": st.pins_moved, "drivers_skipped": st.drivers_skipped, "sinks_skipped": st.sinks_skipped}})
+            json!({"replicate": {"copies": st.copies, "pins_moved": st.pins_moved, "drivers_skipped": st.drivers_skipped, "sinks_skipped": st.sinks_skipped, "skipped": st.skipped}})
         );
     }
     let mut p = pack::pack(nl, &dev, &props)?;

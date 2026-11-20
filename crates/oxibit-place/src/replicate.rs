@@ -196,7 +196,7 @@ fn plan_by_slack(by: BTreeMap<&str, (Vec<Sink>, i64)>, limit: i64, o: &PlanOpts)
 }
 
 /// What `apply` did.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ApplyStats {
     pub copies: usize,
     /// Sink pins moved to a copy.
@@ -205,15 +205,24 @@ pub struct ApplyStats {
     pub drivers_skipped: usize,
     /// Plan sinks not in the netlist or not on the driver's net.
     pub sinks_skipped: usize,
+    /// The first few sinks left where they were, and why.
+    pub skipped: Vec<String>,
 }
 
 /// The cell `name`, or the cell a packed name came from: `x/DPR0` and
 /// `x_0` are parts of `x`.
 fn resolve(nl: &Netlist, name: &str) -> Option<CellId> {
-    nl.cell_id(name).or_else(|| name.rsplit_once('/').and_then(|(base, _)| nl.cell_id(base))).or_else(|| {
-        let (base, tail) = name.rsplit_once('_')?;
+    // STA names placed cells: a packed carry is `<cell>$split$...`, a LUT RAM
+    // port `<cell>/DPR0`, a split BRAM `<cell>_0`, and a few carry a `$suffix`.
+    let digits = |n: &str| -> Option<CellId> {
+        let (base, tail) = n.rsplit_once('_')?;
         (!tail.is_empty() && tail.bytes().all(|b| b.is_ascii_digit())).then(|| nl.cell_id(base)).flatten()
-    })
+    };
+    nl.cell_id(name)
+        .or_else(|| name.rsplit_once('/').and_then(|(base, _)| nl.cell_id(base).or_else(|| digits(base))))
+        .or_else(|| digits(name))
+        .or_else(|| name.split_once("$split$").and_then(|(base, _)| nl.cell_id(base)))
+        .or_else(|| name.split_once('$').and_then(|(base, _)| nl.cell_id(base)))
 }
 
 /// Make the copies of `plan` in `nl`: each a cell `<driver>$rep<k>` with
@@ -258,6 +267,10 @@ pub fn apply(nl: &mut Netlist, plan: &str) -> Result<ApplyStats, String> {
                 .unwrap_or_default();
             if pins.is_empty() {
                 st.sinks_skipped += 1;
+                if st.skipped.len() < 12 {
+                    let why = if resolve(nl, sink).is_some() { "no pin on the driver's net" } else { "no such cell" };
+                    st.skipped.push(format!("{sink}: {why}"));
+                }
                 continue;
             }
             let s = resolve(nl, sink).expect("resolved above");
@@ -331,7 +344,8 @@ mod tests {
             nl.connect(c, "D", y);
         }
         let st = apply(&mut nl, "# plan\ndrv\t1\ts1\ndrv\t1\ts2_0\ndrv\t1\tgone\nnone\t1\ts0\n").unwrap();
-        assert_eq!(st, ApplyStats { copies: 1, pins_moved: 2, drivers_skipped: 1, sinks_skipped: 1 });
+        assert_eq!((st.copies, st.pins_moved, st.drivers_skipped, st.sinks_skipped), (1, 2, 1, 1));
+        assert_eq!(st.skipped.len(), 1, "{:?}", st.skipped);
         let c = nl.cell_id("drv$rep1").unwrap();
         assert_eq!(nl.cell(c).ty, "LUT1");
         assert_eq!(nl.cell(c).params, nl.cell(d).params);
