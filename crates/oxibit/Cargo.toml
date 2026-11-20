@@ -21,3 +21,6 @@ oxibit-guard.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 oxibit-zynq7.workspace = true
+
+[lints]
+workspace = true

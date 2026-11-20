@@ -14,3 +14,6 @@ tracing = { workspace = true, optional = true }
 
 [features]
 profile = ["dep:tracing", "oxibit-prof/profile"]
+
+[lints]
+workspace = true

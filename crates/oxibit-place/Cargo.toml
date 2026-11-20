@@ -9,3 +9,6 @@ publish.workspace = true
 [dependencies]
 oxibit-pnr.workspace = true
 serde_json.workspace = true
+
+[lints]
+workspace = true

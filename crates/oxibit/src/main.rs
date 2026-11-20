@@ -1,6 +1,13 @@
 //! `oxibit`: Xilinx bitstream inspection, conversion and verification, and on
 //! a Zynq-7000 target, loading and guarded PL access.
 
+#![expect(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    unreachable_pub,
+    reason = "CLI binary: stdout/stderr are its interface, and module pub items are bin-internal"
+)]
+
 mod build;
 mod pnr_cmd;
 mod report;
