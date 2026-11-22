@@ -1,0 +1,17 @@
+[package]
+name = "oxibit-ecp5"
+description = "Lattice ECP5: Trellis configurations to bitstream, against a Project Trellis database"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde_json.workspace = true
+oxibit-hdl = { path = "../oxibit-hdl" }
+oxibit-synth = { path = "../oxibit-synth" }
+oxibit-report.workspace = true
+oxibit-place.workspace = true
+
+[lints]
+workspace = true

@@ -382,6 +382,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxibit-ecp5"
+version = "0.1.0"
+dependencies = [
+ "oxibit-hdl",
+ "oxibit-place",
+ "oxibit-report",
+ "oxibit-synth",
+ "serde_json",
+]
+
+[[package]]
 name = "oxibit-fasm"
 version = "0.1.0"
 dependencies = [
