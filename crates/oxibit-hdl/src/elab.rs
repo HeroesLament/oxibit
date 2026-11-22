@@ -190,7 +190,7 @@ impl Elab {
                 Item::Assign { lhs, rhs } => e.assign(lhs, rhs)?,
                 Item::Always { sens, body } => e.process(sens, body)?,
                 Item::Initial(body) => e.initial(body)?,
-                Item::Instance { ty, name, params, conns } => e.instance(ty, name, params, conns)?,
+                Item::Instance { ty, name, params, conns, attrs } => e.instance(ty, name, params, conns, attrs)?,
                 _ => {}
             }
         }
@@ -1059,7 +1059,14 @@ impl Elab {
     // ---- instances -------------------------------------------------------------------
 
     #[oxibit_prof::hot(name = "Elab::instance")]
-    fn instance(&mut self, ty: &str, name: &str, params: &[(String, Expr)], conns: &[(String, Option<Expr>)]) -> R<()> {
+    fn instance(
+        &mut self,
+        ty: &str,
+        name: &str,
+        params: &[(String, Expr)],
+        conns: &[(String, Option<Expr>)],
+        attrs: &[(String, String)],
+    ) -> R<()> {
         let mut p = BTreeMap::new();
         for (k, v) in params {
             let val = match v {
@@ -1090,7 +1097,13 @@ impl Elab {
             };
             c.insert(port.clone(), v);
         }
-        self.m.cells.push(Cell::Instance { ty: ty.to_string(), name: name.to_string(), params: p, conns: c });
+        self.m.cells.push(Cell::Instance {
+            ty: ty.to_string(),
+            name: name.to_string(),
+            params: p,
+            conns: c,
+            attrs: attrs.iter().cloned().collect(),
+        });
         Ok(())
     }
 }

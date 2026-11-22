@@ -217,13 +217,14 @@ pub fn write(m: &Module) -> Value {
                 vec![("CLK", "input"), ("ARST", "input"), ("D", "input"), ("Q", "output")],
                 vec![("CLK", clk), ("ARST", arst), ("D", d), ("Q", q)],
             ),
-            Cell::Instance { ty, name, params, conns } => {
+            Cell::Instance { ty, name, params, conns, attrs } => {
                 let p = params.iter().map(|(k, v)| (k.clone(), param(v))).collect();
+                let a: Map<String, Value> = attrs.iter().map(|(k, v)| (k.clone(), json!(v))).collect();
                 let mut cell = Map::new();
                 cell.insert("hide_name".into(), json!(0));
                 cell.insert("type".into(), json!(ty));
                 cell.insert("parameters".into(), Value::Object(p));
-                cell.insert("attributes".into(), json!({}));
+                cell.insert("attributes".into(), Value::Object(a));
                 cell.insert("connections".into(), Value::Object(conns.iter().map(|(k, v)| (k.clone(), spec(v))).collect()));
                 let _ = ci;
                 cells.insert(name.clone(), Value::Object(cell));

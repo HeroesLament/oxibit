@@ -159,7 +159,15 @@ pub enum Cell {
     /// A memory: `width` x `size` words, initial contents, ports.
     Mem(Memory),
     /// A primitive or user module instantiated by name.
-    Instance { ty: String, name: String, params: BTreeMap<String, Param>, conns: BTreeMap<String, SigSpec> },
+    Instance {
+        ty: String,
+        name: String,
+        params: BTreeMap<String, Param>,
+        conns: BTreeMap<String, SigSpec>,
+        /// Synthesis attributes on the instance (`(* k = v *)`), for the
+        /// primitives that take settings that way (ECP5 EHXPLLL).
+        attrs: BTreeMap<String, String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

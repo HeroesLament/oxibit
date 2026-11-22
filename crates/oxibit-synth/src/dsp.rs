@@ -352,6 +352,7 @@ fn dsp_cell_with(
     }
     conns.insert("P".to_string(), p);
     Cell::Instance {
+        attrs: Default::default(),
         ty: "DSP48E1".into(),
         name,
         params,

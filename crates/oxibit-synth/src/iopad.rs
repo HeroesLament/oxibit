@@ -44,6 +44,7 @@ fn rewrite(s: &mut SigSpec, map: &HashMap<Bit, Bit>) {
 
 fn buf(ty: &str, name: String, i: Bit, o: Bit) -> Cell {
     Cell::Instance {
+        attrs: Default::default(),
         ty: ty.into(),
         name,
         params: BTreeMap::new(),
@@ -222,6 +223,7 @@ mod tests {
         let y = port(&mut m, "y", 2, Dir::Output);
         let w = m.wire(1);
         m.cells.push(Cell::Instance {
+        attrs: Default::default(),
             ty: "IBUFDS".into(),
             name: "u".into(),
             params: BTreeMap::new(),

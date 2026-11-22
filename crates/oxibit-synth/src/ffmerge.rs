@@ -147,7 +147,7 @@ pub fn merge(m: &mut Module) -> FfMergeStats {
         let mut drop = vec![false; m.cells.len()];
         let mut seen: HashMap<String, Bit> = HashMap::new();
         for (ci, c) in m.cells.iter().enumerate() {
-            let Cell::Instance { ty, name, params, conns } = c else { continue };
+            let Cell::Instance { ty, name, params, conns, .. } = c else { continue };
             let Some(t) = ty_static(ty) else { continue };
             if !name.starts_with("oxsyn_") {
                 continue;
@@ -222,6 +222,7 @@ mod tests {
 
     fn ff(m: &mut Module, name: &str, d: Bit, q: Bit, init: bool) {
         m.cells.push(Cell::Instance {
+        attrs: Default::default(),
             ty: "FDRE".into(),
             name: format!("oxsyn_{name}"),
             params: BTreeMap::from([("INIT".to_string(), Param::Bits(vec![Some(init)]))]),

@@ -389,6 +389,7 @@ fn lutram(m: &mut Module, mem: &Memory, mi: usize, st: &mut BramStats) -> Result
                         st.ram64m += 1;
                     }
                     cells.push(Cell::Instance {
+        attrs: Default::default(),
                         ty: ty.into(),
                         name: format!("oxsyn_lutram{mi}_{col}"),
                         params,
@@ -417,6 +418,7 @@ fn lutram(m: &mut Module, mem: &Memory, mi: usize, st: &mut BramStats) -> Result
                         );
                         st.ram128x1d += 1;
                         cells.push(Cell::Instance {
+        attrs: Default::default(),
                             ty: ty.into(),
                             name: format!("oxsyn_lutram{mi}_{col}_{b}"),
                             params,
@@ -477,6 +479,7 @@ fn lut_cell(name: String, ins: &[Bit], tt: Vec<Option<bool>>, o: Bit) -> Cell {
     }
     conns.insert("O".to_string(), SigSpec(vec![o]));
     Cell::Instance {
+        attrs: Default::default(),
         ty: format!("LUT{}", ins.len()),
         name,
         params: BTreeMap::from([("INIT".to_string(), Param::Bits(tt))]),
@@ -639,6 +642,7 @@ fn tile(m: &mut Module, mem: &Memory, s: Shape, t: usize, mi: usize) -> Cell {
     }
     let ty = if s.big { "RAMB36E1" } else { "RAMB18E1" };
     Cell::Instance {
+        attrs: Default::default(),
         ty: ty.into(),
         name: format!("oxsyn_bram{mi}_{t}"),
         params,

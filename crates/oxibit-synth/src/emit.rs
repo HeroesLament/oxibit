@@ -71,6 +71,7 @@ impl<'a> Emit<'a> {
         let name = format!("oxsyn_lut{}", self.out.cells.len());
         let params = BTreeMap::from([("INIT".to_string(), Param::Bits(bits))]);
         self.out.cells.push(Cell::Instance {
+        attrs: Default::default(),
             ty: format!("LUT{k}"),
             name,
             params,
@@ -227,6 +228,7 @@ pub fn emit(lw: &Lowered, mp: &Mapping) -> (Module, Stats) {
         }
         let name = format!("oxsyn_ff{k}${}", f.name);
         e.out.cells.push(Cell::Instance {
+        attrs: Default::default(),
             ty: ty.into(),
             name,
             params,
@@ -278,6 +280,7 @@ pub fn emit(lw: &Lowered, mp: &Mapping) -> (Module, Stats) {
             ]);
             e.stats.carry4 += 1;
             e.out.cells.push(Cell::Instance {
+        attrs: Default::default(),
                 ty: "CARRY4".into(),
                 name: format!("oxsyn_carry{ci}_{k}"),
                 params: BTreeMap::new(),
@@ -288,6 +291,7 @@ pub fn emit(lw: &Lowered, mp: &Mapping) -> (Module, Stats) {
     for i in &lw.insts {
         let conns = i.conns.iter().map(|(p, v)| (p.clone(), e.spec(v))).collect();
         e.out.cells.push(Cell::Instance {
+        attrs: Default::default(),
             ty: i.ty.clone(),
             name: i.name.clone(),
             params: i.params.clone(),

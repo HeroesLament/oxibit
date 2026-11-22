@@ -22,6 +22,7 @@ fn perr<T>(m: impl Into<String>) -> R<T> {
 
 struct P {
     p: Parser,
+    attrs: expr::Attrs,
 }
 
 impl P {
@@ -116,8 +117,8 @@ impl P {
 /// Parse every module in `src`.
 #[oxibit_prof::hot]
 pub fn parse(src: &str) -> R<Vec<ModuleAst>> {
-    let toks = expr::tokenize(src)?;
-    let mut p = P { p: Parser::new(toks) };
+    let (toks, attrs) = expr::tokenize_attrs(src)?;
+    let mut p = P { p: Parser::new(toks), attrs };
     let mut out = Vec::new();
     while p.peek().is_some() {
         if p.eat_kw("module") {
@@ -390,6 +391,8 @@ fn stmt(p: &mut P) -> R<Stmt> {
 }
 
 fn instance(p: &mut P, items: &mut Vec<Item>) -> R<()> {
+    // Attributes written in front of the instance: `(* ... *) TYPE name (...)`.
+    let attrs = p.attrs.get(&p.p.pos).cloned().unwrap_or_default();
     let ty = p.ident()?;
     let mut params = Vec::new();
     if p.eat_op("#") {
@@ -425,7 +428,7 @@ fn instance(p: &mut P, items: &mut Vec<Item>) -> R<()> {
     }
     p.expect_op(")")?;
     p.expect_op(";")?;
-    items.push(Item::Instance { ty, name, params, conns });
+    items.push(Item::Instance { ty, name, params, conns, attrs });
     Ok(())
 }
 

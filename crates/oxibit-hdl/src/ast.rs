@@ -29,7 +29,14 @@ pub enum Item {
     Assign { lhs: Expr, rhs: Expr },
     Always { sens: Sens, body: Stmt },
     Initial(Stmt),
-    Instance { ty: String, name: String, params: Vec<(String, Expr)>, conns: Vec<(String, Option<Expr>)> },
+    Instance {
+        ty: String,
+        name: String,
+        params: Vec<(String, Expr)>,
+        conns: Vec<(String, Option<Expr>)>,
+        /// `(* k = v *)` written in front of the instance.
+        attrs: Vec<(String, String)>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

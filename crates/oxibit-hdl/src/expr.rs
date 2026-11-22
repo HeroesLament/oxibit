@@ -107,9 +107,50 @@ fn decimal_bits(s: &str) -> R<Vec<Option<bool>>> {
 
 #[oxibit_prof::hot]
 pub fn tokenize(src: &str) -> R<Vec<Tok>> {
+    Ok(tokenize_attrs(src)?.0)
+}
+
+/// Attribute instances `(* k = v, ... *)`, keyed by the index of the token
+/// that follows them. Values are the text after `=` with string quotes
+/// removed; a bare key reads as `"1"`.
+pub type Attrs = std::collections::BTreeMap<usize, Vec<(String, String)>>;
+
+fn parse_attr(body: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut in_str = false;
+    let mut parts = Vec::new();
+    for ch in body.chars() {
+        match ch {
+            '"' => {
+                in_str = !in_str;
+                cur.push(ch);
+            }
+            ',' if !in_str => parts.push(std::mem::take(&mut cur)),
+            _ => cur.push(ch),
+        }
+    }
+    parts.push(cur);
+    for part in parts {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let (k, v) = match part.split_once('=') {
+            Some((k, v)) => (k.trim(), v.trim().trim_matches('"').to_string()),
+            None => (part, "1".to_string()),
+        };
+        out.push((k.to_string(), v));
+    }
+    out
+}
+
+/// `tokenize`, also returning the attribute instances it skipped.
+pub fn tokenize_attrs(src: &str) -> R<(Vec<Tok>, Attrs)> {
     let c: Vec<char> = src.chars().collect();
     let mut i = 0;
     let mut out = Vec::new();
+    let mut attrs = Attrs::new();
     while i < c.len() {
         let ch = c[i];
         if ch.is_whitespace() {
@@ -133,9 +174,12 @@ pub fn tokenize(src: &str) -> R<Vec<Tok>> {
         }
         if ch == '(' && c.get(i + 1) == Some(&'*') && c.get(i + 2) != Some(&')') {
             i += 2;
+            let st = i;
             while i + 1 < c.len() && !(c[i] == '*' && c[i + 1] == ')') {
                 i += 1;
             }
+            let body: String = c[st..i.min(c.len())].iter().collect();
+            attrs.entry(out.len()).or_default().extend(parse_attr(&body));
             i += 2;
             continue;
         }
@@ -266,7 +310,7 @@ pub fn tokenize(src: &str) -> R<Vec<Tok>> {
             None => return Err(ParseError(format!("unexpected character {ch:?}"))),
         }
     }
-    Ok(out)
+    Ok((out, attrs))
 }
 
 /// Binary operator precedence (higher binds tighter).

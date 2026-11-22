@@ -55,6 +55,7 @@ fn case(n: usize, clk_inv: bool, tap: usize, rng: &mut Rng) -> Module {
             params.insert("IS_C_INVERTED".into(), Param::Bits(vec![Some(true)]));
         }
         m.cells.push(Cell::Instance {
+        attrs: Default::default(),
             ty: ty.into(),
             name: format!("oxsyn_ff{k}$r"),
             params,

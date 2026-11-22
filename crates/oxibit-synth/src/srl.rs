@@ -56,7 +56,7 @@ fn flag(params: &std::collections::BTreeMap<String, Param>, p: &str) -> Option<b
 
 /// A synthesis flop with no active synchronous reset or set.
 fn stage(ci: usize, c: &Cell) -> Option<Stage> {
-    let Cell::Instance { ty, name, params, conns } = c else { return None };
+    let Cell::Instance { ty, name, params, conns, .. } = c else { return None };
     if !name.starts_with("oxsyn_") {
         return None;
     }
@@ -234,6 +234,7 @@ pub fn map(m: &mut Module) -> SrlStats {
                 _ => unreachable!(),
             };
             new_cells.push(Cell::Instance {
+        attrs: Default::default(),
                 ty: "SRLC32E".into(),
                 name,
                 params,
@@ -295,6 +296,7 @@ mod tests {
 
     fn ff(m: &mut Module, k: usize, clk: Bit, d: Bit, q: Bit) {
         m.cells.push(Cell::Instance {
+        attrs: Default::default(),
             ty: "FDRE".into(),
             name: format!("oxsyn_ff{k}$r"),
             params: BTreeMap::from([("INIT".to_string(), Param::Bits(vec![Some(k % 2 == 1)]))]),

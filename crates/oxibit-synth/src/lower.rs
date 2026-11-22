@@ -53,6 +53,7 @@ pub struct InstL {
     pub ty: String,
     pub name: String,
     pub params: BTreeMap<String, Param>,
+    pub attrs: BTreeMap<String, String>,
     pub conns: Vec<(String, Vec<Lit>)>,
 }
 
@@ -1067,7 +1068,7 @@ pub fn lower(m: &Module, dirs: &PrimPorts, cfg: Config) -> R<Lowered> {
                     });
                 }
             }
-            Cell::Instance { ty, name, params, conns } => {
+            Cell::Instance { ty, name, params, conns, attrs } => {
                 let mut cv = Vec::new();
                 for (p, s) in conns {
                     let port = l.inst_port(ty, p)?;
@@ -1099,6 +1100,7 @@ pub fn lower(m: &Module, dirs: &PrimPorts, cfg: Config) -> R<Lowered> {
                     ty: ty.clone(),
                     name: name.clone(),
                     params: params.clone(),
+                    attrs: attrs.clone(),
                     conns: cv,
                 });
             }
