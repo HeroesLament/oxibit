@@ -46,6 +46,10 @@
 //   x[59:56], on one frame in 2^x[55:53].
 //   p38: RDMOVE = x17 (one step of the read-side DQS delay per pulse,
 //   with RDLOADN x40 high; RDDIRECTION ~x42).
+//   p39: WRMOVE = x18 (one step of the write-side DQSW270 delay, which
+//   clocks DQ out, per pulse, with WRLOADN x41 high; WRDIRECTION ~x43).
+//   p40: scan bits 224..239 hold the DQ word 1, 2, 3, 4 sclk cycles after
+//   the last DATAVALID rise (4 bits each), in place of the release latency.
 //
 // y (results over a 2^18-cycle sys window, about 2.6 ms, then cleared):
 //   y0..y3 Q0..Q3 on the last DATAVALID cycle, y4 QWL then, y5 DDRDLLA LOCK,
@@ -302,7 +306,18 @@ module dqs_probe (
   assign g_rdc = c_rdc ^ (c_rdc >> 1);
   assign g_wrc = c_wrc ^ (c_wrc >> 1);
   assign g_pr = c_pr ^ (c_pr >> 1);
-  assign lat_w = lat;
+  // p40: the IDDRX2DQA word 1..4 sclk cycles after each DATAVALID rise
+  // (bits 224..239 of the scan word, replacing the release latency).
+  reg [3:0] dvp = 0;
+  reg [3:0] q_p1 = 0, q_p2 = 0, q_p3 = 0, q_p4 = 0;
+  always @(posedge sclk) begin
+    dvp <= {dvp[2:0], dv & ~dv_d};
+    if (dvp[0]) q_p1 <= q;
+    if (dvp[1]) q_p2 <= q;
+    if (dvp[2]) q_p3 <= q;
+    if (dvp[3]) q_p4 <= q;
+  end
+  assign lat_w = {q_p4, q_p3, q_p2, q_p1};
 
   // The DQS group.
   wire dqsr90, dqsw, dqsw270;
@@ -312,7 +327,7 @@ module dqs_probe (
     .DQSI(dqs_o), .READ1(rd), .READ0(rd), .READCLKSEL2(x[14]), .READCLKSEL1(x[13]),
     .READCLKSEL0(x[12]), .DDRDEL(ddrdel), .ECLK(eclk), .SCLK(sclk), .RST(dqs_rst), .PAUSE(pause_all),
     .RDLOADN(x[40]), .RDMOVE(x[17]), .RDDIRECTION(~x[42]),
-    .WRLOADN(x[41]), .WRMOVE(zero), .WRDIRECTION(~x[43]),
+    .WRLOADN(x[41]), .WRMOVE(x[18]), .WRDIRECTION(~x[43]),
     .DQSR90(dqsr90), .DQSW(dqsw), .DQSW270(dqsw270), .RDPNTR2(rdp[2]), .RDPNTR1(rdp[1]),
     .RDPNTR0(rdp[0]), .WRPNTR2(wrp[2]), .WRPNTR1(wrp[1]), .WRPNTR0(wrp[0]),
     .DATAVALID(dv), .BURSTDET(bd), .RDCFLAG(rdc), .WRCFLAG(wrc));

@@ -662,7 +662,7 @@ end
 
 defmodule Dqs do
   @moduledoc false
-  # dqs_probe.v (p37, p38: x17 RDMOVE): one LiteDRAM-style byte lane (DQS gp19, DQ gp20) with
+  # dqs_probe.v (p37, p38: x17 RDMOVE, p39: x18 WRMOVE, p40: lat field = DQ words 1..4 cycles after DATAVALID): one LiteDRAM-style byte lane (DQS gp19, DQ gp20) with
   # the ECP5DDRPHYInit sequence in fabric. x0..3 the DQ word, x8 READ on,
   # x[14:12] READCLKSEL, x16 an edge re-runs init, x[23:20] the READ start
   # phase in the 16-cycle sys frame, x24 burst mode (else the strobe drives
@@ -743,69 +743,89 @@ defmodule Dqs do
   end
 
   def run(s, _o) do
-    :rand.seed(:exsss, {71, 73, 79})
     Process.sleep(200)
-    sweeps =
-      for {name, dbit} <- [{"inc", 1 <<< 42}, {"dec", 0}] do
-        ctl = 1 <<< 40 ||| dbit
-        # Load the DDRDEL (90 degree) delay with RDLOADN low, then release it.
-        _ = scan(s, 0x100 ||| dbit)
-        _ = scan(s, 0x100 ||| dbit)
-        r = scan(s, 0x100 ||| ctl)
-        {name, steps(s, name, ctl, 0, [], r.rdc)}
-      end
-    # Data check at the read-leveled point: load the delay, 25 steps down,
-    # READ phase 6, READCLKSEL 4, every nonzero DQ word twice.
-    ctl = 1 <<< 40
+    # Read delay loaded, then 25 steps down (the read-leveled point found in
+    # p38: READ phase 6, READCLKSEL 4).
+    rd = 1 <<< 40
     _ = scan(s, 0x100)
     _ = scan(s, 0x100)
-    _ = scan(s, 0x100 ||| ctl)
+    _ = scan(s, 0x100 ||| rd)
     for _ <- 1..25 do
-      _ = scan(s, 0x100 ||| ctl ||| 1 <<< 17)
-      _ = scan(s, 0x100 ||| ctl)
+      _ = scan(s, 0x100 ||| rd ||| 1 <<< 17)
+      _ = scan(s, 0x100 ||| rd)
     end
-    lp = for d <- 1..15, _ <- 1..2, do: measure(s, xw(d, 6, 4, 1) ||| ctl, "lp")
-    check(sweeps, lp)
+    lp = for d <- 1..15, _ <- 1..2, do: measure(s, xw(d, 6, 4, 1) ||| rd, "lp")
+    # The write-side DQSW270 delay (which clocks DQ out) each way until
+    # WRCFLAG, every nonzero DQ word at each step.
+    wsw =
+      for {name, dbit} <- [{"winc", 1 <<< 43}, {"wdec", 0}] do
+        ctl = rd ||| 1 <<< 41 ||| dbit
+        _ = scan(s, 0x100 ||| rd ||| dbit)
+        _ = scan(s, 0x100 ||| rd ||| dbit)
+        r = scan(s, 0x100 ||| ctl)
+        {name, wsteps(s, name, ctl, 0, [], r.wrc)}
+      end
+    check(lp, wsw)
   end
 
-  # The rotations k for which q is word rotated by k.
-  defp ks(m), do: for(k <- 0..3, rot(f(m.x, 0, 4), k) == f(m.c3.y, 0, 4), do: k)
+  defp wsteps(s, name, ctl, n, acc, wrc0) do
+    ms = for d <- 1..15, do: measure(s, xw(d, 6, 4, 1) ||| ctl, "#{name}#{n}")
+    acc = [{n, ms} | acc]
+    if n >= 63 or d16(wrc0, List.last(ms).c3.wrc) > 0 do
+      Enum.reverse(acc)
+    else
+      x = 0x100 ||| ctl
+      _ = scan(s, x ||| 1 <<< 18)
+      _ = scan(s, x)
+      wsteps(s, name, ctl, n + 1, acc, wrc0)
+    end
+  end
 
-  def check(sweeps, lp) do
-    lpdv = Enum.filter(lp, &(&1.steady.dvr > 0))
-    byk = for k <- 0..3, do: {k, Enum.count(lpdv, &(k in ks(&1)))}
-    {kbest, nbest} = Enum.max_by(byk, &elem(&1, 1))
-    bad = lpdv |> Enum.reject(&(kbest in ks(&1))) |> Enum.map_join(" ", &"#{Integer.to_string(f(&1.x, 0, 4), 16)}->#{Integer.to_string(f(&1.c3.y, 0, 4), 16)}")
-    all = Enum.flat_map(sweeps, fn {_, st} -> Enum.flat_map(st, fn {_, ms} -> ms end) end)
+  defp rev4(v), do: (v &&& 1) <<< 3 ||| (v &&& 2) <<< 1 ||| (v &&& 4) >>> 1 ||| (v &&& 8) >>> 3
+
+  # Transforms of the sent word: rotations (r0..r3) and rotations of its bit
+  # reversal (v0..v3).
+  defp xf(w), do: (for k <- 0..3, do: {"r#{k}", rot(w, k)}) ++ (for k <- 0..3, do: {"v#{k}", rot(rev4(w), k)})
+
+  # The DQ word captured o sclk cycles after DATAVALID (o 0: on it).
+  defp cap(m, 0), do: f(m.c3.y, 0, 4)
+  defp cap(m, o), do: f(m.c3.lat, 4 * (o - 1), 4)
+
+  # Best {offset, transform, fits, total} over the DATAVALID measurements.
+  defp fit(ms) do
+    dv = Enum.filter(ms, &(&1.steady.dvr > 0))
+    best =
+      for o <- 0..4, t <- 0..7 do
+        n = Enum.count(dv, fn m -> {_, v} = Enum.at(xf(f(m.x, 0, 4)), t); v == cap(m, o) end)
+        {o, elem(Enum.at(xf(1), t), 0), n}
+      end
+      |> Enum.max_by(&elem(&1, 2))
+    {o, t, n} = best
+    {o, t, n, length(dv)}
+  end
+
+  defp caps_of(m), do: Enum.map_join(0..4, "/", &Integer.to_string(cap(m, &1), 16))
+
+  def check(lp, wsw) do
+    all = lp ++ Enum.flat_map(wsw, fn {_, st} -> Enum.flat_map(st, fn {_, ms} -> ms end) end)
     caps = Enum.flat_map(all, &[&1.c2, &1.c3])
     valid = Enum.all?(caps, &(&1.magic == @magic))
     b = fn r, i -> f(r.y, i, 1) == 1 end
-    per_dir = fn {name, st} ->
-      hit = st |> Enum.map(fn {n, ms} ->
-        dv = Enum.count(ms, &(&1.steady.dvr > 0))
-        bd = Enum.count(ms, &(&1.steady.bdr > 0))
-        lp = Enum.count(ms, &loop_ok/1)
-        {n, dv, bd, lp}
-      end)
-      shown = hit |> Enum.filter(fn {_, dv, bd, _} -> dv + bd > 0 end) |> Enum.map_join(" ", fn {n, dv, bd, lp} -> "#{n}:dv#{dv}bd#{bd}lp#{lp}" end)
-      "#{name}: #{length(st)} steps" <> if(shown == "", do: ", nothing", else: ", " <> shown)
-    end
-    bds = Enum.filter(all, &(&1.steady.bdr > 0))
-    dvs = Enum.filter(all, &(&1.steady.dvr > 0))
-    keys = fn ms -> ms |> Enum.map(&"#{&1.tag}r#{f(&1.x, 20, 4)}s#{f(&1.x, 12, 3)}") |> Enum.take(30) |> Enum.join(" ") end
+    {lo, lt, ln, ltot} = fit(lp)
+    lpdv = Enum.filter(lp, &(&1.steady.dvr > 0))
+    lpshow = lp |> Enum.take_every(2) |> Enum.map_join(" ", &"#{Integer.to_string(f(&1.x, 0, 4), 16)}:#{caps_of(&1)}")
+    wfits = for {name, st} <- wsw, {n, ms} <- st, do: {name, n, fit(ms)}
+    {wn, wi, {wo, wt, wf, wtot}} = Enum.max_by(wfits, fn {_, _, {_, _, nf, _}} -> nf end)
+    wshow = wfits |> Enum.filter(fn {_, _, {_, _, nf, _}} -> nf >= 12 end) |> Enum.map_join(" ", fn {nm, n, {o, t, nf, tt}} -> "#{nm}#{n}:o#{o}#{t} #{nf}/#{tt}" end)
     [
       {"magic", valid, "0x" <> Integer.to_string(hd(caps).magic, 16)},
       {"x_roundtrip", Enum.all?(caps, &(&1.x == &1.sent)), "#{length(caps)} captures after the PAUSE entry"},
       {"locks", Enum.all?(caps, &(b.(&1, 14) and b.(&1, 5) and b.(&1, 15))), "pll / dll / init on all"},
-      {"rst_low", Enum.all?(all, &(&1.c3.rst == 0)), "RST low on #{Enum.count(all, &(&1.c3.rst == 0))} of #{length(all)}"},
-      {"delay_sweep", true, Enum.map_join(sweeps, " | ", per_dir)},
-      {"datavalid_steady", dvs != [], "#{length(dvs)} of #{length(all)}: " <> keys.(dvs)},
-      {"burstdet", bds != [], "#{length(bds)} of #{length(all)}: " <> keys.(bds)},
-      {"dq_sweep_rot", Enum.any?(all, &loop_ok/1), "#{Enum.count(all, &loop_ok/1)} of #{length(dvs)} sweep DATAVALID measurements read a rotation of the DQ word"},
-      {"lp_datavalid", length(lpdv) == length(lp), "DATAVALID on #{length(lpdv)} of #{length(lp)} at the read-leveled point, BURSTDET on #{Enum.count(lp, &(&1.steady.bdr > 0))}"},
-      {"dq_loopback", lpdv != [] and nbest * 10 >= length(lpdv) * 9,
-       "rotation #{kbest} fits #{nbest} of #{length(lpdv)} (by rotation #{Enum.map_join(byk, " ", fn {k, n} -> "#{k}:#{n}" end)})" <>
-         if(bad == "", do: "", else: "; misses " <> bad)}
+      {"lp_datavalid", length(lpdv) == length(lp), "DATAVALID on #{length(lpdv)} of #{length(lp)}, BURSTDET on #{Enum.count(lp, &(&1.steady.bdr > 0))}"},
+      {"lp_capture", true, "best offset #{lo} #{lt}: #{ln} of #{ltot}; word:caps o0..o4 " <> lpshow},
+      {"wr_sweep", true, Enum.map_join(wsw, " | ", fn {nm, st} -> "#{nm}: #{length(st)} steps" end) <> "; steps fitting >= 12: " <> if(wshow == "", do: "none", else: wshow)},
+      {"dq_loopback", (ln == ltot and ltot == 30) or (wf == 15 and wtot == 15),
+       "read-leveled point: offset #{lo} #{lt} fits #{ln} of #{ltot}; best write step #{wn} #{wi}: offset #{wo} #{wt} fits #{wf} of #{wtot}"}
     ]
     |> Enum.map(fn
       {"magic", ok, d} -> {"magic", ok, d}
