@@ -64,7 +64,7 @@ pub struct MemL {
     pub wr: Vec<((Lit, bool), Vec<Lit>, Vec<Lit>, Vec<Lit>)>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Lowered {
     pub aig: Aig,
     pub name: String,

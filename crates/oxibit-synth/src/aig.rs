@@ -53,7 +53,7 @@ pub struct Chain {
     pub co: Lit,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Aig {
     pub nodes: Vec<Node>,
     /// Node index of each primary input.

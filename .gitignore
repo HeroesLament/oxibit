@@ -1,1 +1,4 @@
 /target
+/target-prof
+crates/oxibit-ecp5/designs/*.p[0-9][0-9]
+crates/oxibit-ecp5/designs/*.pre[0-9]*

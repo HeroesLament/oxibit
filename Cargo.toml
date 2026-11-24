@@ -33,6 +33,9 @@ serde_json = "1"
 sha2 = "0.10"
 clap = { version = "4", features = ["derive"] }
 flate2 = "1"
+# Pure-Rust libm: exp / pow / log with the same bits on every platform (the
+# system libm differs between macOS and glibc, which moved placements).
+libm = "0.2"
 
 [profile.release]
 # A panic ends the process. For `oxibit port` the BEAM's contract is the exit

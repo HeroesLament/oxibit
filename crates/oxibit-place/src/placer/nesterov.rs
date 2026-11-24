@@ -154,7 +154,7 @@ fn wa(cs: impl Iterator<Item = f64> + Clone, gamma: f64) -> Wa {
         t_lo: 0.0,
     };
     for c in cs {
-        let (eh, el) = (((c - hi) / gamma).exp(), ((lo - c) / gamma).exp());
+        let (eh, el) = (libm::exp((c - hi) / gamma), libm::exp((lo - c) / gamma));
         w.s_hi += eh;
         w.t_hi += c * eh;
         w.s_lo += el;
@@ -165,7 +165,7 @@ fn wa(cs: impl Iterator<Item = f64> + Clone, gamma: f64) -> Wa {
 
 /// d(WA length)/dc for a pin at `c` of a net with sums `w`.
 fn wa_grad(c: f64, w: &Wa, gamma: f64) -> f64 {
-    let (eh, el) = (((c - w.hi) / gamma).exp(), ((w.lo - c) / gamma).exp());
+    let (eh, el) = (libm::exp((c - w.hi) / gamma), libm::exp((w.lo - c) / gamma));
     eh * ((1.0 + c / gamma) * w.s_hi - w.t_hi / gamma) / (w.s_hi * w.s_hi) - el * ((1.0 - c / gamma) * w.s_lo + w.t_lo / gamma) / (w.s_lo * w.s_lo)
 }
 
@@ -366,7 +366,7 @@ pub fn run_withheld(
     // ePlace's smoothing schedule: gamma = 8 * bin * 10^(20/9 tau - 11/9),
     // so 80 bins wide at overflow 1 and 0.8 at overflow 0.1.
     let gamma_of = |tau: f64| {
-        let k = 8.0 * 10f64.powf(20.0 / 9.0 * tau.clamp(0.0, 1.0) - 11.0 / 9.0);
+        let k = 8.0 * libm::pow(10.0, 20.0 / 9.0 * tau.clamp(0.0, 1.0) - 11.0 / 9.0);
         (k * grid.bw, k * grid.bh)
     };
     let of = |x: &[f64], y: &[f64]| overflow(prob, grid, &model.state(x, y), opts.target_density);
@@ -435,7 +435,7 @@ pub fn run_withheld(
         // lambda grows unless wirelength is rising faster than the
         // reference rate (the papers' mu, with a relative reference).
         let rise = (now - hpwl) / (opts.hpwl_ref * hpwl.max(f64::MIN_POSITIVE));
-        lambda *= opts.mu_max.powf(1.0 - rise).clamp(opts.mu_min, opts.mu_max);
+        lambda *= libm::pow(opts.mu_max, 1.0 - rise).clamp(opts.mu_min, opts.mu_max);
         hpwl = now;
         gamma = gamma_of(over.ratio);
         // New weights change the gradient at `v`: take it again.

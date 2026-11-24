@@ -277,7 +277,7 @@ impl PlaceTiming {
         let mut w: Vec<f64> = (0..nets)
             .map(|n| {
                 let rel = self.net_of.get(n).copied().flatten().and_then(|b| table.net_rel.get(b as usize)).copied().unwrap_or(0.0);
-                1.0 + beta * f64::from(rel).powf(e)
+                1.0 + beta * libm::pow(f64::from(rel), e)
             })
             .collect();
         if momentum > 0.0 {
@@ -286,8 +286,8 @@ impl PlaceTiming {
                 self.log_w = vec![0.0; nets];
             }
             for (lw, v) in self.log_w.iter_mut().zip(w.iter_mut()) {
-                *lw = momentum * *lw + (1.0 - momentum) * v.ln();
-                *v = lw.exp();
+                *lw = momentum * *lw + (1.0 - momentum) * libm::log(*v);
+                *v = libm::exp(*lw);
             }
         }
         let heavy = w.iter().filter(|&&v| v > 1.5).count();
