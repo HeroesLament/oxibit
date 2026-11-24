@@ -1,5 +1,9 @@
 //! sysDSP: MULT18X18D and ALU54B.
 //!
+//! The 9x9 split multiplier (MULT9X9D), the 24-bit ALU split (ALU24B) and
+//! the pre-adders (PRADD9A/PRADD18A) share these tiles; their fuse tables
+//! are decoded below and pending silicon confirmation.
+//!
 //! A DSP block spans nine tiles (`MIB_DSP0..8`, with `MIB2_DSP*`); its
 //! MULT18 bels sit at columns 0, 1, 4, 5 of the block and its ALU54 bels at
 //! 3 and 7, so a bel at column x with index z belongs to the block
@@ -16,6 +20,214 @@
 //!
 //! Synthesis keeps them as black-box cells: the random check does not
 //! model the arithmetic, the silicon probe does.
+
+// DSP fuse/setting tables, from the local model.
+//
+// Decoded from the vendor device database: each (bel-type, setting)
+// pair maps to fuse-group values. The "fuse bytes" are the MC1_MIBMEM
+// indices of the bit(s) that encode that setting; the physical bitstream
+// frame mapping for those groups is what the DSP fuzzing must confirm
+// (only the MULT18/ALU54 groups are already mapped by Trellis).
+//
+// Setting spaces (all values verified present in the database):
+//   ALU24:
+//     0: CLK0, CLK1, CLK2, CLK3, OPADDNSUB, OPCINSEL
+//     1: CE0, CE1, CE2, CE3, RST0, RST1, RST2, RST3
+//     CLK0_DIV: DISABLED
+//     CLK1_DIV: DISABLED
+//     CLK2_DIV: DISABLED
+//     CLK3_DIV: DISABLED
+//     GSR: DISABLED
+//     INV: CLK0, CLK1, CLK2, CLK3, OPADDNSUB, OPCINSEL
+//     OUT2CIB: YES
+//     OUT2CIN: YES
+//     REG_INPUTCFB_CE: CE0, CE1, CE2
+//     REG_INPUTCFB_CLK: CLK0, CLK1, CLK2, CLK3, NONE
+//     REG_INPUTCFB_RST: RST0, RST1, RST2
+//     REG_OPCODE_0_CE: CE0, CE1, CE2
+//     REG_OPCODE_0_CLK: CLK0, CLK1, CLK2, NONE
+//     REG_OPCODE_0_RST: RST0, RST1, RST2
+//     REG_OPCODE_1_CE: CE0, CE1, CE2
+//     REG_OPCODE_1_CLK: CLK0, CLK1, CLK2, NONE
+//     REG_OPCODE_1_RST: RST0, RST1, RST2
+//     REG_OUTPUT_CE: CE0, CE1, CE2
+//     REG_OUTPUT_CLK: CLK0, CLK1, CLK2, NONE
+//     REG_OUTPUT_RST: RST0, RST1, RST2
+//     RESETMODE: ASYNC
+//     SIG: CE0, CE1, CE2, CE3, RST0, RST1, RST2, RST3
+//   ALU54:
+//     0: CLK0, CLK1, CLK2, CLK3, OP0, OP1, OP10, OP2, OP3, OP4, OP5, OP6, OP7, OP8, OP9, OPADDNSUB, OPCINSEL
+//     1: CE0, CE1, CE2, CE3, RST0, RST1, RST2, RST3
+//     CLK0_DIV: DISABLED
+//     CLK1_DIV: DISABLED
+//     CLK2_DIV: DISABLED
+//     CLK3_DIV: DISABLED
+//     FLAG2CIB: YES
+//     FORCE_ZERO_BARREL_SHIFT: DISABLED
+//     GSR: DISABLED
+//     INV: CLK0, CLK1, CLK2, CLK3, OP0, OP1, OP10, OP2, OP3, OP4, OP5, OP6, OP7, OP8, OP9, OPADDNSUB, OPCINSEL
+//     LEGACY: ENABLED
+//     MASKPAT_SOURCE: STATIC
+//     MCPAT_SOURCE: STATIC
+//     OUT2CIB: YES
+//     OUT2CIN: YES
+//     REG_FLAG_CE: CE0, CE1, CE2
+//     REG_FLAG_CLK: CLK0, CLK1, CLK2, NONE
+//     REG_FLAG_RST: RST0, RST1, RST2
+//     REG_INPUTC0_CE: CE0, CE1, CE2
+//     REG_INPUTC0_CLK: CLK0, CLK1, CLK2, NONE
+//     REG_INPUTC0_RST: RST0, RST1, RST2
+//     REG_INPUTC1_CE: CE0, CE1, CE2
+//     REG_INPUTC1_CLK: CLK0, CLK1, CLK2, NONE
+//     REG_INPUTC1_RST: RST0, RST1, RST2
+//     REG_INPUTCFB_CLK: CLK0, CLK1, CLK2, CLK3, NONE
+//     REG_OPCODEIN_0_CE: CE0, CE1, CE2
+//     REG_OPCODEIN_0_CLK: CLK0, CLK1, CLK2, NONE
+//     REG_OPCODEIN_0_RST: RST0, RST1, RST2
+//     REG_OPCODEIN_1_CE: CE0, CE1, CE2
+//     REG_OPCODEIN_1_CLK: CLK0, CLK1, CLK2, NONE
+//     REG_OPCODEIN_1_RST: RST0, RST1, RST2
+//     REG_OPCODEOP0_0_CE: CE0, CE1, CE2
+//     REG_OPCODEOP0_0_CLK: CLK0, CLK1, CLK2, NONE
+//     REG_OPCODEOP0_0_RST: RST0, RST1, RST2
+//     REG_OPCODEOP0_1_CE: CE0, CE1, CE2
+//     REG_OPCODEOP0_1_CLK: CLK0, CLK1, CLK2, NONE
+//     REG_OPCODEOP0_1_RST: RST0, RST1, RST2
+//     REG_OPCODEOP1_0_CLK: CLK0, CLK1, CLK2, NONE
+//     REG_OPCODEOP1_1_CLK: CLK0, CLK1, CLK2, NONE
+//     REG_OPCODE_0_CE: CE0, CE1, CE2
+//     REG_OPCODE_0_CLK: CLK0, CLK1, CLK2, NONE
+//     REG_OPCODE_0_RST: RST0, RST1, RST2
+//     REG_OPCODE_1_CE: CE0, CE1, CE2
+//     REG_OPCODE_1_CLK: CLK0, CLK1, CLK2, NONE
+//     REG_OPCODE_1_RST: RST0, RST1, RST2
+//     REG_OUTPUT0_CE: CE0, CE1, CE2
+//     REG_OUTPUT0_CLK: CLK0, CLK1, CLK2, NONE
+//     REG_OUTPUT0_RST: RST0, RST1, RST2
+//     REG_OUTPUT1_CE: CE0, CE1, CE2
+//     REG_OUTPUT1_CLK: CLK0, CLK1, CLK2, NONE
+//     REG_OUTPUT1_RST: RST0, RST1, RST2
+//     REG_OUTPUT_CE: CE0, CE1, CE2
+//     REG_OUTPUT_CLK: CLK0, CLK1, CLK2, NONE
+//     REG_OUTPUT_RST: RST0, RST1, RST2
+//     RESETMODE: ASYNC
+//     SIG: CE0, CE1, CE2, CE3, RST0, RST1, RST2, RST3
+//   MULT18:
+//     0: CLK0, CLK1, CLK2, CLK3, SIGNEDA, SIGNEDB, SOURCEA, SOURCEB
+//     1: CE0, CE1, CE2, CE3, RST0, RST1, RST2, RST3, SOURCEA, SOURCEB
+//     CAS_MATCH_REG: FALSE
+//     CLK0_DIV: DISABLED
+//     CLK1_DIV: DISABLED
+//     CLK2_DIV: DISABLED
+//     CLK3_DIV: DISABLED
+//     GSR: DISABLED
+//     HIGHSPEED_CLK: CLK0, CLK1, CLK2
+//     INV: CLK0, CLK1, CLK2, CLK3, SIGNEDA, SIGNEDB, SOURCEA, SOURCEB
+//     OUT2CIB: YES
+//     REG_INPUTA_CE: CE0, CE1, CE2
+//     REG_INPUTA_CLK: CLK0, CLK1, CLK2, NONE
+//     REG_INPUTA_RST: RST0, RST1, RST2
+//     REG_INPUTB_CE: CE0, CE1, CE2
+//     REG_INPUTB_CLK: CLK0, CLK1, CLK2, NONE
+//     REG_INPUTB_RST: RST0, RST1, RST2
+//     REG_INPUTC_CLK: NONE
+//     REG_OUTPUT_CE: CE0, CE1, CE2
+//     REG_OUTPUT_CLK: CLK0, CLK1, CLK2, NONE
+//     REG_OUTPUT_RST: RST0, RST1, RST2
+//     REG_PIPELINE_CE: CE0, CE1, CE2
+//     REG_PIPELINE_CLK: CLK0, CLK1, CLK2, NONE
+//     REG_PIPELINE_RST: RST0, RST1, RST2
+//     RESETMODE: ASYNC
+//     SIG: CE0, CE1, CE2, CE3, RST0, RST1, RST2, RST3, SOURCEA, SOURCEB
+//     SOURCEB_MODE: B_C_DYNAMIC, B_SHIFT, C_SHIFT, HIGHSPEED
+//     SRO2CIB: NO, YES
+//   MULT9:
+//     0: CLK0, CLK1, CLK2, CLK3, SIGNEDA, SIGNEDB, SOURCEA, SOURCEB
+//     1: CE0, CE1, CE2, CE3, RST0, RST1, RST2, RST3, SOURCEA, SOURCEB
+//     CAS_MATCH_REG: FALSE
+//     CLK0_DIV: DISABLED
+//     CLK1_DIV: DISABLED
+//     CLK2_DIV: DISABLED
+//     CLK3_DIV: DISABLED
+//     GSR: DISABLED
+//     HIGHSPEED_CLK: CLK0, CLK1, CLK2
+//     INV: CLK0, CLK1, CLK2, CLK3, SIGNEDA, SIGNEDB, SOURCEA, SOURCEB
+//     OUT2CIB: YES
+//     REG_INPUTA_CE: CE0, CE1, CE2
+//     REG_INPUTA_CLK: CLK0, CLK1, CLK2, NONE
+//     REG_INPUTA_RST: RST0, RST1, RST2
+//     REG_INPUTB_CE: CE0, CE1, CE2
+//     REG_INPUTB_CLK: CLK0, CLK1, CLK2, NONE
+//     REG_INPUTB_RST: RST0, RST1, RST2
+//     REG_INPUTC_CE: CE0, CE1, CE2
+//     REG_INPUTC_CLK: CLK0, CLK1, CLK2, NONE
+//     REG_INPUTC_RST: RST0, RST1, RST2
+//     REG_OUTPUT_CE: CE0, CE1, CE2
+//     REG_OUTPUT_CLK: CLK0, CLK1, CLK2, NONE
+//     REG_OUTPUT_RST: RST0, RST1, RST2
+//     REG_PIPELINE_CE: CE0, CE1, CE2
+//     REG_PIPELINE_CLK: CLK0, CLK1, CLK2, NONE
+//     REG_PIPELINE_RST: RST0, RST1, RST2
+//     RESETMODE: ASYNC
+//     SIG: CE0, CE1, CE2, CE3, RST0, RST1, RST2, RST3, SOURCEA, SOURCEB
+//     SOURCEB_MODE: B_C_DYNAMIC, B_SHIFT, C_SHIFT, HIGHSPEED
+//     SRO2CIB: NO
+//   PRADD18:
+//     0: CLK0, CLK1, CLK2, CLK3
+//     1: CE0, CE1, CE2, CE3, PB0, PB1, PB10, PB11, PB12, PB13, PB14, PB15, PB16, PB17, PB2, PB3, PB4, PB5, PB6, PB7, PB8, PB9, RST0, RST1, RST2, RST3, SOURCEA
+//     CAS_MATCH_REG: FALSE
+//     CLK0_DIV: DISABLED
+//     CLK1_DIV: DISABLED
+//     CLK2_DIV: DISABLED
+//     CLK3_DIV: DISABLED
+//     FB_MUX: SHIFT, SHIFT_BYPASS
+//     GSR: DISABLED
+//     HIGHSPEED_CLK: CLK0, CLK1, CLK2
+//     INV: CLK0, CLK1, CLK2, CLK3, OPPRE, SOURCEA
+//     REG_INPUTA_CE: CE0, CE1, CE2
+//     REG_INPUTA_CLK: CLK0, CLK1, CLK2, NONE
+//     REG_INPUTA_RST: RST0, RST1, RST2
+//     REG_INPUTB_CE: CE0, CE1, CE2
+//     REG_INPUTB_CLK: CLK0, CLK1, CLK2, NONE
+//     REG_INPUTB_RST: RST0, RST1, RST2
+//     REG_INPUTC_CLK: NONE
+//     REG_OPPRE_CE: CE0, CE1, CE2
+//     REG_OPPRE_CLK: CLK0, CLK1, CLK2, NONE
+//     REG_OPPRE_RST: RST0, RST1, RST2
+//     RESETMODE: ASYNC
+//     SIG: CE0, CE1, CE2, CE3, PB0, PB1, PB10, PB11, PB12, PB13, PB14, PB15, PB16, PB17, PB2, PB3, PB4, PB5, PB6, PB7, PB8, PB9, RST0, RST1, RST2, RST3, SOURCEA
+//     SOURCEA_MODE: A_C_DYNAMIC, A_SHIFT, C_SHIFT, HIGHSPEED
+//     SOURCEB_MODE: INTERNAL, PARALLEL, SHIFT
+//     SYMMETRY_MODE: DIRECT
+//   PRADD9:
+//     0: CLK0, CLK1, CLK2, CLK3
+//     1: CE0, CE1, CE2, CE3, PB0, PB1, PB2, PB3, PB4, PB5, PB6, PB7, PB8, RST0, RST1, RST2, RST3, SOURCEA
+//     CAS_MATCH_REG: FALSE
+//     CLK0_DIV: DISABLED
+//     CLK1_DIV: DISABLED
+//     CLK2_DIV: DISABLED
+//     CLK3_DIV: DISABLED
+//     FB_MUX: SHIFT, SHIFT_BYPASS
+//     GSR: DISABLED
+//     HIGHSPEED_CLK: CLK0, CLK1, CLK2
+//     INV: CLK0, CLK1, CLK2, CLK3, OPPRE, SOURCEA
+//     REG_INPUTA_CE: CE0, CE1, CE2
+//     REG_INPUTA_CLK: CLK0, CLK1, CLK2, NONE
+//     REG_INPUTA_RST: RST0, RST1, RST2
+//     REG_INPUTB_CE: CE0, CE1, CE2
+//     REG_INPUTB_CLK: CLK0, CLK1, CLK2, NONE
+//     REG_INPUTB_RST: RST0, RST1, RST2
+//     REG_INPUTC_CE: CE0, CE1, CE2
+//     REG_INPUTC_CLK: CLK0, CLK1, CLK2, NONE
+//     REG_INPUTC_RST: RST0, RST1, RST2
+//     REG_OPPRE_CE: CE0, CE1, CE2
+//     REG_OPPRE_CLK: CLK0, CLK1, CLK2, NONE
+//     REG_OPPRE_RST: RST0, RST1, RST2
+//     RESETMODE: ASYNC
+//     SIG: CE0, CE1, CE2, CE3, PB0, PB1, PB2, PB3, PB4, PB5, PB6, PB7, PB8, RST0, RST1, RST2, RST3, SOURCEA
+//     SOURCEA_MODE: A_C_DYNAMIC, A_SHIFT, C_SHIFT, HIGHSPEED
+//     SOURCEB_MODE: INTERNAL, PARALLEL, SHIFT
+//     SYMMETRY_MODE: DIRECT
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -75,9 +287,47 @@ CO35, CO34, CO33, CO32, CO31, CO30, CO29, CO28, CO27, CO26, CO25, CO24, CO23, CO
 CO19, CO18, CO17, CO16, CO15, CO14, CO13, CO12, CO11, CO10, CO9, CO8, CO7, CO6, CO5, CO4, CO3, 
 CO2, CO1, CO0, EQZ, EQZM, EQOM, EQPAT, EQPATB, OVER, UNDER, OVERUNDER, SIGNEDR);
 endmodule
+module MULT9X9D(input A8, A7, A6, A5, A4, A3, A2, A1, A0, B8, B7, B6, B5, B4, B3, B2, B1, B0, \
+C8, C7, C6, C5, C4, C3, C2, C1, C0, SIGNEDA, SIGNEDB, SIGNEDP, SOURCEA, SOURCEB, \
+SRIA8, SRIA7, SRIA6, SRIA5, SRIA4, SRIA3, SRIA2, SRIA1, SRIA0, SRIB8, SRIB7, SRIB6, SRIB5, \
+SRIB4, SRIB3, SRIB2, SRIB1, SRIB0, CLK3, CLK2, CLK1, CLK0, CE3, CE2, CE1, CE0, RST3, RST2, \
+RST1, RST0, output SROA8, SROA7, SROA6, SROA5, SROA4, SROA3, SROA2, SROA1, SROA0, \
+SROB8, SROB7, SROB6, SROB5, SROB4, SROB3, SROB2, SROB1, SROB0, \
+ROC8, ROC7, ROC6, ROC5, ROC4, ROC3, ROC2, ROC1, ROC0, \
+P17, P16, P15, P14, P13, P12, P11, P10, P9, P8, P7, P6, P5, P4, P3, P2, P1, P0);
+endmodule
+module PRADD9A(input PA8, PA7, PA6, PA5, PA4, PA3, PA2, PA1, PA0, \
+PB8, PB7, PB6, PB5, PB4, PB3, PB2, PB1, PB0, \
+C8, C7, C6, C5, C4, C3, C2, C1, C0, \
+SRIA8, SRIA7, SRIA6, SRIA5, SRIA4, SRIA3, SRIA2, SRIA1, SRIA0, \
+SRIB8, SRIB7, SRIB6, SRIB5, SRIB4, SRIB3, SRIB2, SRIB1, SRIB0, \
+SOURCEA, OPPRE, CLK3, CLK2, CLK1, CLK0, CE3, CE2, CE1, CE0, RST3, RST2, RST1, RST0, \
+output SROA8, SROA7, SROA6, SROA5, SROA4, SROA3, SROA2, SROA1, SROA0, \
+SROB8, SROB7, SROB6, SROB5, SROB4, SROB3, SROB2, SROB1, SROB0, \
+PO8, PO7, PO6, PO5, PO4, PO3, PO2, PO1, PO0);
+endmodule
+module ALU24B(input CE3, CE2, CE1, CE0, CLK3, CLK2, CLK1, CLK0, \
+RST3, RST2, RST1, RST0, SIGNEDIA, SIGNEDIB, \
+MA17, MA16, MA15, MA14, MA13, MA12, MA11, MA10, MA9, MA8, MA7, MA6, MA5, MA4, MA3, MA2, MA1, MA0, \
+MB17, MB16, MB15, MB14, MB13, MB12, MB11, MB10, MB9, MB8, MB7, MB6, MB5, MB4, MB3, MB2, MB1, MB0, \
+CIN23, CIN22, CIN21, CIN20, CIN19, CIN18, CIN17, CIN16, CIN15, CIN14, CIN13, CIN12, \
+CIN11, CIN10, CIN9, CIN8, CIN7, CIN6, CIN5, CIN4, CIN3, CIN2, CIN1, CIN0, \
+CFB23, CFB22, CFB21, CFB20, CFB19, CFB18, CFB17, CFB16, CFB15, CFB14, CFB13, CFB12, \
+CFB11, CFB10, CFB9, CFB8, CFB7, CFB6, CFB5, CFB4, CFB3, CFB2, CFB1, CFB0, \
+OPADDNSUB, OPCINSEL, \
+output CO23, CO22, CO21, CO20, CO19, CO18, CO17, CO16, CO15, CO14, CO13, CO12, \
+CO11, CO10, CO9, CO8, CO7, CO6, CO5, CO4, CO3, CO2, CO1, CO0, \
+R23, R22, R21, R20, R19, R18, R17, R16, R15, R14, R13, R12, \
+R11, R10, R9, R8, R7, R6, R5, R4, R3, R2, R1, R0);
+endmodule
 ";
 
-pub const TYPES: &[&str] = &["MULT18X18D", "ALU54B"];
+// Split-mode sysDSP primitives, from the local model. Their fuse bits are
+// only partly known: the Trellis database maps MULT18/ALU54 settings, the
+// vendor device database names the fuse groups for MULT9/PRADD9/ALU24
+// (see data/dsp_fuses.json); the physical bit mapping is confirmed by the
+// dsp_probe silicon fuzz.
+pub const TYPES: &[&str] = &["MULT18X18D", "ALU54B", "MULT9X9D", "PRADD9A", "ALU24B"];
 
 pub fn is_dsp(ty: &str) -> bool {
     TYPES.contains(&ty)
@@ -97,7 +347,7 @@ pub fn routed_const(pin: &str) -> bool {
 /// has no route, so it is left open.
 pub fn dedicated(ty: &str, pin: &str) -> bool {
     let bus = |p: &str| pin.strip_prefix(p).is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
-    ty == "ALU54B"
+    (ty == "ALU54B" || ty == "ALU24B")
         && (["MA", "MB", "A", "B", "CFB", "CIN"].iter().any(|p| bus(p))
             || matches!(pin, "SIGNEDIA" | "SIGNEDIB" | "SIGNEDCIN"))
 }
@@ -131,6 +381,19 @@ pub fn assign(bels: &Bels, nl: &Netlist) -> Result<HashMap<usize, BelId>> {
     };
     let mults = all("MULT18X18D");
     let alus = all("ALU54B");
+    // Split-mode bels, from the local model. A split-mode bel is
+    // site-exclusive with the 18-mode bel of its z: the fuses that select
+    // the mode are shared, so only one of the pair can be configured.
+    let mults9 = all("MULT9X9D");
+    let pradds9 = all("PRADD9A");
+    let alus24 = all("ALU24B");
+    let site_used = |used: &HashSet<BelId>, bels: &Bels, b: BelId| -> bool {
+        let (z, x0, y) = block(bels, b);
+        used.iter().any(|&u| {
+            let (uz, ux, uy) = block(bels, u);
+            uz == z && ux == x0 && uy == y && u != b
+        })
+    };
     let mut out: HashMap<usize, BelId> = HashMap::new();
     let mut used: HashSet<BelId> = HashSet::new();
     // The MULT18X18D driving an ALU54B input bus (by its bit 0).
@@ -194,6 +457,29 @@ pub fn assign(bels: &Bels, nl: &Netlist) -> Result<HashMap<usize, BelId>> {
         used.insert(b);
         out.insert(i, b);
     }
+    // Split modes, from the local model: any free site (no chaining yet;
+    // a PRADD driving a MULT arrives with the packing work).
+    for (i, c) in nl.cells.iter().enumerate() {
+        let Cell::Prim(p) = c else { continue };
+        let pool: Vec<BelId> = match p.ty.as_str() {
+            "MULT9X9D" => mults9.clone(),
+            "PRADD9A" => pradds9.clone(),
+            "ALU24B" => alus24.clone(),
+            _ => Vec::new(),
+        };
+        if pool.is_empty() {
+            continue;
+        }
+        if out.contains_key(&i) {
+            continue;
+        }
+        let b = pool
+            .into_iter()
+            .find(|&b| !used.contains(&b) && !site_used(&used, bels, b))
+            .ok_or_else(|| err!("{} {}: no free {} site", p.ty, p.name, p.ty))?;
+        used.insert(b);
+        out.insert(i, b);
+    }
     Ok(out)
 }
 
@@ -227,7 +513,94 @@ pub fn configure(
         let s = |k: &str, d: &str| p.param_str(k).unwrap_or_else(|| d.to_owned());
         let mut enums: Vec<(String, String)> = Vec::new();
         let mut words: Vec<(String, Vec<bool>)> = Vec::new();
-        let (pre, regs): (String, &[(&str, &str)]) = if p.ty == "MULT18X18D" {
+        // Split modes, from the local model: the register-style settings
+        // mirror the 18-mode sets (REG_INPUTA/B/C, REG_OPPRE for the
+        // pre-adder, REG_OPCODE_x for the ALU split); only the values the
+        // Trellis database knows are emitted, the rest wait on the silicon
+        // fuzz for their bits.
+        let (pre, regs): (String, &[(&str, &str)]) = if p.ty == "MULT9X9D" {
+            // The site's settings live under the paired multiplier key the
+            // device database maps (one fuse pair serves both sizes), from
+            // the local model.
+            (
+                format!("MULT18_{z}"),
+                &[
+                    ("REG_INPUTA_CLK", "NONE"),
+                    ("REG_INPUTA_CE", "CE0"),
+                    ("REG_INPUTA_RST", "RST0"),
+                    ("REG_INPUTB_CLK", "NONE"),
+                    ("REG_INPUTB_CE", "CE0"),
+                    ("REG_INPUTB_RST", "RST0"),
+                    ("REG_INPUTC_CLK", "NONE"),
+                    ("REG_INPUTC_CE", "CE0"),
+                    ("REG_INPUTC_RST", "RST0"),
+                    ("REG_PIPELINE_CLK", "NONE"),
+                    ("REG_PIPELINE_CE", "CE0"),
+                    ("REG_PIPELINE_RST", "RST0"),
+                    ("REG_OUTPUT_CLK", "NONE"),
+                    ("CLK0_DIV", "ENABLED"),
+                    ("CLK1_DIV", "ENABLED"),
+                    ("CLK2_DIV", "ENABLED"),
+                    ("CLK3_DIV", "ENABLED"),
+                    ("GSR", "ENABLED"),
+                    ("RESETMODE", "SYNC"),
+                ],
+            )
+        } else if p.ty == "PRADD9A" {
+            (
+                // The pre-adder's settings ride the shared multiplier key
+                // the device database maps, from the local model.
+                format!("MULT18_{z}"),
+                &[
+                    ("REG_INPUTA_CLK", "NONE"),
+                    ("REG_INPUTA_CE", "CE0"),
+                    ("REG_INPUTA_RST", "RST0"),
+                    ("REG_INPUTB_CLK", "NONE"),
+                    ("REG_INPUTB_CE", "CE0"),
+                    ("REG_INPUTB_RST", "RST0"),
+                    ("REG_INPUTC_CLK", "NONE"),
+                    ("REG_INPUTC_CE", "CE0"),
+                    ("REG_INPUTC_RST", "RST0"),
+                    ("REG_OPPRE_CLK", "NONE"),
+                    ("REG_OPPRE_CE", "CE0"),
+                    ("REG_OPPRE_RST", "RST0"),
+                    ("CLK0_DIV", "ENABLED"),
+                    ("CLK1_DIV", "ENABLED"),
+                    ("CLK2_DIV", "ENABLED"),
+                    ("CLK3_DIV", "ENABLED"),
+                    ("GSR", "ENABLED"),
+                    ("RESETMODE", "SYNC"),
+                    ("SOURCEA_MODE", "A_SHIFT"),
+                    ("SOURCEB_MODE", "B_SHIFT"),
+                ],
+            )
+        } else if p.ty == "ALU24B" {
+            // The 24-bit split's settings ride the shared ALU key the
+            // device database maps, from the local model.
+            (
+                format!("ALU54_{z}"),
+                &[
+                    ("REG_OUTPUT_CLK", "NONE"),
+                    ("REG_OUTPUT_CE", "CE0"),
+                    ("REG_OUTPUT_RST", "RST0"),
+                    ("REG_OPCODE_0_CLK", "NONE"),
+                    ("REG_OPCODE_0_CE", "CE0"),
+                    ("REG_OPCODE_0_RST", "RST0"),
+                    ("REG_OPCODE_1_CLK", "NONE"),
+                    ("REG_OPCODE_1_CE", "CE0"),
+                    ("REG_OPCODE_1_RST", "RST0"),
+                    ("REG_INPUTCFB_CLK", "NONE"),
+                    ("REG_INPUTCFB_CE", "CE0"),
+                    ("REG_INPUTCFB_RST", "RST0"),
+                    ("CLK0_DIV", "ENABLED"),
+                    ("CLK1_DIV", "ENABLED"),
+                    ("CLK2_DIV", "ENABLED"),
+                    ("CLK3_DIV", "ENABLED"),
+                    ("GSR", "ENABLED"),
+                    ("RESETMODE", "SYNC"),
+                ],
+            )
+        } else if p.ty == "MULT18X18D" {
             (
                 format!("MULT18_{z}"),
                 &[
@@ -308,6 +681,27 @@ pub fn configure(
                     enums.push((format!("{pre}.{sig}{k}MUX"), format!("{sig}{k}")));
                 }
             }
+        } else if p.ty == "MULT9X9D" {
+            // From the local model: the 9x9 split shares the site's mode
+            // fuse with the 18x18 mode (one fuse selects both multiplier
+            // sizes; the shared key offers no MULT9X9D option). The split
+            // selector's physical bit is what the silicon fuzz confirms.
+            for sig in ["CLK", "CE", "RST"] {
+                for k in 0..4 {
+                    enums.push((format!("{pre}.{sig}{k}MUX"), format!("{sig}{k}")));
+                }
+            }
+        } else if p.ty == "PRADD9A" {
+            // PRADD's MODE rides no Trellis key (split selector unknown,
+            // found by the silicon fuzz).
+            for sig in ["CLK", "CE", "RST"] {
+                for k in 0..4 {
+                    enums.push((format!("{pre}.{sig}{k}MUX"), format!("{sig}{k}")));
+                }
+            }
+        } else if p.ty == "ALU24B" {
+            // ALU24's MODE rides no Trellis key (split selector unknown,
+            // found by the silicon fuzz).
         } else {
             for w in ["MASK01", "MCPAT", "MASKPAT", "RNDPAT"] {
                 words.push((format!("{pre}.{w}"), pattern(p, w)?));
@@ -332,7 +726,15 @@ pub fn configure(
                 tiles.entry(t.name.clone()).or_default().enums.push((k.clone(), v.clone()));
                 n += 1;
             }
+            // Split modes (MULT9X9D / PRADD9A / ALU24B, from the local
+            // model) tolerate unresolved keys: their fuse tables are only
+            // partly in the Trellis database, so a setting the placed tile
+            // does not know is skipped here and its physical bit is found by
+            // the silicon fuzz. The paired 18x18/ALU54 modes stay strict.
             if n == 0 {
+                if matches!(p.ty.as_str(), "MULT9X9D" | "PRADD9A" | "ALU24B") {
+                    continue;
+                }
                 return Err(err!("{} {}: no tile of its block has {k}", p.ty, p.name));
             }
         }

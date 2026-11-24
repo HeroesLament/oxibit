@@ -488,6 +488,144 @@ fn alu54b(g: &mut Graph, z: usize) -> Template {
     b.done()
 }
 
+/// `Ecp5Bels::add_mult9x9d`. From the local model: MULT9X9D is the
+/// 9x9 split mode of the same slice pair MULT18X18D occupies: two
+/// 9-bit multipliers per slice half, sharing the C preload and the
+/// shift chains (SRIA/SRIB in, SROA/SROB/ROC out, 18-bit product).
+/// Shares the J wires of the MULT18 site.
+fn mult9x9d(g: &mut Graph, z: usize) -> Template {
+    let mut b = Builder::new(g, format!("MULT9_{z}"), "MULT9X9D", z as i32);
+    let j = Prefix::J;
+    for sig in ["CLK", "CE", "RST"] {
+        for i in 0..4 {
+            b.input_j(&format!("{sig}{i}"), j, "_MULT18");
+        }
+    }
+    for p in ["SIGNEDA", "SIGNEDB", "SIGNEDP", "SOURCEA", "SOURCEB"] {
+        b.input_j(p, j, "_MULT18");
+    }
+    for port in ["A", "B", "C", "SRIA", "SRIB"] {
+        for i in 0..9 {
+            b.input_j(&format!("{port}{i}"), j, "_MULT18");
+        }
+    }
+    for port in ["ROA", "ROB", "ROC", "SROA", "SROB"] {
+        for i in 0..9 {
+            b.output_j(&format!("{port}{i}"), j, "_MULT18");
+        }
+    }
+    for i in 0..18 {
+        b.output_j(&format!("P{i}"), j, "_MULT18");
+    }
+    b.done()
+}
+
+/// `Ecp5Bels::add_alu24b`. From the local model: ALU24B is the 24-bit
+/// ALU split of the ALU54B datapath (two ALUs per slice), with opcode
+/// registers per half (OP0..10), an INPUTCFB feedback register, and
+/// the same flag outputs as ALU54B.
+fn alu24b(g: &mut Graph, z: usize) -> Template {
+    let mut b = Builder::new(g, format!("ALU24_{z}"), "ALU24B", z as i32);
+    let j = Prefix::J;
+    for sig in ["CLK", "CE", "RST"] {
+        for i in 0..4 {
+            b.input_j(&format!("{sig}{i}"), j, "_ALU54");
+        }
+    }
+    for p in ["SIGNEDIA", "SIGNEDIB"] {
+        b.input_j(p, j, "_ALU54");
+    }
+    for port in ["MA", "MB"] {
+        for i in 0..18 {
+            b.input_j(&format!("{port}{i}"), j, "_ALU54");
+        }
+    }
+    for port in ["C", "CFB"] {
+        for i in 0..24 {
+            b.input_j(&format!("{port}{i}"), j, "_ALU54");
+        }
+    }
+    // CIN shares the C pins' physical wires (the C fabric bus), from the
+    // local model: in the 24-bit split the C operand feeds the carry-in
+    // mux selected by OPCINSEL.
+    for i in 0..24 {
+        b.input(&format!("CIN{i}"), &format!("JC{i}_ALU54"));
+    }
+    // OPADDNSUB/OPCINSEL ride the ALU site's OP fabric wires (OP0..OP10 in
+    // the 54-bit mode; in the 24-bit split they are the two opcode mux
+    // selects), from the local model.
+    for (pin, wire) in [("OPADDNSUB", "OP0"), ("OPCINSEL", "OP1")] {
+        b.input(pin, &format!("J{wire}_ALU54"));
+    }
+    for port in ["R", "CO"] {
+        for i in 0..24 {
+            b.output_j(&format!("{port}{i}"), j, "_ALU54");
+        }
+    }
+    b.done()
+}
+
+/// `Ecp5Bels::add_pradd9a`. From the local model: PRADD9A is the 9-bit
+/// pre-adder feeding a MULT9X9D A operand. Control space (to be mapped
+/// to fuses): SOURCEA_MODE A_SHIFT/C_SHIFT/A_C_DYNAMIC/HIGHSPEED,
+/// SOURCEB_MODE SHIFT/PARALLEL/INTERNAL, FB_MUX SHIFT/SHIFT_BYPASS/
+/// DISABLED, SYMMETRY_MODE DIRECT/INTERNAL, plus REG_OPPRE (the
+/// pre-adder output register) and REG_INPUTA/B/C.
+fn pradd9a(g: &mut Graph, z: usize) -> Template {
+    let mut b = Builder::new(g, format!("PRADD9_{z}"), "PRADD9A", z as i32);
+    let j = Prefix::J;
+    for sig in ["CLK", "CE", "RST"] {
+        for i in 0..4 {
+            b.input_j(&format!("{sig}{i}"), j, "_MULT18");
+        }
+    }
+    // The pre-adder shares the multiplier site's operand pins: PA/PB/C ride
+    // the same physical A/B/C buses as the multiplier's operands, from the
+    // local model.
+    for (pin, wire) in [("PA", "A"), ("PB", "B")] {
+        for i in 0..9 {
+            b.input(&format!("{pin}{i}"), &format!("J{wire}{i}_MULT18"));
+        }
+    }
+    for i in 0..9 {
+        b.input_j(&format!("C{i}"), j, "_MULT18");
+        b.input_j(&format!("SRIA{i}"), j, "_MULT18");
+        b.input_j(&format!("SRIB{i}"), j, "_MULT18");
+        b.output_j(&format!("SROA{i}"), j, "_MULT18");
+        b.output_j(&format!("SROB{i}"), j, "_MULT18");
+        b.output_j(&format!("PO{i}"), j, "_MULT18");
+    }
+    for p in ["SOURCEA", "OPPRE"] {
+        b.input_j(p, j, "_MULT18");
+    }
+    b.done()
+}
+
+/// `Ecp5Bels::add_pradd18a`. From the local model: the 18-bit
+/// pre-adder, same structure as PRADD9A at full operand width,
+/// feeding a MULT18X18D.
+fn pradd18a(g: &mut Graph, z: usize) -> Template {
+    let mut b = Builder::new(g, format!("PRADD18_{z}"), "PRADD18A", z as i32);
+    let j = Prefix::J;
+    for sig in ["CLK", "CE", "RST"] {
+        for i in 0..4 {
+            b.input_j(&format!("{sig}{i}"), j, "_MULT18");
+        }
+    }
+    for port in ["PA", "PB", "C", "SRIA", "SRIB", "SROA", "SROB"] {
+        for i in 0..18 {
+            b.input_j(&format!("{port}{i}"), j, "_MULT18");
+        }
+    }
+    for p in ["SOURCEA", "SOURCEB", "CEOPPRE", "CASCREG"] {
+        b.input_j(p, j, "_MULT18");
+    }
+    for i in 0..18 {
+        b.output_j(&format!("PO{i}"), j, "_MULT18");
+    }
+    b.done()
+}
+
 /// `Ecp5Bels::add_pll`.
 fn pll(g: &mut Graph, quad: &str) -> Template {
     let mut b = Builder::new(g, format!("EHXPLL_{quad}"), "EHXPLLL", 0);
@@ -768,6 +906,14 @@ enum Key {
     Bram(usize),
     Mult18(usize),
     Alu54(usize),
+    // The 9x9 split multiplier, 24-bit ALU split, and the pre-adders.
+    // Port lists from the local model; fuse bits for these modes are not
+    // yet known (Trellis maps only the MULT18/ALU54 bits in MIB_DSP2),
+    // so they stay out of dsp.rs TYPES until verified on silicon.
+    Mult9(usize),
+    Alu24(usize),
+    Pradd9(usize),
+    Pradd18(usize),
     Pll(&'static str),
     Dcu,
     Extref,
@@ -837,12 +983,38 @@ fn tile_bels(ty: &str, mode: SliceMode) -> Vec<(Key, i16, i16)> {
         "MIB_EBR2" => v.push(here(Key::Bram(1))),
         "MIB_EBR4" => v.push(here(Key::Bram(2))),
         "MIB_EBR6" => v.push(here(Key::Bram(3))),
-        "MIB_DSP0" => v.push(here(Key::Mult18(0))),
-        "MIB_DSP1" => v.push(here(Key::Mult18(1))),
-        "MIB_DSP4" => v.push(here(Key::Mult18(4))),
-        "MIB_DSP5" => v.push(here(Key::Mult18(5))),
-        "MIB_DSP3" => v.push(here(Key::Alu54(3))),
-        "MIB_DSP7" => v.push(here(Key::Alu54(7))),
+        // Split-mode bels at the same sites, from the local model: a
+        // MULT9_x / PRADD9_x pair lives where MULT18_x is, an ALU24_x
+        // where ALU54_x is. The two are fuse-exclusive per site; only one
+        // family is emitted per tile at a time (the DSP packer picks).
+        "MIB_DSP0" => {
+            v.push(here(Key::Mult18(0)));
+            v.push(here(Key::Mult9(0)));
+            v.push(here(Key::Pradd9(0)));
+        }
+        "MIB_DSP1" => {
+            v.push(here(Key::Mult18(1)));
+            v.push(here(Key::Mult9(1)));
+            v.push(here(Key::Pradd9(1)));
+        }
+        "MIB_DSP4" => {
+            v.push(here(Key::Mult18(4)));
+            v.push(here(Key::Mult9(4)));
+            v.push(here(Key::Pradd9(4)));
+        }
+        "MIB_DSP5" => {
+            v.push(here(Key::Mult18(5)));
+            v.push(here(Key::Mult9(5)));
+            v.push(here(Key::Pradd9(5)));
+        }
+        "MIB_DSP3" => {
+            v.push(here(Key::Alu54(3)));
+            v.push(here(Key::Alu24(3)));
+        }
+        "MIB_DSP7" => {
+            v.push(here(Key::Alu54(7)));
+            v.push(here(Key::Alu24(7)));
+        }
         "PLL0_UL" => v.push((Key::Pll("UL"), 1, 0)),
         "PLL0_LL" => v.push((Key::Pll("LL"), 0, -1)),
         "PLL0_LR" => v.push((Key::Pll("LR"), 0, -1)),
@@ -1039,6 +1211,10 @@ fn make(g: &mut Graph, db: &DeviceDb, key: &Key) -> Result<Template> {
         Key::Bram(z) => bram(g, z),
         Key::Mult18(z) => mult18(g, z),
         Key::Alu54(z) => alu54b(g, z),
+        Key::Mult9(z) => mult9x9d(g, z),
+        Key::Alu24(z) => alu24b(g, z),
+        Key::Pradd9(z) => pradd9a(g, z),
+        Key::Pradd18(z) => pradd18a(g, z),
         Key::Pll(quad) => pll(g, quad),
         Key::Dcu => dcu(g, &db.tile_bits("DCU0")?.fixed_conns),
         Key::Extref => extref(g),

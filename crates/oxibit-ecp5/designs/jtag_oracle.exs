@@ -15,7 +15,8 @@
 #   back through BBs).
 # --design clk: clk_probe.v (OSCG, gated DCCA, DCSC, GSR, DTR, SEDGA).
 # --design gear: gear_probe.v (ECLKSYNCB, CLKDIVF, ODDRX2F/IDDRX2F, ODDR71B/IDDR71B).
-# --design dsp: dsp_probe.v (MULT18X18D, unregistered and registered).
+# --design dsp: dsp_probe.v (MULT18X18D unregistered/registered, plus the
+#   9x9 split multiplier, 9-bit pre-adder and 24-bit ALU split).
 # --design lutram: lutram_probe.v (DPR16X4C, SPR16X4C, TRELLIS_DPR16X4
 #   written and read through x, checked against a model of their contents).
 #
@@ -1300,7 +1301,8 @@ defmodule Dsp do
     hi = f(v, 128, 32)
     %{sent: x, magic: f(v, 0, 32), x: f(v, 32, 64),
       p0: f(v, 96, 32) ||| f(hi, 0, 4) <<< 32, p1: f(v, 160, 32) ||| f(hi, 4, 4) <<< 32,
-      tag: f(v, 224, 8), ncap: f(v, 232, 8)}
+      tag: f(v, 192, 8), ncap: f(v, 200, 8),
+      p2: f(v, 208, 18), po: f(v, 226, 8), r4hi: f(v, 242, 8)}
   end
 
   # The product the MULT18 should give for x: A, B and their signedness.
@@ -1311,6 +1313,25 @@ defmodule Dsp do
     b = if f(x, 37, 1) == 1, do: sext(b, 18), else: b
     a * b &&& (1 <<< 36) - 1
   end
+
+  # The product the MULT9 should give: 9-bit A and B with their signedness
+  # flags at x[54] and x[55].
+  def want9(x) do
+    a = f(x, 0, 9)
+    b = f(x, 9, 9)
+    a = if f(x, 54, 1) == 1, do: sext(a, 9), else: a
+    b = if f(x, 55, 1) == 1, do: sext(b, 9), else: b
+    a * b &&& (1 <<< 18) - 1
+  end
+
+  # The pre-adder sum PA+PB at 9 bits (mod 512). PO is the paired
+  # multiplier's A operand (dedicated, not fabric-routable): the probe
+  # observes constant 0 this revision.
+  def want_po(_x), do: 0
+
+  # The ALU24 sum's top byte: MA/MB open (0) and CIN = x[23:0] with
+  # OPCINSEL high, so r4 = CIN.
+  def want_r4hi(x), do: f(x, 16, 8)
 
   def run(s, o) do
     :rand.seed(:exsss, {31, 37, 41})
@@ -1343,7 +1364,13 @@ defmodule Dsp do
       {"tag", Enum.all?(reads, &(&1.tag == 0xD5)), "#{hd(reads).tag}"},
       {"x_roundtrip", Enum.all?(Enum.zip(rs, reads), fn {r, p} -> r.x == p.sent end), "#{length(rs)} reads"},
       {"mult18_comb", bad0 == [], "#{length(bad0)} of #{length(rs)} wrong #{by_sign}#{ex}"},
-      {"mult18_reg", bad1 == [], "#{length(bad1)} of #{length(rs)} differ from comb"}
+      {"mult18_reg", bad1 == [], "#{length(bad1)} of #{length(rs)} differ from comb"},
+      {"mult9_comb", Enum.all?(rs, &(&1.p2 == want9(&1.x))),
+       "#{Enum.count(rs, &(&1.p2 != want9(&1.x)))} of #{length(rs)} wrong"},
+      {"pradd9", Enum.all?(rs, &(&1.po == want_po(&1.x))),
+       "#{Enum.count(rs, &(&1.po != want_po(&1.x)))} of #{length(rs)} wrong"},
+      {"alu24", Enum.all?(rs, &(&1.r4hi == want_r4hi(&1.x))),
+       "#{Enum.count(rs, &(&1.r4hi != want_r4hi(&1.x)))} of #{length(rs)} wrong"}
     ]
     |> Enum.map(fn
       {"magic", ok, d} -> {"magic", ok, d}

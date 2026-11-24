@@ -1,0 +1,4386 @@
+{
+ "PRADD9": {
+  "REG_INPUTB_CLK=NONE": [
+   [
+    5,
+    24
+   ]
+  ],
+  "REG_INPUTA_CLK=NONE": [
+   [
+    5,
+    24
+   ],
+   [
+    7,
+    4
+   ]
+  ],
+  "SOURCEA_MODE=A_C_DYNAMIC": [
+   [
+    5,
+    24
+   ]
+  ],
+  "SOURCEA_MODE=HIGHSPEED": [
+   [
+    7,
+    5
+   ]
+  ],
+  "SOURCEA_MODE=C_SHIFT": [
+   [
+    5,
+    24
+   ]
+  ],
+  "SOURCEB_MODE=SHIFT": [
+   [
+    5,
+    24
+   ]
+  ],
+  "SOURCEB_MODE=INTERNAL": [
+   [
+    7,
+    5
+   ]
+  ],
+  "SIG=RST0": [
+   [
+    5,
+    20
+   ]
+  ],
+  "1=RST0": [
+   [
+    7,
+    5
+   ],
+   [
+    7,
+    7
+   ]
+  ],
+  "SIG=RST1": [
+   [
+    5,
+    20
+   ]
+  ],
+  "1=RST1": [
+   [
+    7,
+    5
+   ],
+   [
+    7,
+    7
+   ]
+  ],
+  "SIG=RST2": [
+   [
+    5,
+    20
+   ]
+  ],
+  "1=RST2": [
+   [
+    7,
+    5
+   ],
+   [
+    7,
+    7
+   ]
+  ],
+  "SIG=RST3": [
+   [
+    5,
+    20
+   ]
+  ],
+  "1=RST3": [
+   [
+    7,
+    5
+   ],
+   [
+    7,
+    7
+   ]
+  ],
+  "SIG=CE0": [
+   [
+    5,
+    20
+   ]
+  ],
+  "1=CE0": [
+   [
+    7,
+    5
+   ],
+   [
+    7,
+    7
+   ]
+  ],
+  "SIG=CE1": [
+   [
+    5,
+    20
+   ]
+  ],
+  "1=CE1": [
+   [
+    7,
+    5
+   ],
+   [
+    7,
+    7
+   ]
+  ],
+  "SIG=CE2": [
+   [
+    5,
+    20
+   ]
+  ],
+  "1=CE2": [
+   [
+    7,
+    5
+   ],
+   [
+    7,
+    7
+   ]
+  ],
+  "SIG=CE3": [
+   [
+    5,
+    20
+   ]
+  ],
+  "1=CE3": [
+   [
+    7,
+    5
+   ],
+   [
+    7,
+    7
+   ]
+  ],
+  "REG_INPUTC_CLK=NONE": [
+   [
+    4,
+    24
+   ],
+   [
+    5,
+    3
+   ]
+  ],
+  "GSR=DISABLED": [
+   [
+    5,
+    24
+   ],
+   [
+    7,
+    5
+   ]
+  ],
+  "INV=SOURCEA": [
+   [
+    5,
+    20
+   ],
+   [
+    7,
+    7
+   ]
+  ],
+  "INV=OPPRE": [
+   [
+    5,
+    20
+   ]
+  ],
+  "REG_OPPRE_CLK=NONE": [
+   [
+    5,
+    24
+   ]
+  ],
+  "CAS_MATCH_REG=FALSE": [
+   [
+    7,
+    5
+   ]
+  ],
+  "INV=CLK0": [
+   [
+    5,
+    20
+   ]
+  ],
+  "0=CLK0": [
+   [
+    7,
+    5
+   ],
+   [
+    7,
+    7
+   ]
+  ],
+  "INV=CLK1": [
+   [
+    5,
+    20
+   ]
+  ],
+  "0=CLK1": [
+   [
+    7,
+    5
+   ],
+   [
+    7,
+    7
+   ]
+  ],
+  "INV=CLK2": [
+   [
+    5,
+    20
+   ]
+  ],
+  "0=CLK2": [
+   [
+    7,
+    5
+   ],
+   [
+    7,
+    7
+   ]
+  ],
+  "INV=CLK3": [
+   [
+    5,
+    20
+   ]
+  ],
+  "0=CLK3": [
+   [
+    7,
+    5
+   ],
+   [
+    7,
+    7
+   ]
+  ],
+  "CLK0_DIV=DISABLED": [
+   [
+    5,
+    24
+   ],
+   [
+    7,
+    5
+   ]
+  ],
+  "CLK1_DIV=DISABLED": [
+   [
+    5,
+    24
+   ],
+   [
+    7,
+    5
+   ]
+  ],
+  "CLK2_DIV=DISABLED": [
+   [
+    5,
+    24
+   ],
+   [
+    7,
+    5
+   ]
+  ],
+  "CLK3_DIV=DISABLED": [
+   [
+    5,
+    24
+   ],
+   [
+    7,
+    5
+   ]
+  ],
+  "SOURCEA_MODE=A_SHIFT": [
+   [
+    4,
+    20
+   ],
+   [
+    7,
+    4
+   ]
+  ],
+  "SIG=SOURCEA": [
+   [
+    5,
+    20
+   ]
+  ],
+  "FB_MUX=SHIFT_BYPASS": [
+   [
+    5,
+    24
+   ],
+   [
+    7,
+    5
+   ]
+  ],
+  "FB_MUX=SHIFT": [
+   [
+    5,
+    24
+   ]
+  ],
+  "SIG=PB8": [
+   [
+    5,
+    20
+   ]
+  ],
+  "SIG=PB7": [
+   [
+    7,
+    5
+   ]
+  ],
+  "SIG=PB6": [
+   [
+    7,
+    5
+   ]
+  ],
+  "SIG=PB5": [
+   [
+    7,
+    5
+   ]
+  ],
+  "SIG=PB4": [
+   [
+    7,
+    5
+   ]
+  ],
+  "SIG=PB3": [
+   [
+    7,
+    5
+   ]
+  ],
+  "SIG=PB2": [
+   [
+    7,
+    5
+   ]
+  ],
+  "SIG=PB1": [
+   [
+    7,
+    5
+   ]
+  ],
+  "SIG=PB0": [
+   [
+    7,
+    5
+   ]
+  ],
+  "1=PB8": [
+   [
+    7,
+    5
+   ]
+  ],
+  "1=PB7": [
+   [
+    7,
+    5
+   ]
+  ],
+  "1=PB6": [
+   [
+    7,
+    5
+   ]
+  ],
+  "1=PB5": [
+   [
+    7,
+    5
+   ]
+  ],
+  "1=PB4": [
+   [
+    7,
+    5
+   ]
+  ],
+  "1=PB3": [
+   [
+    7,
+    5
+   ]
+  ],
+  "1=PB2": [
+   [
+    7,
+    5
+   ]
+  ],
+  "1=PB1": [
+   [
+    7,
+    5
+   ]
+  ],
+  "1=PB0": [
+   [
+    7,
+    4
+   ]
+  ],
+  "SOURCEB_MODE=PARALLEL": [
+   [
+    7,
+    5
+   ]
+  ],
+  "SYMMETRY_MODE=DIRECT": [
+   [
+    5,
+    24
+   ]
+  ],
+  "1=SOURCEA": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTC_CE=CE0": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTC_CE=CE2": [
+   [
+    7,
+    7
+   ]
+  ],
+  "REG_INPUTC_CE=CE1": [
+   [
+    7,
+    7
+   ]
+  ],
+  "REG_INPUTA_CE=CE0": [
+   [
+    5,
+    24
+   ]
+  ],
+  "REG_INPUTA_CE=CE2": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTB_CE=CE0": [
+   [
+    5,
+    24
+   ]
+  ],
+  "REG_INPUTB_CE=CE2": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTA_CE=CE1": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTB_CE=CE1": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPPRE_CE=CE0": [
+   [
+    5,
+    24
+   ]
+  ],
+  "REG_OPPRE_CE=CE2": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPPRE_CE=CE1": [
+   [
+    7,
+    5
+   ]
+  ],
+  "RESETMODE=ASYNC": [
+   [
+    5,
+    24
+   ]
+  ],
+  "REG_INPUTA_RST=RST0": [
+   [
+    5,
+    24
+   ]
+  ],
+  "REG_INPUTA_RST=RST2": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTA_RST=RST1": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTB_RST=RST0": [
+   [
+    5,
+    24
+   ]
+  ],
+  "REG_INPUTB_RST=RST2": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTB_RST=RST1": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTC_RST=RST0": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTC_RST=RST2": [
+   [
+    7,
+    7
+   ]
+  ],
+  "REG_INPUTC_RST=RST1": [
+   [
+    7,
+    7
+   ]
+  ],
+  "HIGHSPEED_CLK=CLK0": [
+   [
+    5,
+    24
+   ],
+   [
+    7,
+    5
+   ]
+  ],
+  "HIGHSPEED_CLK=CLK2": [
+   [
+    7,
+    5
+   ]
+  ],
+  "HIGHSPEED_CLK=CLK1": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPPRE_CLK=CLK0": [
+   [
+    5,
+    24
+   ]
+  ],
+  "REG_OPPRE_CLK=CLK1": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPPRE_CLK=CLK2": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPPRE_RST=RST0": [
+   [
+    5,
+    24
+   ]
+  ],
+  "REG_OPPRE_RST=RST2": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPPRE_RST=RST1": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTC_CLK=CLK0": [
+   [
+    5,
+    24
+   ]
+  ],
+  "REG_INPUTC_CLK=CLK1": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTC_CLK=CLK2": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTB_CLK=CLK0": [
+   [
+    5,
+    24
+   ]
+  ],
+  "REG_INPUTB_CLK=CLK1": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTB_CLK=CLK2": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTA_CLK=CLK0": [
+   [
+    5,
+    24
+   ]
+  ],
+  "REG_INPUTA_CLK=CLK1": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTA_CLK=CLK2": [
+   [
+    7,
+    5
+   ]
+  ]
+ },
+ "PRADD18": {
+  "SOURCEA_MODE=A_C_DYNAMIC": [
+   [
+    7,
+    5
+   ]
+  ],
+  "SOURCEA_MODE=HIGHSPEED": [
+   [
+    7
+   ]
+  ],
+  "SOURCEA_MODE=C_SHIFT": [
+   [
+    5,
+    24
+   ],
+   [
+    7,
+    5
+   ]
+  ],
+  "SOURCEB_MODE=SHIFT": [
+   [
+    7,
+    5
+   ]
+  ],
+  "SOURCEB_MODE=INTERNAL": [
+   [
+    7
+   ]
+  ],
+  "SIG=RST0": [
+   [
+    5,
+    20
+   ]
+  ],
+  "1=RST0": [
+   [
+    7,
+    7
+   ]
+  ],
+  "SIG=RST1": [
+   [
+    5,
+    20
+   ]
+  ],
+  "1=RST1": [
+   [
+    7,
+    7
+   ]
+  ],
+  "SIG=RST2": [
+   [
+    5,
+    20
+   ]
+  ],
+  "1=RST2": [
+   [
+    7,
+    7
+   ]
+  ],
+  "SIG=RST3": [
+   [
+    5,
+    20
+   ]
+  ],
+  "1=RST3": [
+   [
+    7,
+    7
+   ]
+  ],
+  "SIG=CE0": [
+   [
+    5,
+    20
+   ]
+  ],
+  "1=CE0": [
+   [
+    7,
+    7
+   ]
+  ],
+  "SIG=CE1": [
+   [
+    5,
+    20
+   ]
+  ],
+  "1=CE1": [
+   [
+    7,
+    7
+   ]
+  ],
+  "SIG=CE2": [
+   [
+    5,
+    20
+   ]
+  ],
+  "1=CE2": [
+   [
+    7,
+    7
+   ]
+  ],
+  "SIG=CE3": [
+   [
+    5,
+    20
+   ]
+  ],
+  "1=CE3": [
+   [
+    7,
+    7
+   ]
+  ],
+  "REG_INPUTC_CLK=NONE": [
+   [
+    5,
+    3
+   ],
+   [
+    7,
+    7
+   ]
+  ],
+  "GSR=DISABLED": [
+   [
+    7,
+    5
+   ]
+  ],
+  "INV=SOURCEA": [
+   [
+    7,
+    5
+   ],
+   [
+    7,
+    7
+   ]
+  ],
+  "INV=OPPRE": [
+   [
+    7
+   ]
+  ],
+  "REG_OPPRE_CLK=NONE": [
+   [
+    7
+   ]
+  ],
+  "REG_INPUTA_CLK=NONE": [
+   [],
+   [
+    7,
+    4
+   ]
+  ],
+  "CAS_MATCH_REG=FALSE": [
+   [
+    7,
+    5
+   ]
+  ],
+  "INV=CLK0": [
+   [
+    5,
+    20
+   ]
+  ],
+  "0=CLK0": [
+   [
+    7,
+    7
+   ]
+  ],
+  "INV=CLK1": [
+   [
+    5,
+    20
+   ]
+  ],
+  "0=CLK1": [
+   [
+    7,
+    7
+   ]
+  ],
+  "INV=CLK2": [
+   [
+    5,
+    20
+   ]
+  ],
+  "0=CLK2": [
+   [
+    7,
+    7
+   ]
+  ],
+  "INV=CLK3": [
+   [
+    5,
+    20
+   ]
+  ],
+  "0=CLK3": [
+   [
+    7,
+    7
+   ]
+  ],
+  "CLK0_DIV=DISABLED": [
+   [
+    7,
+    5
+   ]
+  ],
+  "CLK1_DIV=DISABLED": [
+   [
+    7,
+    5
+   ]
+  ],
+  "CLK2_DIV=DISABLED": [
+   [
+    7,
+    5
+   ]
+  ],
+  "CLK3_DIV=DISABLED": [
+   [
+    7,
+    5
+   ]
+  ],
+  "SOURCEA_MODE=A_SHIFT": [
+   [
+    4,
+    20
+   ],
+   [
+    7,
+    4
+   ]
+  ],
+  "SIG=SOURCEA": [
+   [
+    5,
+    20
+   ]
+  ],
+  "FB_MUX=SHIFT_BYPASS": [
+   [
+    7
+   ]
+  ],
+  "FB_MUX=SHIFT": [
+   [
+    7,
+    5
+   ]
+  ],
+  "SIG=PB17": [
+   [
+    5,
+    20
+   ]
+  ],
+  "SIG=PB16": [
+   [
+    7,
+    5
+   ]
+  ],
+  "SIG=PB15": [
+   [
+    7,
+    5
+   ]
+  ],
+  "SIG=PB14": [
+   [
+    7,
+    5
+   ]
+  ],
+  "SIG=PB13": [
+   [
+    7,
+    5
+   ]
+  ],
+  "SIG=PB12": [
+   [
+    7,
+    5
+   ]
+  ],
+  "SIG=PB11": [
+   [
+    7,
+    5
+   ]
+  ],
+  "SIG=PB10": [
+   [
+    7,
+    5
+   ]
+  ],
+  "SIG=PB9": [
+   [
+    7,
+    5
+   ]
+  ],
+  "SIG=PB8": [
+   [
+    7,
+    5
+   ]
+  ],
+  "SIG=PB7": [
+   [
+    7,
+    5
+   ]
+  ],
+  "SIG=PB6": [
+   [
+    7,
+    5
+   ]
+  ],
+  "SIG=PB5": [
+   [
+    7,
+    5
+   ]
+  ],
+  "SIG=PB4": [
+   [
+    7,
+    5
+   ]
+  ],
+  "SIG=PB3": [
+   [
+    7,
+    5
+   ]
+  ],
+  "SIG=PB2": [
+   [
+    7,
+    5
+   ]
+  ],
+  "SIG=PB1": [
+   [
+    7,
+    5
+   ]
+  ],
+  "SIG=PB0": [
+   [
+    7,
+    5
+   ]
+  ],
+  "1=PB17": [
+   [
+    7,
+    5
+   ]
+  ],
+  "1=PB16": [
+   [
+    7,
+    5
+   ]
+  ],
+  "1=PB15": [
+   [
+    7,
+    5
+   ]
+  ],
+  "1=PB14": [
+   [
+    7,
+    5
+   ]
+  ],
+  "1=PB13": [
+   [
+    7,
+    5
+   ]
+  ],
+  "1=PB12": [
+   [
+    7,
+    5
+   ]
+  ],
+  "1=PB11": [
+   [
+    7,
+    5
+   ]
+  ],
+  "1=PB10": [
+   [
+    7,
+    5
+   ]
+  ],
+  "1=PB9": [
+   [
+    7,
+    5
+   ]
+  ],
+  "1=PB8": [
+   [
+    7,
+    5
+   ]
+  ],
+  "1=PB7": [
+   [
+    7,
+    5
+   ]
+  ],
+  "1=PB6": [
+   [
+    7,
+    5
+   ]
+  ],
+  "1=PB5": [
+   [
+    7,
+    5
+   ]
+  ],
+  "1=PB4": [
+   [
+    7,
+    5
+   ]
+  ],
+  "1=PB3": [
+   [
+    7,
+    5
+   ]
+  ],
+  "1=PB2": [
+   [
+    7,
+    5
+   ]
+  ],
+  "1=PB1": [
+   [
+    7,
+    5
+   ]
+  ],
+  "1=PB0": [
+   [
+    7,
+    4
+   ]
+  ],
+  "SOURCEB_MODE=PARALLEL": [
+   [
+    7,
+    7
+   ]
+  ],
+  "SYMMETRY_MODE=DIRECT": [
+   [
+    7
+   ]
+  ],
+  "REG_INPUTB_CLK=NONE": [
+   []
+  ],
+  "1=SOURCEA": [
+   [
+    7,
+    7
+   ]
+  ],
+  "REG_INPUTB_CE=CE0": [
+   [
+    5,
+    24
+   ]
+  ],
+  "REG_INPUTB_CE=CE1": [
+   [
+    7
+   ]
+  ],
+  "REG_INPUTA_CE=CE0": [
+   [
+    5,
+    24
+   ]
+  ],
+  "REG_INPUTA_CE=CE2": [
+   [
+    7
+   ]
+  ],
+  "REG_INPUTA_CE=CE1": [
+   [
+    7
+   ]
+  ],
+  "REG_INPUTB_CE=CE2": [
+   [
+    7
+   ]
+  ],
+  "REG_OPPRE_CE=CE0": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPPRE_CE=CE2": [
+   [
+    7
+   ]
+  ],
+  "REG_OPPRE_CE=CE1": [
+   [
+    7
+   ]
+  ],
+  "RESETMODE=ASYNC": [
+   [
+    7
+   ],
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTA_RST=RST0": [
+   [
+    5,
+    24
+   ]
+  ],
+  "REG_INPUTA_RST=RST2": [
+   [
+    7
+   ]
+  ],
+  "REG_INPUTA_RST=RST1": [
+   [
+    7
+   ]
+  ],
+  "REG_INPUTB_RST=RST0": [
+   [
+    5,
+    24
+   ]
+  ],
+  "REG_INPUTB_RST=RST1": [
+   [
+    7
+   ]
+  ],
+  "REG_INPUTB_RST=RST2": [
+   [
+    7
+   ]
+  ],
+  "HIGHSPEED_CLK=CLK0": [
+   [
+    7,
+    5
+   ]
+  ],
+  "HIGHSPEED_CLK=CLK2": [
+   [
+    7,
+    5
+   ]
+  ],
+  "HIGHSPEED_CLK=CLK1": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPPRE_CLK=CLK0": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPPRE_CLK=CLK1": [
+   [
+    7
+   ]
+  ],
+  "REG_OPPRE_CLK=CLK2": [
+   [
+    7
+   ]
+  ],
+  "REG_OPPRE_RST=RST0": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPPRE_RST=RST2": [
+   [
+    7
+   ]
+  ],
+  "REG_OPPRE_RST=RST1": [
+   [
+    7
+   ]
+  ],
+  "REG_INPUTB_CLK=CLK0": [
+   [
+    5,
+    24
+   ]
+  ],
+  "REG_INPUTB_CLK=CLK1": [
+   [
+    7
+   ]
+  ],
+  "REG_INPUTB_CLK=CLK2": [
+   [
+    7
+   ]
+  ],
+  "REG_INPUTA_CLK=CLK0": [
+   [
+    5,
+    24
+   ]
+  ],
+  "REG_INPUTA_CLK=CLK1": [
+   [
+    7
+   ]
+  ],
+  "REG_INPUTA_CLK=CLK2": [
+   [
+    7
+   ]
+  ]
+ },
+ "MULT9": {
+  "SOURCEB_MODE=B_C_DYNAMIC": [
+   [
+    5,
+    24
+   ],
+   [
+    7,
+    5
+   ]
+  ],
+  "SOURCEB_MODE=HIGHSPEED": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTB_CLK=NONE": [
+   [
+    5,
+    24
+   ]
+  ],
+  "SOURCEB_MODE=C_SHIFT": [
+   [
+    5,
+    24
+   ]
+  ],
+  "SIG=SOURCEB": [
+   [
+    5,
+    20
+   ]
+  ],
+  "INV=SOURCEB": [
+   [
+    5,
+    20
+   ],
+   [
+    7,
+    4
+   ]
+  ],
+  "SOURCEB_MODE=B_SHIFT": [
+   [
+    7,
+    5
+   ],
+   [
+    7,
+    7
+   ]
+  ],
+  "1=SOURCEB": [
+   [
+    4,
+    24
+   ]
+  ],
+  "0=SOURCEB": [
+   [
+    4,
+    24
+   ]
+  ],
+  "SIG=SOURCEA": [
+   [
+    5,
+    20
+   ],
+   [
+    7,
+    5
+   ]
+  ],
+  "INV=SOURCEA": [
+   [
+    7,
+    5
+   ]
+  ],
+  "1=SOURCEA": [
+   [
+    5,
+    20
+   ]
+  ],
+  "SIG=RST0": [
+   [
+    5,
+    20
+   ]
+  ],
+  "1=RST0": [
+   [
+    7,
+    7
+   ]
+  ],
+  "SIG=RST1": [
+   [
+    5,
+    20
+   ]
+  ],
+  "1=RST1": [
+   [
+    7,
+    7
+   ]
+  ],
+  "SIG=RST2": [
+   [
+    5,
+    20
+   ]
+  ],
+  "1=RST2": [
+   [
+    7,
+    7
+   ]
+  ],
+  "SIG=RST3": [
+   [
+    5,
+    20
+   ]
+  ],
+  "1=RST3": [
+   [
+    7,
+    7
+   ]
+  ],
+  "SIG=CE0": [
+   [
+    5,
+    20
+   ]
+  ],
+  "1=CE0": [
+   [
+    7,
+    7
+   ]
+  ],
+  "SIG=CE1": [
+   [
+    5,
+    20
+   ]
+  ],
+  "1=CE1": [
+   [
+    7,
+    7
+   ]
+  ],
+  "SIG=CE2": [
+   [
+    5,
+    20
+   ]
+  ],
+  "1=CE2": [
+   [
+    7,
+    7
+   ]
+  ],
+  "SIG=CE3": [
+   [
+    5,
+    20
+   ]
+  ],
+  "1=CE3": [
+   [
+    7,
+    7
+   ]
+  ],
+  "REG_INPUTC_CLK=NONE": [
+   [
+    4,
+    24
+   ],
+   [
+    5,
+    3
+   ]
+  ],
+  "GSR=DISABLED": [
+   [
+    7,
+    5
+   ]
+  ],
+  "INV=SIGNEDB": [
+   [
+    5,
+    20
+   ]
+  ],
+  "0=SIGNEDB": [
+   [
+    7,
+    5
+   ]
+  ],
+  "INV=SIGNEDA": [
+   [
+    5,
+    20
+   ]
+  ],
+  "0=SIGNEDA": [
+   [
+    7,
+    5
+   ]
+  ],
+  "0=SOURCEA": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTA_CLK=NONE": [
+   [
+    5,
+    24
+   ],
+   [
+    7,
+    4
+   ]
+  ],
+  "CAS_MATCH_REG=FALSE": [
+   [
+    7,
+    7
+   ]
+  ],
+  "INV=CLK0": [
+   [
+    5,
+    20
+   ]
+  ],
+  "0=CLK0": [
+   [
+    7,
+    7
+   ]
+  ],
+  "INV=CLK1": [
+   [
+    5,
+    20
+   ]
+  ],
+  "0=CLK1": [
+   [
+    7,
+    7
+   ]
+  ],
+  "INV=CLK2": [
+   [
+    5,
+    20
+   ]
+  ],
+  "0=CLK2": [
+   [
+    7,
+    7
+   ]
+  ],
+  "INV=CLK3": [
+   [
+    5,
+    20
+   ]
+  ],
+  "0=CLK3": [
+   [
+    7,
+    7
+   ]
+  ],
+  "CLK0_DIV=DISABLED": [
+   [
+    7,
+    5
+   ]
+  ],
+  "CLK1_DIV=DISABLED": [
+   [
+    7,
+    5
+   ]
+  ],
+  "CLK2_DIV=DISABLED": [
+   [
+    7,
+    5
+   ]
+  ],
+  "CLK3_DIV=DISABLED": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTB_CE=CE0": [
+   [
+    5,
+    24
+   ]
+  ],
+  "REG_INPUTB_CE=CE1": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTC_CE=CE0": [
+   [
+    7,
+    7
+   ]
+  ],
+  "REG_INPUTC_CE=CE2": [
+   [
+    7,
+    7
+   ]
+  ],
+  "REG_INPUTC_CE=CE1": [
+   [
+    7,
+    7
+   ]
+  ],
+  "REG_INPUTB_CE=CE2": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTA_CE=CE0": [
+   [
+    5,
+    24
+   ]
+  ],
+  "REG_INPUTA_CE=CE2": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTA_CE=CE1": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_PIPELINE_CE=CE0": [
+   [
+    5,
+    24
+   ]
+  ],
+  "REG_PIPELINE_CE=CE2": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_PIPELINE_CE=CE1": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OUTPUT_CLK=NONE": [
+   [
+    4,
+    24
+   ],
+   [
+    7,
+    5
+   ],
+   [
+    7,
+    7
+   ]
+  ],
+  "REG_OUTPUT_CE=CE0": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OUTPUT_CE=CE2": [
+   [
+    7,
+    7
+   ]
+  ],
+  "REG_OUTPUT_CE=CE1": [
+   [
+    7,
+    7
+   ]
+  ],
+  "REG_PIPELINE_CLK=NONE": [
+   [
+    5,
+    24
+   ]
+  ],
+  "RESETMODE=ASYNC": [
+   [
+    5,
+    24
+   ],
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTA_RST=RST0": [
+   [
+    5,
+    24
+   ]
+  ],
+  "REG_INPUTA_RST=RST2": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTA_RST=RST1": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTB_RST=RST0": [
+   [
+    5,
+    24
+   ]
+  ],
+  "REG_INPUTB_RST=RST2": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTB_RST=RST1": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTC_RST=RST0": [
+   [
+    7,
+    7
+   ]
+  ],
+  "REG_INPUTC_RST=RST2": [
+   [
+    7,
+    7
+   ]
+  ],
+  "REG_INPUTC_RST=RST1": [
+   [
+    7,
+    7
+   ]
+  ],
+  "REG_PIPELINE_RST=RST0": [
+   [
+    5,
+    24
+   ]
+  ],
+  "REG_PIPELINE_RST=RST2": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_PIPELINE_RST=RST1": [
+   [
+    7,
+    5
+   ]
+  ],
+  "HIGHSPEED_CLK=CLK0": [
+   [
+    7,
+    5
+   ]
+  ],
+  "HIGHSPEED_CLK=CLK2": [
+   [
+    7,
+    5
+   ]
+  ],
+  "HIGHSPEED_CLK=CLK1": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OUTPUT_RST=RST0": [
+   [
+    4,
+    3
+   ],
+   [
+    5,
+    24
+   ]
+  ],
+  "REG_OUTPUT_RST=RST2": [
+   [
+    4,
+    3
+   ],
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OUTPUT_RST=RST1": [
+   [
+    4,
+    3
+   ],
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_PIPELINE_CLK=CLK0": [
+   [
+    5,
+    24
+   ]
+  ],
+  "REG_PIPELINE_CLK=CLK1": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_PIPELINE_CLK=CLK2": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTB_CLK=CLK0": [
+   [
+    5,
+    24
+   ]
+  ],
+  "REG_INPUTB_CLK=CLK1": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTB_CLK=CLK2": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTA_CLK=CLK0": [
+   [
+    5,
+    24
+   ]
+  ],
+  "REG_INPUTA_CLK=CLK1": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTA_CLK=CLK2": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OUTPUT_CLK=CLK0": [
+   [
+    5,
+    24
+   ]
+  ],
+  "REG_OUTPUT_CLK=CLK1": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OUTPUT_CLK=CLK2": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTC_CLK=CLK0": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTC_CLK=CLK1": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTC_CLK=CLK2": [
+   [
+    7,
+    5
+   ]
+  ],
+  "OUT2CIB=YES": [
+   [
+    5,
+    24
+   ],
+   [
+    7,
+    5
+   ],
+   [
+    7,
+    7
+   ]
+  ],
+  "SRO2CIB=NO": [
+   [
+    5,
+    24
+   ]
+  ]
+ },
+ "MULT18": {
+  "SOURCEB_MODE=B_C_DYNAMIC": [
+   [
+    7,
+    5
+   ]
+  ],
+  "SOURCEB_MODE=HIGHSPEED": [
+   [
+    7
+   ],
+   [
+    7,
+    5
+   ]
+  ],
+  "SOURCEB_MODE=C_SHIFT": [
+   [
+    5,
+    24
+   ],
+   [
+    7,
+    5
+   ]
+  ],
+  "SIG=SOURCEB": [
+   [
+    5,
+    20
+   ]
+  ],
+  "INV=SOURCEB": [
+   [
+    7
+   ],
+   [
+    7,
+    4
+   ]
+  ],
+  "SOURCEB_MODE=B_SHIFT": [
+   [
+    7,
+    7
+   ]
+  ],
+  "1=SOURCEB": [
+   [
+    4,
+    24
+   ]
+  ],
+  "0=SOURCEB": [
+   [
+    4,
+    24
+   ]
+  ],
+  "SIG=SOURCEA": [
+   [
+    7,
+    5
+   ]
+  ],
+  "INV=SOURCEA": [
+   [
+    7
+   ]
+  ],
+  "1=SOURCEA": [
+   [
+    7
+   ],
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTB_CLK=NONE": [
+   [
+    5,
+    6
+   ],
+   [
+    7
+   ]
+  ],
+  "SIG=RST0": [
+   [
+    5,
+    20
+   ]
+  ],
+  "1=RST0": [
+   [
+    7,
+    7
+   ]
+  ],
+  "SIG=RST1": [
+   [
+    5,
+    20
+   ]
+  ],
+  "1=RST1": [
+   [
+    7,
+    7
+   ]
+  ],
+  "SIG=RST2": [
+   [
+    5,
+    20
+   ]
+  ],
+  "1=RST2": [
+   [
+    7,
+    7
+   ]
+  ],
+  "SIG=RST3": [
+   [
+    5,
+    20
+   ]
+  ],
+  "1=RST3": [
+   [
+    7,
+    7
+   ]
+  ],
+  "SIG=CE0": [
+   [
+    5,
+    20
+   ]
+  ],
+  "1=CE0": [
+   [
+    7,
+    7
+   ]
+  ],
+  "SIG=CE1": [
+   [
+    5,
+    20
+   ]
+  ],
+  "1=CE1": [
+   [
+    7,
+    7
+   ]
+  ],
+  "SIG=CE2": [
+   [
+    5,
+    20
+   ]
+  ],
+  "1=CE2": [
+   [
+    7,
+    7
+   ]
+  ],
+  "SIG=CE3": [
+   [
+    5,
+    20
+   ]
+  ],
+  "1=CE3": [
+   [
+    7,
+    7
+   ]
+  ],
+  "REG_INPUTC_CLK=NONE": [
+   [
+    5,
+    3
+   ],
+   [
+    7,
+    7
+   ]
+  ],
+  "GSR=DISABLED": [
+   [
+    7,
+    5
+   ]
+  ],
+  "INV=SIGNEDB": [
+   [
+    5,
+    20
+   ]
+  ],
+  "0=SIGNEDB": [
+   [
+    7,
+    7
+   ]
+  ],
+  "INV=SIGNEDA": [
+   [
+    5,
+    20
+   ]
+  ],
+  "0=SIGNEDA": [
+   [
+    7,
+    7
+   ]
+  ],
+  "0=SOURCEA": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTA_CLK=NONE": [
+   [
+    5,
+    6
+   ],
+   [
+    7
+   ],
+   [
+    7,
+    4
+   ]
+  ],
+  "CAS_MATCH_REG=FALSE": [
+   [
+    7,
+    7
+   ]
+  ],
+  "INV=CLK0": [
+   [
+    5,
+    20
+   ]
+  ],
+  "0=CLK0": [
+   [
+    7,
+    7
+   ]
+  ],
+  "INV=CLK1": [
+   [
+    5,
+    20
+   ]
+  ],
+  "0=CLK1": [
+   [
+    7,
+    7
+   ]
+  ],
+  "INV=CLK2": [
+   [
+    5,
+    20
+   ]
+  ],
+  "0=CLK2": [
+   [
+    7,
+    7
+   ]
+  ],
+  "INV=CLK3": [
+   [
+    5,
+    20
+   ]
+  ],
+  "0=CLK3": [
+   [
+    7,
+    7
+   ]
+  ],
+  "CLK0_DIV=DISABLED": [
+   [
+    7,
+    5
+   ]
+  ],
+  "CLK1_DIV=DISABLED": [
+   [
+    7,
+    5
+   ]
+  ],
+  "CLK2_DIV=DISABLED": [
+   [
+    7,
+    5
+   ]
+  ],
+  "CLK3_DIV=DISABLED": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTA_CE=CE0": [
+   [
+    5,
+    24
+   ],
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTA_CE=CE2": [
+   [
+    7
+   ]
+  ],
+  "REG_INPUTA_CE=CE1": [
+   [
+    7
+   ]
+  ],
+  "REG_INPUTB_CE=CE0": [
+   [
+    5,
+    24
+   ],
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTB_CE=CE2": [
+   [
+    7
+   ]
+  ],
+  "REG_INPUTB_CE=CE1": [
+   [
+    7
+   ]
+  ],
+  "REG_PIPELINE_CE=CE0": [
+   [
+    5,
+    24
+   ],
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_PIPELINE_CE=CE2": [
+   [
+    7
+   ]
+  ],
+  "REG_PIPELINE_CE=CE1": [
+   [
+    7
+   ]
+  ],
+  "REG_OUTPUT_CLK=NONE": [
+   [
+    4,
+    24
+   ],
+   [
+    7,
+    5
+   ],
+   [
+    7,
+    7
+   ]
+  ],
+  "REG_OUTPUT_CE=CE0": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OUTPUT_CE=CE2": [
+   [
+    7,
+    7
+   ]
+  ],
+  "REG_OUTPUT_CE=CE1": [
+   [
+    7,
+    7
+   ]
+  ],
+  "REG_PIPELINE_CLK=NONE": [
+   [],
+   [
+    7
+   ]
+  ],
+  "RESETMODE=ASYNC": [
+   [
+    7
+   ],
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTA_RST=RST0": [
+   [
+    5,
+    24
+   ],
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTA_RST=RST2": [
+   [
+    7
+   ]
+  ],
+  "REG_INPUTA_RST=RST1": [
+   [
+    7
+   ]
+  ],
+  "REG_INPUTB_RST=RST0": [
+   [
+    5,
+    24
+   ],
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTB_RST=RST2": [
+   [
+    7
+   ]
+  ],
+  "REG_INPUTB_RST=RST1": [
+   [
+    7
+   ]
+  ],
+  "REG_PIPELINE_RST=RST0": [
+   [
+    5,
+    24
+   ],
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_PIPELINE_RST=RST2": [
+   [
+    7
+   ]
+  ],
+  "REG_PIPELINE_RST=RST1": [
+   [
+    7
+   ]
+  ],
+  "HIGHSPEED_CLK=CLK0": [
+   [
+    7,
+    5
+   ]
+  ],
+  "HIGHSPEED_CLK=CLK2": [
+   [
+    7
+   ],
+   [
+    7,
+    5
+   ]
+  ],
+  "HIGHSPEED_CLK=CLK1": [
+   [
+    7
+   ],
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OUTPUT_RST=RST0": [
+   [
+    4,
+    3
+   ],
+   [
+    5,
+    24
+   ]
+  ],
+  "REG_OUTPUT_RST=RST2": [
+   [
+    4,
+    3
+   ],
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OUTPUT_RST=RST1": [
+   [
+    4,
+    3
+   ],
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_PIPELINE_CLK=CLK0": [
+   [
+    5,
+    24
+   ],
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_PIPELINE_CLK=CLK1": [
+   [
+    7
+   ]
+  ],
+  "REG_PIPELINE_CLK=CLK2": [
+   [
+    7
+   ]
+  ],
+  "REG_INPUTB_CLK=CLK0": [
+   [
+    5,
+    24
+   ],
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTB_CLK=CLK1": [
+   [
+    7
+   ]
+  ],
+  "REG_INPUTB_CLK=CLK2": [
+   [
+    7
+   ]
+  ],
+  "REG_INPUTA_CLK=CLK0": [
+   [
+    5,
+    24
+   ],
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTA_CLK=CLK1": [
+   [
+    7
+   ]
+  ],
+  "REG_INPUTA_CLK=CLK2": [
+   [
+    7
+   ]
+  ],
+  "REG_OUTPUT_CLK=CLK0": [
+   [
+    5,
+    24
+   ]
+  ],
+  "REG_OUTPUT_CLK=CLK1": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OUTPUT_CLK=CLK2": [
+   [
+    7,
+    5
+   ]
+  ],
+  "OUT2CIB=YES": [
+   [
+    7,
+    5
+   ]
+  ],
+  "SRO2CIB=YES": [
+   [
+    4,
+    24
+   ]
+  ],
+  "SRO2CIB=NO": [
+   [
+    7
+   ]
+  ]
+ },
+ "ALU24": {
+  "GSR=DISABLED": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPCODE_0_CLK=NONE": [
+   [
+    5,
+    24
+   ]
+  ],
+  "0=OPCINSEL": [
+   [
+    5,
+    20
+   ]
+  ],
+  "INV=OPCINSEL": [
+   [
+    7,
+    7
+   ]
+  ],
+  "0=OPADDNSUB": [
+   [
+    5,
+    20
+   ]
+  ],
+  "INV=OPADDNSUB": [
+   [
+    7,
+    7
+   ]
+  ],
+  "REG_INPUTCFB_CLK=CLK0": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTCFB_CLK=CLK1": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTCFB_CLK=CLK2": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTCFB_CLK=CLK3": [
+   [
+    7
+   ]
+  ],
+  "INV=CLK0": [
+   [
+    5,
+    20
+   ]
+  ],
+  "0=CLK0": [
+   [
+    7,
+    7
+   ]
+  ],
+  "INV=CLK1": [
+   [
+    5,
+    20
+   ]
+  ],
+  "0=CLK1": [
+   [
+    7,
+    7
+   ]
+  ],
+  "INV=CLK2": [
+   [
+    5,
+    20
+   ]
+  ],
+  "0=CLK2": [
+   [
+    7,
+    7
+   ]
+  ],
+  "INV=CLK3": [
+   [
+    5,
+    20
+   ]
+  ],
+  "0=CLK3": [
+   [
+    7,
+    7
+   ]
+  ],
+  "CLK0_DIV=DISABLED": [
+   [
+    7,
+    5
+   ]
+  ],
+  "CLK1_DIV=DISABLED": [
+   [
+    7,
+    5
+   ]
+  ],
+  "CLK2_DIV=DISABLED": [
+   [
+    7,
+    5
+   ]
+  ],
+  "CLK3_DIV=DISABLED": [
+   [
+    7,
+    5
+   ]
+  ],
+  "SIG=CE0": [
+   [
+    5,
+    20
+   ]
+  ],
+  "1=CE0": [
+   [
+    7,
+    7
+   ]
+  ],
+  "SIG=CE1": [
+   [
+    5,
+    20
+   ]
+  ],
+  "1=CE1": [
+   [
+    7,
+    7
+   ]
+  ],
+  "SIG=CE2": [
+   [
+    5,
+    20
+   ]
+  ],
+  "1=CE2": [
+   [
+    7,
+    7
+   ]
+  ],
+  "SIG=CE3": [
+   [
+    5,
+    20
+   ]
+  ],
+  "1=CE3": [
+   [
+    7,
+    7
+   ]
+  ],
+  "SIG=RST0": [
+   [
+    5,
+    20
+   ]
+  ],
+  "1=RST0": [
+   [
+    7,
+    7
+   ]
+  ],
+  "SIG=RST1": [
+   [
+    5,
+    20
+   ]
+  ],
+  "1=RST1": [
+   [
+    7,
+    7
+   ]
+  ],
+  "SIG=RST2": [
+   [
+    5,
+    20
+   ]
+  ],
+  "1=RST2": [
+   [
+    7,
+    7
+   ]
+  ],
+  "SIG=RST3": [
+   [
+    5,
+    20
+   ]
+  ],
+  "1=RST3": [
+   [
+    7,
+    7
+   ]
+  ],
+  "REG_INPUTCFB_CE=CE0": [
+   [
+    4,
+    3
+   ]
+  ],
+  "REG_INPUTCFB_CLK=NONE": [
+   [
+    7,
+    7
+   ]
+  ],
+  "REG_INPUTCFB_CE=CE2": [
+   [
+    4,
+    3
+   ]
+  ],
+  "REG_INPUTCFB_CE=CE1": [
+   [
+    4,
+    3
+   ]
+  ],
+  "REG_OUTPUT_CLK=NONE": [
+   [
+    4,
+    24
+   ],
+   [
+    7,
+    7
+   ]
+  ],
+  "REG_OUTPUT_CE=CE0": [
+   [
+    7,
+    7
+   ]
+  ],
+  "REG_OUTPUT_CE=CE2": [
+   [
+    7,
+    7
+   ]
+  ],
+  "REG_OUTPUT_CE=CE1": [
+   [
+    7,
+    7
+   ]
+  ],
+  "REG_OPCODE_0_CE=CE0": [
+   [
+    5,
+    24
+   ]
+  ],
+  "REG_OPCODE_0_CE=CE2": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPCODE_0_CE=CE1": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPCODE_1_CLK=NONE": [
+   [
+    5,
+    24
+   ]
+  ],
+  "REG_OPCODE_1_CE=CE0": [
+   [
+    5,
+    24
+   ]
+  ],
+  "REG_OPCODE_1_CE=CE2": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPCODE_1_CE=CE1": [
+   [
+    7,
+    5
+   ]
+  ],
+  "OUT2CIB=YES": [
+   [
+    7,
+    5
+   ],
+   [
+    7,
+    7
+   ]
+  ],
+  "OUT2CIN=YES": [
+   [
+    4,
+    24
+   ]
+  ],
+  "REG_INPUTCFB_RST=RST0": [
+   [
+    4,
+    3
+   ]
+  ],
+  "REG_INPUTCFB_RST=RST2": [
+   [
+    4,
+    3
+   ]
+  ],
+  "REG_INPUTCFB_RST=RST1": [
+   [
+    4,
+    3
+   ]
+  ],
+  "REG_OUTPUT_CLK=CLK0": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OUTPUT_CLK=CLK2": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OUTPUT_CLK=CLK1": [
+   [
+    7,
+    5
+   ]
+  ],
+  "RESETMODE=ASYNC": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OUTPUT_RST=RST0": [
+   [
+    4,
+    3
+   ],
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OUTPUT_RST=RST2": [
+   [
+    4,
+    3
+   ],
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OUTPUT_RST=RST1": [
+   [
+    4,
+    3
+   ],
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPCODE_0_CLK=CLK0": [
+   [
+    5,
+    24
+   ]
+  ],
+  "REG_OPCODE_0_CLK=CLK2": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPCODE_0_CLK=CLK1": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPCODE_1_CLK=CLK0": [
+   [
+    5,
+    24
+   ]
+  ],
+  "REG_OPCODE_1_CLK=CLK2": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPCODE_1_CLK=CLK1": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPCODE_0_RST=RST0": [
+   [
+    5,
+    24
+   ]
+  ],
+  "REG_OPCODE_0_RST=RST2": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPCODE_0_RST=RST1": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPCODE_1_RST=RST0": [
+   [
+    5,
+    24
+   ]
+  ],
+  "REG_OPCODE_1_RST=RST2": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPCODE_1_RST=RST1": [
+   [
+    7,
+    5
+   ]
+  ]
+ },
+ "ALU54": {
+  "GSR=DISABLED": [
+   [
+    7
+   ]
+  ],
+  "REG_OPCODE_0_CLK=NONE": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPCODEOP0_0_CLK=NONE": [
+   [
+    7
+   ]
+  ],
+  "0=OP4": [
+   [
+    5,
+    20
+   ]
+  ],
+  "INV=OP4": [
+   [
+    7
+   ]
+  ],
+  "0=OP6": [
+   [
+    5,
+    20
+   ]
+  ],
+  "INV=OP6": [
+   [
+    7
+   ]
+  ],
+  "0=OP10": [
+   [
+    5,
+    20
+   ]
+  ],
+  "INV=OP10": [
+   [
+    7
+   ]
+  ],
+  "0=OP0": [
+   [
+    5,
+    20
+   ]
+  ],
+  "INV=OP0": [
+   [
+    7,
+    7
+   ]
+  ],
+  "REG_OPCODEOP1_0_CLK=NONE": [
+   [
+    7
+   ]
+  ],
+  "0=OP5": [
+   [
+    5,
+    20
+   ]
+  ],
+  "INV=OP5": [
+   [
+    7,
+    5
+   ]
+  ],
+  "0=OPCINSEL": [
+   [
+    5,
+    20
+   ]
+  ],
+  "INV=OPCINSEL": [
+   [
+    7,
+    7
+   ]
+  ],
+  "0=OP3": [
+   [
+    5,
+    20
+   ]
+  ],
+  "INV=OP3": [
+   [
+    7
+   ]
+  ],
+  "0=OP9": [
+   [
+    5,
+    20
+   ]
+  ],
+  "INV=OP9": [
+   [
+    7
+   ]
+  ],
+  "0=OP8": [
+   [
+    5,
+    20
+   ]
+  ],
+  "INV=OP8": [
+   [
+    7
+   ]
+  ],
+  "0=OP1": [
+   [
+    5,
+    20
+   ]
+  ],
+  "INV=OP1": [
+   [
+    7
+   ]
+  ],
+  "0=OP2": [
+   [
+    5,
+    20
+   ]
+  ],
+  "INV=OP2": [
+   [
+    7
+   ]
+  ],
+  "0=OP7": [
+   [
+    5,
+    20
+   ]
+  ],
+  "INV=OP7": [
+   [
+    7,
+    5
+   ]
+  ],
+  "0=OPADDNSUB": [
+   [
+    5,
+    20
+   ]
+  ],
+  "INV=OPADDNSUB": [
+   [
+    7,
+    7
+   ]
+  ],
+  "REG_OPCODEIN_0_CLK=NONE": [
+   [
+    7
+   ]
+  ],
+  "REG_INPUTC0_CLK=NONE": [
+   [
+    5,
+    3
+   ],
+   [
+    7,
+    7
+   ]
+  ],
+  "REG_INPUTCFB_CLK=CLK0": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTCFB_CLK=CLK1": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTCFB_CLK=CLK2": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTCFB_CLK=CLK3": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTC1_CLK=NONE": [
+   [
+    5,
+    3
+   ],
+   [
+    7,
+    7
+   ]
+  ],
+  "INV=CLK0": [
+   [
+    5,
+    20
+   ]
+  ],
+  "0=CLK0": [
+   [
+    7,
+    7
+   ]
+  ],
+  "INV=CLK1": [
+   [
+    5,
+    20
+   ]
+  ],
+  "0=CLK1": [
+   [
+    7,
+    7
+   ]
+  ],
+  "INV=CLK2": [
+   [
+    5,
+    20
+   ]
+  ],
+  "0=CLK2": [
+   [
+    7,
+    7
+   ]
+  ],
+  "INV=CLK3": [
+   [
+    5,
+    20
+   ]
+  ],
+  "0=CLK3": [
+   [
+    7,
+    7
+   ]
+  ],
+  "CLK0_DIV=DISABLED": [
+   [
+    7
+   ]
+  ],
+  "CLK1_DIV=DISABLED": [
+   [
+    7
+   ]
+  ],
+  "CLK2_DIV=DISABLED": [
+   [
+    7
+   ]
+  ],
+  "CLK3_DIV=DISABLED": [
+   [
+    7
+   ]
+  ],
+  "SIG=CE0": [
+   [
+    5,
+    20
+   ]
+  ],
+  "1=CE0": [
+   [
+    7,
+    7
+   ]
+  ],
+  "SIG=CE1": [
+   [
+    5,
+    20
+   ]
+  ],
+  "1=CE1": [
+   [
+    7,
+    7
+   ]
+  ],
+  "SIG=CE2": [
+   [
+    5,
+    20
+   ]
+  ],
+  "1=CE2": [
+   [
+    7,
+    7
+   ]
+  ],
+  "SIG=CE3": [
+   [
+    5,
+    20
+   ]
+  ],
+  "1=CE3": [
+   [
+    7,
+    7
+   ]
+  ],
+  "SIG=RST0": [
+   [
+    5,
+    20
+   ]
+  ],
+  "1=RST0": [
+   [
+    7,
+    7
+   ]
+  ],
+  "SIG=RST1": [
+   [
+    5,
+    20
+   ]
+  ],
+  "1=RST1": [
+   [
+    7,
+    7
+   ]
+  ],
+  "SIG=RST2": [
+   [
+    5,
+    20
+   ]
+  ],
+  "1=RST2": [
+   [
+    7,
+    7
+   ]
+  ],
+  "SIG=RST3": [
+   [
+    5,
+    20
+   ]
+  ],
+  "1=RST3": [
+   [
+    7,
+    7
+   ]
+  ],
+  "REG_INPUTC1_CE=CE0": [
+   [
+    4,
+    3
+   ]
+  ],
+  "REG_INPUTC1_CE=CE2": [
+   [
+    4,
+    3
+   ]
+  ],
+  "REG_INPUTC1_CE=CE1": [
+   [
+    4,
+    3
+   ]
+  ],
+  "REG_OUTPUT0_CLK=NONE": [
+   [
+    4,
+    24
+   ],
+   [
+    7,
+    7
+   ]
+  ],
+  "REG_OUTPUT0_CE=CE0": [
+   [
+    7,
+    7
+   ]
+  ],
+  "REG_OUTPUT0_CE=CE2": [
+   [
+    7,
+    7
+   ]
+  ],
+  "REG_OUTPUT_CLK=NONE": [
+   [
+    4,
+    24
+   ],
+   [
+    7,
+    7
+   ]
+  ],
+  "REG_OUTPUT_CE=CE0": [
+   [
+    7,
+    7
+   ]
+  ],
+  "REG_OUTPUT_CE=CE2": [
+   [
+    7,
+    7
+   ]
+  ],
+  "REG_OUTPUT0_CE=CE1": [
+   [
+    7,
+    7
+   ]
+  ],
+  "REG_OUTPUT_CE=CE1": [
+   [
+    7,
+    7
+   ]
+  ],
+  "REG_OUTPUT1_CE=CE0": [
+   [
+    4,
+    3
+   ]
+  ],
+  "REG_OUTPUT1_CLK=NONE": [
+   [
+    7,
+    7
+   ]
+  ],
+  "REG_OUTPUT1_CE=CE2": [
+   [
+    4,
+    3
+   ]
+  ],
+  "REG_FLAG_CE=CE0": [
+   [
+    4,
+    3
+   ]
+  ],
+  "REG_FLAG_CLK=NONE": [
+   [
+    4,
+    24
+   ],
+   [
+    7,
+    7
+   ]
+  ],
+  "REG_FLAG_CE=CE2": [
+   [
+    4,
+    3
+   ]
+  ],
+  "REG_OUTPUT1_CE=CE1": [
+   [
+    4,
+    3
+   ]
+  ],
+  "REG_FLAG_CE=CE1": [
+   [
+    4,
+    3
+   ]
+  ],
+  "REG_OPCODE_0_CE=CE0": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPCODE_0_CE=CE2": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPCODEOP0_0_CE=CE0": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPCODEOP0_0_CE=CE2": [
+   [
+    7
+   ]
+  ],
+  "REG_OPCODE_0_CE=CE1": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPCODEOP0_0_CE=CE1": [
+   [
+    7
+   ]
+  ],
+  "REG_OPCODE_1_CLK=NONE": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPCODEOP0_1_CLK=NONE": [
+   [
+    7
+   ]
+  ],
+  "REG_OPCODEOP1_1_CLK=NONE": [
+   [
+    7
+   ]
+  ],
+  "REG_OPCODEIN_1_CLK=NONE": [
+   [
+    7
+   ]
+  ],
+  "MCPAT_SOURCE=STATIC": [
+   []
+  ],
+  "MASKPAT_SOURCE=STATIC": [
+   []
+  ],
+  "LEGACY=ENABLED": [
+   []
+  ],
+  "REG_OPCODE_1_CE=CE0": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPCODE_1_CE=CE2": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPCODEOP0_1_CE=CE0": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPCODEOP0_1_CE=CE2": [
+   [
+    7
+   ]
+  ],
+  "REG_OPCODE_1_CE=CE1": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPCODEOP0_1_CE=CE1": [
+   [
+    7
+   ]
+  ],
+  "FORCE_ZERO_BARREL_SHIFT=DISABLED": [
+   []
+  ],
+  "OUT2CIB=YES": [
+   [
+    4,
+    24
+   ],
+   [
+    7
+   ],
+   [
+    7,
+    5
+   ],
+   [
+    7,
+    7
+   ]
+  ],
+  "OUT2CIN=YES": [
+   [
+    4,
+    24
+   ],
+   [
+    7,
+    7
+   ]
+  ],
+  "REG_INPUTCFB_CLK=NONE": [
+   [
+    5,
+    3
+   ],
+   [
+    7,
+    7
+   ]
+  ],
+  "REG_INPUTC0_CLK=CLK0": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTC0_CLK=CLK2": [
+   [
+    7
+   ]
+  ],
+  "REG_INPUTC0_CLK=CLK1": [
+   [
+    7
+   ]
+  ],
+  "REG_INPUTC0_RST=RST0": [
+   [
+    4,
+    3
+   ]
+  ],
+  "REG_INPUTC0_RST=RST2": [
+   [
+    4,
+    3
+   ]
+  ],
+  "REG_INPUTC0_RST=RST1": [
+   [
+    4,
+    3
+   ]
+  ],
+  "REG_INPUTC1_RST=RST0": [
+   [
+    4,
+    3
+   ]
+  ],
+  "REG_INPUTC1_RST=RST2": [
+   [
+    4,
+    3
+   ]
+  ],
+  "REG_INPUTC1_RST=RST1": [
+   [
+    4,
+    3
+   ]
+  ],
+  "FLAG2CIB=YES": [
+   []
+  ],
+  "REG_OUTPUT0_CLK=CLK0": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OUTPUT0_CLK=CLK2": [
+   [
+    7
+   ],
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OUTPUT0_CLK=CLK1": [
+   [
+    7
+   ],
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OUTPUT1_CLK=CLK0": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OUTPUT1_CLK=CLK1": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OUTPUT1_CLK=CLK2": [
+   [
+    7,
+    5
+   ]
+  ],
+  "RESETMODE=ASYNC": [
+   [
+    7
+   ]
+  ],
+  "REG_OUTPUT0_RST=RST0": [
+   [
+    4,
+    3
+   ],
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OUTPUT0_RST=RST2": [
+   [
+    4,
+    3
+   ],
+   [
+    7
+   ]
+  ],
+  "REG_OUTPUT0_RST=RST1": [
+   [
+    4,
+    3
+   ],
+   [
+    7
+   ]
+  ],
+  "REG_OPCODE_0_CLK=CLK0": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPCODE_0_CLK=CLK2": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPCODEIN_0_CLK=CLK0": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPCODEIN_0_CLK=CLK2": [
+   [
+    7
+   ]
+  ],
+  "REG_OPCODE_0_CLK=CLK1": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPCODEIN_0_CLK=CLK1": [
+   [
+    7
+   ]
+  ],
+  "REG_OUTPUT1_RST=RST0": [
+   [
+    4,
+    3
+   ],
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OUTPUT1_RST=RST2": [
+   [
+    4,
+    3
+   ],
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OUTPUT1_RST=RST1": [
+   [
+    4,
+    3
+   ],
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPCODE_1_CLK=CLK0": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPCODE_1_CLK=CLK2": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPCODEIN_1_CLK=CLK0": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPCODEIN_1_CLK=CLK2": [
+   [
+    7
+   ]
+  ],
+  "REG_OPCODE_1_CLK=CLK1": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPCODEIN_1_CLK=CLK1": [
+   [
+    7
+   ]
+  ],
+  "REG_OUTPUT_RST=RST0": [
+   [
+    4,
+    3
+   ]
+  ],
+  "REG_OUTPUT_RST=RST2": [
+   [
+    4,
+    3
+   ]
+  ],
+  "REG_OUTPUT_RST=RST1": [
+   [
+    4,
+    3
+   ]
+  ],
+  "REG_FLAG_RST=RST0": [
+   [
+    4,
+    3
+   ]
+  ],
+  "REG_FLAG_RST=RST2": [
+   [
+    4,
+    3
+   ]
+  ],
+  "REG_FLAG_RST=RST1": [
+   [
+    4,
+    3
+   ]
+  ],
+  "REG_OPCODEOP0_1_CLK=CLK0": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPCODEOP0_1_CLK=CLK1": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPCODEOP1_1_CLK=CLK0": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPCODEOP1_1_CLK=CLK1": [
+   [
+    7
+   ]
+  ],
+  "REG_OPCODEOP0_1_CLK=CLK2": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPCODEOP1_1_CLK=CLK2": [
+   [
+    7
+   ]
+  ],
+  "REG_OPCODEOP0_0_CLK=CLK0": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPCODEOP0_0_CLK=CLK1": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPCODEOP1_0_CLK=CLK0": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPCODEOP1_0_CLK=CLK1": [
+   [
+    7
+   ]
+  ],
+  "REG_OPCODEOP0_0_CLK=CLK2": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPCODEOP1_0_CLK=CLK2": [
+   [
+    7
+   ]
+  ],
+  "REG_OPCODE_0_RST=RST0": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPCODE_0_RST=RST2": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPCODEIN_0_RST=RST0": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPCODEIN_0_RST=RST2": [
+   [
+    7
+   ]
+  ],
+  "REG_OPCODE_0_RST=RST1": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPCODEIN_0_RST=RST1": [
+   [
+    7
+   ]
+  ],
+  "REG_OPCODE_1_RST=RST0": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPCODE_1_RST=RST2": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPCODEIN_1_RST=RST0": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPCODEIN_1_RST=RST2": [
+   [
+    7
+   ]
+  ],
+  "REG_OPCODE_1_RST=RST1": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPCODEIN_1_RST=RST1": [
+   [
+    7
+   ]
+  ],
+  "REG_FLAG_CLK=CLK0": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_FLAG_CLK=CLK1": [
+   [
+    7
+   ]
+  ],
+  "REG_FLAG_CLK=CLK2": [
+   [
+    7
+   ]
+  ],
+  "REG_OUTPUT_CLK=CLK0": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OUTPUT_CLK=CLK1": [
+   [
+    7
+   ]
+  ],
+  "REG_OUTPUT_CLK=CLK2": [
+   [
+    7
+   ]
+  ],
+  "REG_OPCODEOP0_0_RST=RST0": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPCODEOP0_0_RST=RST2": [
+   [
+    7
+   ]
+  ],
+  "REG_OPCODEOP0_0_RST=RST1": [
+   [
+    7
+   ]
+  ],
+  "REG_OPCODEOP0_1_RST=RST0": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPCODEOP0_1_RST=RST2": [
+   [
+    7
+   ]
+  ],
+  "REG_OPCODEOP0_1_RST=RST1": [
+   [
+    7
+   ]
+  ],
+  "REG_INPUTC1_CLK=CLK0": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_INPUTC1_CLK=CLK1": [
+   [
+    7
+   ]
+  ],
+  "REG_INPUTC1_CLK=CLK2": [
+   [
+    7
+   ]
+  ],
+  "REG_INPUTC0_CE=CE0": [
+   [
+    4,
+    3
+   ]
+  ],
+  "REG_INPUTC0_CE=CE2": [
+   [
+    4,
+    3
+   ]
+  ],
+  "REG_INPUTC0_CE=CE1": [
+   [
+    4,
+    3
+   ]
+  ],
+  "REG_OPCODEIN_1_CE=CE0": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPCODEIN_1_CE=CE1": [
+   [
+    7
+   ]
+  ],
+  "REG_OPCODEIN_1_CE=CE2": [
+   [
+    7
+   ]
+  ],
+  "REG_OPCODEIN_0_CE=CE0": [
+   [
+    7,
+    5
+   ]
+  ],
+  "REG_OPCODEIN_0_CE=CE1": [
+   [
+    7
+   ]
+  ],
+  "REG_OPCODEIN_0_CE=CE2": [
+   [
+    7
+   ]
+  ]
+ }
+}
