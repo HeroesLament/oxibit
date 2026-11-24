@@ -449,10 +449,22 @@ pub fn assign(bels: &Bels, nl: &Netlist) -> Result<HashMap<usize, BelId>> {
         if p.ty != "MULT18X18D" || out.contains_key(&i) {
             continue;
         }
+        // Prefer a fresh block so the product exits never share wires
+        // with another block's use, from the local model.
+        let block_used = |used: &HashSet<BelId>, bels: &Bels, b: BelId| -> bool {
+            // The block anchor is (x - z, y); z is the site within the
+            // block, from the local model.
+            let (_, x0, y) = block(bels, b);
+            used.iter().any(|&u| {
+                let (_, ux, uy) = block(bels, u);
+                ux == x0 && uy == y
+            })
+        };
         let b = mults
             .iter()
             .copied()
-            .find(|b| !used.contains(b))
+            .find(|&b| !used.contains(&b) && !block_used(&used, bels, b))
+            .or_else(|| mults.iter().copied().find(|b| !used.contains(b)))
             .ok_or_else(|| err!("MULT18X18D {}: no free MULT18", p.name))?;
         used.insert(b);
         out.insert(i, b);
@@ -473,9 +485,24 @@ pub fn assign(bels: &Bels, nl: &Netlist) -> Result<HashMap<usize, BelId>> {
         if out.contains_key(&i) {
             continue;
         }
+        // Prefer a fresh block (none of its sites used): a split bel's
+        // output exit shares wires with the 18-mode bels' products in the
+        // same block, from the local model. Fall back to any free site.
+        let block_used = |used: &HashSet<BelId>, bels: &Bels, b: BelId| -> bool {
+            // The block anchor is (x - z, y): z is the site within the
+            // block, from the local model.
+            let (_, x0, y) = block(bels, b);
+            used.iter().any(|&u| {
+                let (_, ux, uy) = block(bels, u);
+                ux == x0 && uy == y
+            })
+        };
+        let free = |b: &BelId| !used.contains(b) && !site_used(&used, bels, *b);
         let b = pool
-            .into_iter()
-            .find(|&b| !used.contains(&b) && !site_used(&used, bels, b))
+            .iter()
+            .copied()
+            .find(|b| free(b) && !block_used(&used, bels, *b))
+            .or_else(|| pool.iter().copied().find(|b| free(b)))
             .ok_or_else(|| err!("{} {}: no free {} site", p.ty, p.name, p.ty))?;
         used.insert(b);
         out.insert(i, b);
