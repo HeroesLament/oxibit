@@ -709,10 +709,11 @@ pub fn configure(
                 }
             }
         } else if p.ty == "MULT9X9D" {
-            // From the local model: the 9x9 split shares the site's mode
-            // fuse with the 18x18 mode (one fuse selects both multiplier
-            // sizes; the shared key offers no MULT9X9D option). The split
-            // selector's physical bit is what the silicon fuzz confirms.
+            // From the local model: the 9x9 split's partner key keeps its
+            // 18-mode OFF (MODE NONE, clearing the 18x18 mode fuse); the
+            // split selector itself rides the unnamed fuse the device
+            // database maps (one fuse flipping the paired sites together).
+            enums.push((format!("{pre}.MODE"), "NONE".to_owned()));
             for sig in ["CLK", "CE", "RST"] {
                 for k in 0..4 {
                     enums.push((format!("{pre}.{sig}{k}MUX"), format!("{sig}{k}")));
