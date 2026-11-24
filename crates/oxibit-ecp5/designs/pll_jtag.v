@@ -67,24 +67,34 @@ module pll_jtag (
   // The TAP state outputs change just after the JTCK rising edge and reach
   // the fabric by general routing, JTCK by a longer path: sampled on the
   // falling edge, the rising edge sees the state of the cycle just ended.
-  // JTDI is the TDI pin, which the host changes on the falling edge.
-  reg ce1 = 0, shift = 0, upd = 0;
+  reg ce1 = 0, shift = 0, upd = 0, tdi = 0;
   always @(negedge jtck) begin
     ce1 <= jce1;
     shift <= jshift;
     upd <= jupdate;
+    tdi <= jtdi;
+  end
+  // JTDI is TDI as the TAP sampled it on the rising edge (it changes just
+  // after that edge), so the bit a shift edge takes in is in `tdi` one
+  // edge later: the last 32 bits shifted in collect in `rx` one edge
+  // behind the shifts out of `sr`.
+  reg shifted = 0;
+  reg [31:0] rx = 0;
+  always @(posedge jtck) begin
+    shifted <= ce1 & shift;
+    if (shifted) rx <= {tdi, rx[31:1]};
   end
   always @(posedge jtck) begin
     if (ce1) begin
       armed <= 1'b1;
-      if (shift) sr <= {jtdi, sr[127:1]};
+      if (shift) sr <= {1'b0, sr[127:1]};
       else begin
         sr <= {status, g48, g25, 32'h0B1BEC55};
         ncap <= ncap + 1;
       end
     end else if (upd && armed) begin
       armed <= 1'b0;
-      user <= sr[127:112];
+      user <= rx[31:16];
     end
   end
   JTAGG #(.ER1("ENABLED"), .ER2("ENABLED")) jtag (
