@@ -78,7 +78,7 @@ pub fn is_global(g: &Graph, w: Wire) -> bool {
 }
 
 /// The wires joined to `w` by fixed connections, `w` included.
-fn fixed_group(g: &Graph, w: Wire, cache: &mut HashMap<Wire, Vec<Wire>>) -> Vec<Wire> {
+pub fn fixed_group(g: &Graph, w: Wire, cache: &mut HashMap<Wire, Vec<Wire>>) -> Vec<Wire> {
     if let Some(v) = cache.get(&w) {
         return v.clone();
     }
@@ -87,6 +87,11 @@ fn fixed_group(g: &Graph, w: Wire, cache: &mut HashMap<Wire, Vec<Wire>>) -> Vec<
     while let Some(x) = stack.pop() {
         for a in g.downhill(x).into_iter().chain(g.uphill(x)) {
             if g.pip(&a).kind != PipKind::Fixed {
+                continue;
+            }
+            // The database models the ECLKSYNC bel as a fixed ECLKI ->
+            // ECLKO arc: two nets, not one node.
+            if [a.from, a.to].iter().all(|w| g.names[w.name as usize].contains("_ECLKSYNC")) {
                 continue;
             }
             for y in [a.from, a.to] {
@@ -277,7 +282,7 @@ impl<'g> State<'g> {
             let gw = best[&w];
             for a in self.g.downhill(w) {
                 let v = a.to;
-                if !bbox.contains(v) || (n.kind == NetKind::Signal && self.is_global(v)) {
+                if !bbox.contains(v) || (n.kind == NetKind::Signal && v != sink && self.is_global(v)) {
                     continue;
                 }
                 let gv = self.group(v);
@@ -294,9 +299,15 @@ impl<'g> State<'g> {
             }
         }
         Err(err!(
-            "net {}: no path to {}",
+            "net {}: no path to {} (from {}, {} sinks, bbox x {}..{} y {}..{})",
             n.name,
-            self.g.wire_name(sink)
+            self.g.wire_name(sink),
+            self.g.wire_name(n.source),
+            n.sinks.len(),
+            bbox.x0,
+            bbox.x1,
+            bbox.y0,
+            bbox.y1
         ))
     }
 }
@@ -333,7 +344,19 @@ pub fn route_with(
             }
             let ni = u32::try_from(i).expect("net count fits u32");
             st.release(ni);
-            let bbox = Bbox::of(n, opts.margin);
+            let mut bbox = Bbox::of(n, opts.margin);
+            // A sink reached only through a far fixed connection (the 85K
+            // GSR CLK, R94C4 JCLK_GSR, is R46C68's JCLK0): the box takes in
+            // the sink's whole node.
+            for &s in &n.sinks {
+                let id = st.group(s) as usize;
+                for m in &st.members[id] {
+                    bbox.x0 = bbox.x0.min(m.x - opts.margin);
+                    bbox.x1 = bbox.x1.max(m.x + opts.margin);
+                    bbox.y0 = bbox.y0.min(m.y - opts.margin);
+                    bbox.y1 = bbox.y1.max(m.y + opts.margin);
+                }
+            }
             let mut tree = HashSet::from([n.source]);
             let mut order = vec![n.source];
             st.hold(n.source, ni);
@@ -370,7 +393,17 @@ pub fn route_with(
         }
         st.present *= st.opts.present_growth;
     }
-    Err(err!("congestion remains after {} passes", opts.max_passes))
+    // Name what is still shared, so the failure can be read.
+    let shared: Vec<String> = (0..st.users.len())
+        .filter(|&k| st.users[k].len() > 1)
+        .take(4)
+        .map(|k| {
+            let w = st.g.wire_name(st.members[k][0]);
+            let who: Vec<&str> = st.users[k].iter().map(|&n| nets[n as usize].name.as_str()).collect();
+            format!("{w} ({})", who.join(", "))
+        })
+        .collect();
+    Err(err!("congestion remains after {} passes: {}", opts.max_passes, shared.join("; ")))
 }
 
 /// Check routed trees: every sink reached from the source through the net's

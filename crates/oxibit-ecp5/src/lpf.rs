@@ -21,8 +21,17 @@ pub struct PortPrefs {
 #[derive(Clone, Debug, Default)]
 pub struct Lpf {
     pub ports: BTreeMap<String, PortPrefs>,
+    /// `SYSCONFIG KEY=VALUE ...` settings (nextpnr's keys).
+    pub sysconfig: BTreeMap<String, String>,
     pub ignored: usize,
 }
+
+/// The SYSCONFIG keys nextpnr accepts.
+pub const SYSCONFIG_KEYS: &[&str] = &[
+    "SLAVE_SPI_PORT", "MASTER_SPI_PORT", "SLAVE_PARALLEL_PORT", "BACKGROUND_RECONFIG", "DONE_EX", "DONE_OD",
+    "DONE_PULL", "MCCLK_FREQ", "TRANSFR", "CONFIG_IOVOLTAGE", "CONFIG_SECURE", "WAKE_UP", "COMPRESS_CONFIG",
+    "CONFIG_MODE", "INBUF",
+];
 
 /// Strip comments, keeping quoted text.
 fn strip(text: &str) -> String {
@@ -109,6 +118,18 @@ impl Lpf {
                             .split_once('=')
                             .ok_or_else(|| err!("lpf: bad IOBUF setting {kv}"))?;
                         p.iobuf.insert(k.trim().to_ascii_uppercase(), v.trim().to_owned());
+                    }
+                }
+                Some("SYSCONFIG") => {
+                    for kv in &w[1..] {
+                        let (k, v) = kv
+                            .split_once('=')
+                            .ok_or_else(|| err!("lpf: bad SYSCONFIG setting {kv} (KEY=VALUE)"))?;
+                        let k = k.trim().to_ascii_uppercase();
+                        if !SYSCONFIG_KEYS.contains(&k.as_str()) {
+                            return Err(err!("lpf: unexpected SYSCONFIG key {k}"));
+                        }
+                        lpf.sysconfig.insert(k, v.trim().to_owned());
                     }
                 }
                 _ => lpf.ignored += 1,

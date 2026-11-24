@@ -72,19 +72,28 @@ pub enum ClockArc {
     /// Through a PLL's reference select, CLK0 to PLLCSOUT (the PLL's
     /// CLKI): its SEL (`JSEL_PLLREFCS`) is tied low.
     RefCs { from: Wire, to: Wire },
+    /// Through an ECLKSYNC bel, ECLKI to ECLKO: no configuration (its
+    /// MODE is only for STOP).
+    Sync { from: Wire, to: Wire },
 }
 
 impl ClockArc {
     pub fn to(self) -> Wire {
         match self {
             ClockArc::Pip(a) => a.to,
-            ClockArc::Span { to, .. } | ClockArc::Dcc { to, .. } | ClockArc::RefCs { to, .. } => to,
+            ClockArc::Span { to, .. }
+            | ClockArc::Dcc { to, .. }
+            | ClockArc::RefCs { to, .. }
+            | ClockArc::Sync { to, .. } => to,
         }
     }
     pub fn from(self) -> Wire {
         match self {
             ClockArc::Pip(a) => a.from,
-            ClockArc::Span { from, .. } | ClockArc::Dcc { from, .. } | ClockArc::RefCs { from, .. } => from,
+            ClockArc::Span { from, .. }
+            | ClockArc::Dcc { from, .. }
+            | ClockArc::RefCs { from, .. }
+            | ClockArc::Sync { from, .. } => from,
         }
     }
 }
@@ -95,6 +104,9 @@ pub struct ClockNetwork {
     quadrants: BTreeMap<String, Quadrant>,
     taps: Vec<Tap>,
     spines: Vec<Spine>,
+    /// Per edge I/O bank (left / right): its PIO column and the rows of its
+    /// PIC tiles, which carry `BNK_ECLK<n>`.
+    banks: BTreeMap<u32, (i16, Vec<i16>)>,
 }
 
 fn num(v: &serde_json::Value, k: &str) -> Result<i16> {
@@ -145,10 +157,12 @@ impl ClockNetwork {
                 tap_col: col.parse().map_err(|_| err!("globals.json: spine {name}"))?,
             });
         }
+        let banks = load_banks(&root.join("ECP5").join(device).join("iodb.json"))?;
         Ok(ClockNetwork {
             quadrants,
             taps,
             spines,
+            banks,
         })
     }
 
@@ -166,6 +180,41 @@ impl ClockNetwork {
             }
         }
         let span = |to: Wire, out: &mut Vec<ClockArc>| out.push(ClockArc::Span { from: w, to });
+        // ECLKSYNC<n>: ECLKI -> ECLKO at the bel.
+        if let Some(n) = name.strip_prefix("ECLKI_ECLKSYNC") {
+            if let Some(o) = id(&format!("JECLKO_ECLKSYNC{n}")) {
+                out.push(ClockArc::Sync {
+                    from: w,
+                    to: Wire { x: w.x, y: w.y, name: o },
+                });
+            }
+        }
+        // G_BANK<b>ECLK<n> -> BNK_ECLK<n> at each PIC tile of bank b.
+        if let Some(rest) = name.strip_prefix("G_BANK") {
+            if let Some((b, n)) = rest.split_once("ECLK") {
+                if let (Ok(b), Some(t)) = (b.parse::<u32>(), id(&format!("BNK_ECLK{n}"))) {
+                    if let Some((col, rows)) = self.banks.get(&b) {
+                        for &y in rows {
+                            span(Wire { x: *col, y, name: t }, out);
+                        }
+                    }
+                    // And the bank's corner DDRDLL tile (its CLK mux takes
+                    // BNK_ECLK0/1 there).
+                    let corner = match b {
+                        2 => Some("DDRDLL_UR"),
+                        7 => Some("DDRDLL_UL"),
+                        3 => Some("DDRDLL_LR"),
+                        6 => Some("DDRDLL_LL"),
+                        _ => None,
+                    };
+                    if let Some(c) = corner {
+                        for tile in g.tiles.iter().filter(|tile| tile.ty.starts_with(c)) {
+                            span(Wire { x: tile.x, y: tile.y, name: t }, out);
+                        }
+                    }
+                }
+            }
+        }
         // G_<qq>PCLK<n> at (0, 0) -> G_HPRX<n>00 at each spine of qq.
         if let Some(rest) = name.strip_prefix("G_") {
             if rest.len() > 6 && &rest[2..6] == "PCLK" {
@@ -284,6 +333,11 @@ pub fn route_clock(
         close(source) || sinks.iter().any(|&s| close(s))
     };
     let wanted: HashSet<Wire> = sinks.iter().copied().collect();
+    // Once a path is on the global network it stays off the fabric
+    // interconnect (the H0x/V0x wires). A clock that leaves the spine for
+    // fabric wires has a skew that the sinks on the spine do not see, and
+    // hold breaks between the two.
+    let mut spine: HashSet<Wire> = HashSet::new();
     let mut left = wanted.len();
     let mut found: HashSet<Wire> = HashSet::new();
     let mut dist: HashMap<Wire, u32> = HashMap::from([(source, 0)]);
@@ -308,8 +362,20 @@ pub fn route_clock(
             if taken.contains(&v) {
                 continue;
             }
-            let global = !matches!(step, ClockArc::Pip(_)) || is_global(g, v);
-            if !global && !near_any(v) {
+            // A sink on an ECLKSYNC input is that bel's clock: the net
+            // ends there, its output is another net.
+            // (The database also has the bel as a fixed ECLKI -> ECLKO pip.)
+            if wanted.contains(&w) && g.names[w.name as usize].contains("_ECLKSYNC") {
+                continue;
+            }
+            let global = !matches!(step, ClockArc::Pip(_)) || is_global(g, v) || edge_clock_wire(g, v);
+            let on = global || spine.contains(&w);
+            if on && !global && fabric_wire(g, v) {
+                continue;
+            }
+            if !on && (!near_any(v) || wanted.contains(&v)) {
+                // Before the spine: general wires near the ends only, and
+                // never straight into a sink.
                 continue;
             }
             let c = d + if global {
@@ -320,6 +386,11 @@ pub fn route_clock(
             if dist.get(&v).is_none_or(|&b| c < b) {
                 dist.insert(v, c);
                 parent.insert(v, step);
+                if on {
+                    spine.insert(v);
+                } else {
+                    spine.remove(&v);
+                }
                 heap.push((Reverse(c), v));
             }
         }
@@ -389,7 +460,7 @@ pub fn tree_config(
                         .push((p.sink.clone(), p.source.clone()));
                 }
             }
-            ClockArc::Span { .. } => {}
+            ClockArc::Span { .. } | ClockArc::Sync { .. } => {}
             ClockArc::RefCs { from, .. } => {
                 let sel = g
                     .name_id_of("JSEL_PLLREFCS")
@@ -428,4 +499,52 @@ pub fn tree_config(
         }
     }
     Ok(())
+}
+
+/// The edge clock wires (ECLKSYNC, the bank ECLKs, the IOLOGIC ECLK
+/// muxes, CLKDIV inputs): clock wires the global name test misses.
+fn edge_clock_wire(g: &Graph, w: Wire) -> bool {
+    let n = &g.names[w.name as usize];
+    n.contains("ECLK") || n.starts_with("CLKI") || n.contains("CLKDIV")
+}
+
+/// The fabric interconnect: the H00..H06 and V00..V06 wires, with or
+/// without a neighbour prefix (`N1_`, `S3_`).
+fn fabric_wire(g: &Graph, w: Wire) -> bool {
+    let n = g.names[w.name as usize].as_bytes();
+    let n = match n {
+        [b'N' | b'S' | b'E' | b'W', d, b'_', rest @ ..] if d.is_ascii_digit() => rest,
+        _ => n,
+    };
+    matches!(n, [b'H' | b'V', b'0', d, ..] if d.is_ascii_digit())
+}
+
+/// The left / right I/O banks: column and PIC rows, from `iodb.json`.
+fn load_banks(path: &Path) -> Result<BTreeMap<u32, (i16, Vec<i16>)>> {
+    let text = std::fs::read_to_string(path).map_err(|e| err!("{}: {e}", path.display()))?;
+    let v: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| err!("{}: {e}", path.display()))?;
+    let mut banks: BTreeMap<u32, (i16, Vec<i16>)> = BTreeMap::new();
+    for p in v["pio_metadata"].as_array().ok_or(err!("iodb.json: pio_metadata"))? {
+        let (Some(bank), Some(col), Some(row)) = (p["bank"].as_u64(), p["col"].as_i64(), p["row"].as_i64()) else {
+            continue;
+        };
+        // The top row has no ECLK (the bottom row drops out below: one row).
+        if row == 0 {
+            continue;
+        }
+        let (Ok(bank), Ok(col), Ok(row)) = (u32::try_from(bank), i16::try_from(col), i16::try_from(row)) else {
+            continue;
+        };
+        let e = banks.entry(bank).or_insert((col, Vec::new()));
+        if e.0 == col && !e.1.contains(&row) {
+            e.1.push(row);
+        }
+    }
+    // Only edge banks with one column (left 0, right) keep ECLK rows.
+    banks.retain(|_, (_, rows)| rows.len() > 1);
+    for (_, rows) in banks.values_mut() {
+        rows.sort_unstable();
+    }
+    Ok(banks)
 }

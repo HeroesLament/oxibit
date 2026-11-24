@@ -1,0 +1,492 @@
+//! sysDSP: MULT18X18D and ALU54B.
+//!
+//! A DSP block spans nine tiles (`MIB_DSP0..8`, with `MIB2_DSP*`); its
+//! MULT18 bels sit at columns 0, 1, 4, 5 of the block and its ALU54 bels at
+//! 3 and 7, so a bel at column x with index z belongs to the block
+//! starting at x - z. An ALU54B takes the two MULT18X18Ds of its half (ALU
+//! 3 with MULT 0 on MA and MULT 1 on MB, ALU 7 with 4 and 5), as nextpnr's
+//! `pack_dsps` constrains them.
+//!
+//! Settings follow nextpnr's `write_mult18` / `write_alu54`, written into
+//! every tile of the block that has them: the register and reset options
+//! from the parameters, `MODE`, `CIBOUT_BYP ON` for an unregistered
+//! MULT18, the block side's `CIBOUT ON`, and the CLK / CE / RST muxes set
+//! to pass. Unconnected data inputs are tied low (`tieoff_dsp_ports`);
+//! inputs synthesis tied to a constant are tied to it.
+//!
+//! Synthesis keeps them as black-box cells: the random check does not
+//! model the arithmetic, the silicon probe does.
+
+use std::collections::{BTreeMap, HashMap, HashSet};
+
+use crate::bels::{BelId, Bels};
+use crate::chip::Level;
+use crate::config::TileConfig;
+use crate::db::DeviceDb;
+use crate::graph::Graph;
+use crate::netlist::{Cell, Netlist, Prim, PrimPin};
+use crate::{Result, err};
+
+/// Port declarations (from the Lattice library's port lists), for synthesis.
+pub const PRIMITIVES: &str = "
+module MULT18X18D(input A17, A16, A15, A14, A13, A12, A11, A10, A9, A8, A7, A6, A5, A4, A3, A2, 
+A1, A0, B17, B16, B15, B14, B13, B12, B11, B10, B9, B8, B7, B6, B5, B4, B3, B2, B1, B0, C17, 
+C16, C15, C14, C13, C12, C11, C10, C9, C8, C7, C6, C5, C4, C3, C2, C1, C0, SIGNEDA, SIGNEDB, 
+SOURCEA, SOURCEB, CLK3, CLK2, CLK1, CLK0, CE3, CE2, CE1, CE0, RST3, RST2, RST1, RST0, SRIA17, 
+SRIA16, SRIA15, SRIA14, SRIA13, SRIA12, SRIA11, SRIA10, SRIA9, SRIA8, SRIA7, SRIA6, SRIA5, 
+SRIA4, SRIA3, SRIA2, SRIA1, SRIA0, SRIB17, SRIB16, SRIB15, SRIB14, SRIB13, SRIB12, SRIB11, 
+SRIB10, SRIB9, SRIB8, SRIB7, SRIB6, SRIB5, SRIB4, SRIB3, SRIB2, SRIB1, SRIB0,
+  output SROA17, SROA16, SROA15, SROA14, SROA13, SROA12, SROA11, SROA10, SROA9, SROA8, SROA7, 
+SROA6, SROA5, SROA4, SROA3, SROA2, SROA1, SROA0, SROB17, SROB16, SROB15, SROB14, SROB13, 
+SROB12, SROB11, SROB10, SROB9, SROB8, SROB7, SROB6, SROB5, SROB4, SROB3, SROB2, SROB1, SROB0, 
+ROA17, ROA16, ROA15, ROA14, ROA13, ROA12, ROA11, ROA10, ROA9, ROA8, ROA7, ROA6, ROA5, ROA4, 
+ROA3, ROA2, ROA1, ROA0, ROB17, ROB16, ROB15, ROB14, ROB13, ROB12, ROB11, ROB10, ROB9, ROB8, 
+ROB7, ROB6, ROB5, ROB4, ROB3, ROB2, ROB1, ROB0, ROC17, ROC16, ROC15, ROC14, ROC13, ROC12, 
+ROC11, ROC10, ROC9, ROC8, ROC7, ROC6, ROC5, ROC4, ROC3, ROC2, ROC1, ROC0, P35, P34, P33, P32, 
+P31, P30, P29, P28, P27, P26, P25, P24, P23, P22, P21, P20, P19, P18, P17, P16, P15, P14, P13, 
+P12, P11, P10, P9, P8, P7, P6, P5, P4, P3, P2, P1, P0, SIGNEDP);
+endmodule
+module ALU54B(input CE3, CE2, CE1, CE0, CLK3, CLK2, CLK1, CLK0, RST3, RST2, RST1, RST0, 
+SIGNEDIA, SIGNEDIB, SIGNEDCIN, A35, A34, A33, A32, A31, A30, A29, A28, A27, A26, A25, A24, A23, 
+A22, A21, A20, A19, A18, A17, A16, A15, A14, A13, A12, A11, A10, A9, A8, A7, A6, A5, A4, A3, 
+A2, A1, A0, B35, B34, B33, B32, B31, B30, B29, B28, B27, B26, B25, B24, B23, B22, B21, B20, 
+B19, B18, B17, B16, B15, B14, B13, B12, B11, B10, B9, B8, B7, B6, B5, B4, B3, B2, B1, B0, C53, 
+C52, C51, C50, C49, C48, C47, C46, C45, C44, C43, C42, C41, C40, C39, C38, C37, C36, C35, C34, 
+C33, C32, C31, C30, C29, C28, C27, C26, C25, C24, C23, C22, C21, C20, C19, C18, C17, C16, C15, 
+C14, C13, C12, C11, C10, C9, C8, C7, C6, C5, C4, C3, C2, C1, C0, CFB53, CFB52, CFB51, CFB50, 
+CFB49, CFB48, CFB47, CFB46, CFB45, CFB44, CFB43, CFB42, CFB41, CFB40, CFB39, CFB38, CFB37, 
+CFB36, CFB35, CFB34, CFB33, CFB32, CFB31, CFB30, CFB29, CFB28, CFB27, CFB26, CFB25, CFB24, 
+CFB23, CFB22, CFB21, CFB20, CFB19, CFB18, CFB17, CFB16, CFB15, CFB14, CFB13, CFB12, CFB11, 
+CFB10, CFB9, CFB8, CFB7, CFB6, CFB5, CFB4, CFB3, CFB2, CFB1, CFB0, MA35, MA34, MA33, MA32, 
+MA31, MA30, MA29, MA28, MA27, MA26, MA25, MA24, MA23, MA22, MA21, MA20, MA19, MA18, MA17, MA16, 
+MA15, MA14, MA13, MA12, MA11, MA10, MA9, MA8, MA7, MA6, MA5, MA4, MA3, MA2, MA1, MA0, MB35, 
+MB34, MB33, MB32, MB31, MB30, MB29, MB28, MB27, MB26, MB25, MB24, MB23, MB22, MB21, MB20, MB19, 
+MB18, MB17, MB16, MB15, MB14, MB13, MB12, MB11, MB10, MB9, MB8, MB7, MB6, MB5, MB4, MB3, MB2, 
+MB1, MB0, CIN53, CIN52, CIN51, CIN50, CIN49, CIN48, CIN47, CIN46, CIN45, CIN44, CIN43, CIN42, 
+CIN41, CIN40, CIN39, CIN38, CIN37, CIN36, CIN35, CIN34, CIN33, CIN32, CIN31, CIN30, CIN29, 
+CIN28, CIN27, CIN26, CIN25, CIN24, CIN23, CIN22, CIN21, CIN20, CIN19, CIN18, CIN17, CIN16, 
+CIN15, CIN14, CIN13, CIN12, CIN11, CIN10, CIN9, CIN8, CIN7, CIN6, CIN5, CIN4, CIN3, CIN2, CIN1, 
+CIN0, OP10, OP9, OP8, OP7, OP6, OP5, OP4, OP3, OP2, OP1, OP0,
+  output R53, R52, R51, R50, R49, R48, R47, R46, R45, R44, R43, R42, R41, R40, R39, R38, R37, 
+R36, R35, R34, R33, R32, R31, R30, R29, R28, R27, R26, R25, R24, R23, R22, R21, R20, R19, R18, 
+R17, R16, R15, R14, R13, R12, R11, R10, R9, R8, R7, R6, R5, R4, R3, R2, R1, R0, CO53, CO52, 
+CO51, CO50, CO49, CO48, CO47, CO46, CO45, CO44, CO43, CO42, CO41, CO40, CO39, CO38, CO37, CO36, 
+CO35, CO34, CO33, CO32, CO31, CO30, CO29, CO28, CO27, CO26, CO25, CO24, CO23, CO22, CO21, CO20, 
+CO19, CO18, CO17, CO16, CO15, CO14, CO13, CO12, CO11, CO10, CO9, CO8, CO7, CO6, CO5, CO4, CO3, 
+CO2, CO1, CO0, EQZ, EQZM, EQOM, EQPAT, EQPATB, OVER, UNDER, OVERUNDER, SIGNEDR);
+endmodule
+";
+
+pub const TYPES: &[&str] = &["MULT18X18D", "ALU54B"];
+
+pub fn is_dsp(ty: &str) -> bool {
+    TYPES.contains(&ty)
+}
+
+/// Inputs nextpnr feeds from a routed constant (`pack_constants`): their
+/// CIB inputs are CE, LSR or CLK muxes, which have no low constant.
+pub const ROUTED: [&str; 13] = ["CLK", "CE", "RST", "SRO", "SRI", "RO", "MA", "MB", "CFB", "CIN", "SOURCE", "SIGNED", "OP"];
+
+/// Whether a constant on `pin` of a DSP is a routed constant net.
+pub fn routed_const(pin: &str) -> bool {
+    ROUTED.iter().any(|s| pin.starts_with(s))
+}
+
+/// ALU54B inputs that only the block's own wires reach (the MULT18X18D
+/// products, register outputs and signs, the cascade): a constant on one
+/// has no route, so it is left open.
+pub fn dedicated(ty: &str, pin: &str) -> bool {
+    let bus = |p: &str| pin.strip_prefix(p).is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+    ty == "ALU54B"
+        && (["MA", "MB", "A", "B", "CFB", "CIN"].iter().any(|p| bus(p))
+            || matches!(pin, "SIGNEDIA" | "SIGNEDIB" | "SIGNEDCIN"))
+}
+
+/// Clock inputs.
+pub fn is_clock_input(ty: &str, pin: &str) -> bool {
+    is_dsp(ty) && matches!(pin, "CLK0" | "CLK1" | "CLK2" | "CLK3")
+}
+
+/// The bel index (`MULT18_<z>`, `ALU54_<z>`) and the block's first column.
+fn block(bels: &Bels, b: BelId) -> (i16, i16, i16) {
+    let t = bels.template(b);
+    let z: i16 = t
+        .name
+        .rsplit('_')
+        .next()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let bel = bels.bels[b as usize];
+    (z, bel.x - z, bel.y)
+}
+
+/// Bels for every DSP primitive.
+pub fn assign(bels: &Bels, nl: &Netlist) -> Result<HashMap<usize, BelId>> {
+    let drivers = nl.drivers();
+    let all = |ty: &str| -> Vec<BelId> {
+        (0..bels.bels.len())
+            .map(|k| BelId::try_from(k).expect("fits"))
+            .filter(|&b| bels.template(b).ty == ty)
+            .collect()
+    };
+    let mults = all("MULT18X18D");
+    let alus = all("ALU54B");
+    let mut out: HashMap<usize, BelId> = HashMap::new();
+    let mut used: HashSet<BelId> = HashSet::new();
+    // The MULT18X18D driving an ALU54B input bus (by its bit 0).
+    let feeder = |p: &Prim, bus: &str| -> Option<usize> {
+        let Some(PrimPin::In(Some(n))) = p.pin(&format!("{bus}0")) else { return None };
+        let d = drivers[n as usize]? as usize;
+        matches!(&nl.cells[d], Cell::Prim(q) if q.ty == "MULT18X18D").then_some(d)
+    };
+    // ALU54Bs first, with their multipliers.
+    for (i, c) in nl.cells.iter().enumerate() {
+        let Cell::Prim(p) = c else { continue };
+        if p.ty != "ALU54B" {
+            continue;
+        }
+        let ma = feeder(p, "MA");
+        let mb = feeder(p, "MB");
+        let b = alus
+            .iter()
+            .copied()
+            .find(|&b| {
+                if used.contains(&b) {
+                    return false;
+                }
+                let (z, x0, y) = block(bels, b);
+                let mult_free = |mz: i16| {
+                    mults.iter().any(|&m| {
+                        let (z2, x2, y2) = block(bels, m);
+                        z2 == mz && x2 == x0 && y2 == y && !used.contains(&m)
+                    })
+                };
+                mult_free(z - 3) && mult_free(z - 2)
+            })
+            .ok_or_else(|| err!("ALU54B {}: no free ALU54 with its two MULT18s", p.name))?;
+        used.insert(b);
+        out.insert(i, b);
+        let (z, x0, y) = block(bels, b);
+        for (m, mz) in [(ma, z - 3), (mb, z - 2)] {
+            let Some(m) = m else { continue };
+            if out.contains_key(&m) {
+                return Err(err!("ALU54B {}: a MULT18X18D feeds two ALU54Bs", p.name));
+            }
+            let mb = mults
+                .iter()
+                .copied()
+                .find(|&mm| block(bels, mm) == (mz, x0, y))
+                .ok_or_else(|| err!("no MULT18_{mz} beside ALU54 {}", bels.template(b).name))?;
+            used.insert(mb);
+            out.insert(m, mb);
+        }
+    }
+    for (i, c) in nl.cells.iter().enumerate() {
+        let Cell::Prim(p) = c else { continue };
+        if p.ty != "MULT18X18D" || out.contains_key(&i) {
+            continue;
+        }
+        let b = mults
+            .iter()
+            .copied()
+            .find(|b| !used.contains(b))
+            .ok_or_else(|| err!("MULT18X18D {}: no free MULT18", p.name))?;
+        used.insert(b);
+        out.insert(i, b);
+    }
+    Ok(out)
+}
+
+/// A 56-bit pattern parameter (`0x...`), LSB first.
+fn pattern(p: &Prim, name: &str) -> Result<Vec<bool>> {
+    let s = p.param_str(name).unwrap_or_else(|| "0x00000000000000".to_owned());
+    let hex = s.trim_start_matches("0x").trim_start_matches("0X");
+    let v = u64::from_str_radix(if hex.is_empty() { "0" } else { hex }, 16)
+        .map_err(|_| err!("{} {}: {name} {s} is not hex", p.ty, p.name))?;
+    Ok((0..56).map(|i| (v >> i) & 1 == 1).collect())
+}
+
+/// Write every DSP primitive's settings and ties.
+pub fn configure(
+    g: &Graph,
+    db: &DeviceDb,
+    bels: &Bels,
+    nl: &Netlist,
+    at: &HashMap<usize, BelId>,
+    tiles: &mut BTreeMap<String, TileConfig>,
+) -> Result<()> {
+    let mut cells: Vec<usize> = at.keys().copied().collect();
+    cells.sort_unstable();
+    for i in cells {
+        let Cell::Prim(p) = &nl.cells[i] else { continue };
+        if !is_dsp(&p.ty) {
+            continue;
+        }
+        let bel = at[&i];
+        let (z, x0, y) = block(bels, bel);
+        let s = |k: &str, d: &str| p.param_str(k).unwrap_or_else(|| d.to_owned());
+        let mut enums: Vec<(String, String)> = Vec::new();
+        let mut words: Vec<(String, Vec<bool>)> = Vec::new();
+        let (pre, regs): (String, &[(&str, &str)]) = if p.ty == "MULT18X18D" {
+            (
+                format!("MULT18_{z}"),
+                &[
+                    ("REG_INPUTA_CLK", "NONE"),
+                    ("REG_INPUTA_CE", "CE0"),
+                    ("REG_INPUTA_RST", "RST0"),
+                    ("REG_INPUTB_CLK", "NONE"),
+                    ("REG_INPUTB_CE", "CE0"),
+                    ("REG_INPUTB_RST", "RST0"),
+                    ("REG_INPUTC_CLK", "NONE"),
+                    ("REG_PIPELINE_CLK", "NONE"),
+                    ("REG_PIPELINE_CE", "CE0"),
+                    ("REG_PIPELINE_RST", "RST0"),
+                    ("REG_OUTPUT_CLK", "NONE"),
+                    ("CLK0_DIV", "ENABLED"),
+                    ("CLK1_DIV", "ENABLED"),
+                    ("CLK2_DIV", "ENABLED"),
+                    ("CLK3_DIV", "ENABLED"),
+                    ("GSR", "ENABLED"),
+                    ("SOURCEB_MODE", "B_SHIFT"),
+                    ("RESETMODE", "SYNC"),
+                ],
+            )
+        } else {
+            (
+                format!("ALU54_{z}"),
+                &[
+                    ("REG_INPUTC0_CLK", "NONE"),
+                    ("REG_INPUTC1_CLK", "NONE"),
+                    ("REG_OPCODEOP0_0_CLK", "NONE"),
+                    ("REG_OPCODEOP0_0_CE", "CE0"),
+                    ("REG_OPCODEOP0_0_RST", "RST0"),
+                    ("REG_OPCODEOP1_0_CLK", "NONE"),
+                    ("REG_OPCODEOP0_1_CLK", "NONE"),
+                    ("REG_OPCODEOP1_1_CLK", "NONE"),
+                    ("REG_OPCODEOP0_1_CE", "CE0"),
+                    ("REG_OPCODEOP0_1_RST", "RST0"),
+                    ("REG_OPCODEIN_0_CLK", "NONE"),
+                    ("REG_OPCODEIN_0_CE", "CE0"),
+                    ("REG_OPCODEIN_0_RST", "RST0"),
+                    ("REG_OPCODEIN_1_CLK", "NONE"),
+                    ("REG_OPCODEIN_1_CE", "CE0"),
+                    ("REG_OPCODEIN_1_RST", "RST0"),
+                    ("REG_OUTPUT0_CLK", "NONE"),
+                    ("REG_OUTPUT1_CLK", "NONE"),
+                    ("REG_FLAG_CLK", "NONE"),
+                    ("MCPAT_SOURCE", "STATIC"),
+                    ("MASKPAT_SOURCE", "STATIC"),
+                    ("CLK0_DIV", "ENABLED"),
+                    ("CLK1_DIV", "ENABLED"),
+                    ("CLK2_DIV", "ENABLED"),
+                    ("CLK3_DIV", "ENABLED"),
+                    ("GSR", "ENABLED"),
+                    ("RESETMODE", "SYNC"),
+                    ("FORCE_ZERO_BARREL_SHIFT", "DISABLED"),
+                    ("LEGACY", "DISABLED"),
+                ],
+            )
+        };
+        for &(k, d) in regs {
+            enums.push((format!("{pre}.{k}"), s(k, d)));
+        }
+        if p.ty == "MULT18X18D" {
+            if z == 0 || z == 4 {
+                enums.push((format!("{pre}.REG_OUTPUT_RST"), s("REG_OUTPUT_RST", "RST0")));
+            }
+            enums.push((format!("{pre}.MODE"), "MULT18X18D".to_owned()));
+            // Unregistered: the output register bypassed. The Trellis fuzzer
+            // (076-dsp_cibo) set CIBOUT_BYP ON exactly when REG_OUTPUT_CLK
+            // was NONE, so it is the register's bypass mux. nextpnr leaves it
+            // off for a MULT feeding an ALU54B; on silicon that ALU then read
+            // 0 for every opcode (MA/MB from an unclocked register).
+            if s("REG_OUTPUT_CLK", "NONE") == "NONE" {
+                enums.push((format!("{pre}.CIBOUT_BYP"), "ON".to_owned()));
+            }
+            for sig in ["CLK", "CE", "RST"] {
+                for k in 0..4 {
+                    enums.push((format!("{pre}.{sig}{k}MUX"), format!("{sig}{k}")));
+                }
+            }
+        } else {
+            for w in ["MASK01", "MCPAT", "MASKPAT", "RNDPAT"] {
+                words.push((format!("{pre}.{w}"), pattern(p, w)?));
+            }
+            enums.push((format!("{pre}.MODE"), "ALU54B".to_owned()));
+        }
+        let side = if z < 4 { "DSP_LEFT" } else { "DSP_RIGHT" };
+        enums.push((format!("{side}.CIBOUT"), "ON".to_owned()));
+        // Into every tile of the block that has the setting.
+        let block_tiles: Vec<&crate::graph::TileLoc> = g
+            .tiles
+            .iter()
+            .filter(|t| t.y == y && (x0..=x0 + 8).contains(&t.x))
+            .collect();
+        for (k, v) in &enums {
+            let mut n = 0;
+            for t in &block_tiles {
+                let Some(e) = db.tile_bits(&t.ty)?.enums.get(k) else { continue };
+                if !e.options.contains_key(v.as_str()) {
+                    return Err(err!("{} {}: {k} has no option {v}", p.ty, p.name));
+                }
+                tiles.entry(t.name.clone()).or_default().enums.push((k.clone(), v.clone()));
+                n += 1;
+            }
+            if n == 0 {
+                return Err(err!("{} {}: no tile of its block has {k}", p.ty, p.name));
+            }
+        }
+        for (k, v) in &words {
+            for t in &block_tiles {
+                if db.tile_bits(&t.ty)?.words.contains_key(k) {
+                    tiles.entry(t.name.clone()).or_default().words.push((k.clone(), v.clone()));
+                }
+            }
+        }
+        // Ties: inputs synthesis tied, and unconnected data inputs low.
+        for (pin, w) in bels.pins(bel).filter(|(p, _)| p.dir == crate::bels::PinDir::In).map(|(pp, w)| (pp.name.clone(), w)).collect::<Vec<_>>() {
+            if matches!(p.pin(&pin), Some(PrimPin::In(Some(_)))) {
+                continue;
+            }
+            let level = match p.attrs.get(&crate::iol::tie_attr(&pin)).map(String::as_str) {
+                Some("1") => Level::High,
+                Some("0") => Level::Low,
+                _ => {
+                    if routed_const(&pin) || dedicated(&p.ty, &pin) {
+                        continue;
+                    }
+                    Level::Low
+                }
+            };
+            crate::io::tie(g, db, w, level, tiles)?;
+        }
+    }
+    Ok(())
+}
+
+/// Multiplier inference, after yosys mul2dsp for ECP5 (DSP_A/B_MAXWIDTH 18,
+/// MINWIDTH 2). The operands are first trimmed of their context extension
+/// (zeros, or copies of the sign bit), as yosys wreduce does.
+///
+/// Operands of 2 to 18 bits with a result of at most 36 bits: one
+/// MULT18X18D with no registers, operands extended to 18 bits (SIGNEDA /
+/// SIGNEDB follow the cell), P the exact product, the result its low bits.
+///
+/// Wider operands: each is cut into 18-bit chunks from the bottom. The
+/// chunks are unsigned except the top chunk of a signed operand, so each
+/// chunk product a_i * b_j is one MULT18X18D with SIGNEDA / SIGNEDB set for
+/// a top signed chunk, exact in 36 bits. The products are extended to the
+/// result width (sign-extended when either chunk is signed), shifted by
+/// 18 (i + j) and added. Products shifted past the result are not made; at
+/// most `MAX_SPLIT` MULTs per multiply, else the multiply stays logic.
+///
+/// A multiply of two constants stays logic. Returns the MULTs made.
+pub fn infer_mul(m: &mut oxibit_hdl::netlist::Module) -> usize {
+    use oxibit_hdl::netlist::{Bit, Cell as HCell, Op, SigSpec};
+    const MAX_SPLIT: usize = 16;
+    let is_const = |s: &SigSpec| s.0.iter().all(|b| matches!(b, Bit::Zero | Bit::One));
+    let trim = |s: &SigSpec, signed: bool| -> SigSpec {
+        let mut v = s.0.clone();
+        while v.len() > 1 {
+            let top = v[v.len() - 1];
+            let ext = if signed { top == v[v.len() - 2] } else { top == Bit::Zero };
+            if !ext {
+                break;
+            }
+            v.pop();
+        }
+        SigSpec(v)
+    };
+    let bit = |v: bool| SigSpec(vec![if v { Bit::One } else { Bit::Zero }]);
+    // One MULT18X18D: 18-bit operands, the signs, P bits to `p` (<= 36).
+    let mult = |name: String, a18: &SigSpec, b18: &SigSpec, sa: bool, sb: bool, p: &SigSpec| {
+        let mut conns = BTreeMap::new();
+        for i in 0..18 {
+            conns.insert(format!("A{i}"), a18.slice(i, 1));
+            conns.insert(format!("B{i}"), b18.slice(i, 1));
+        }
+        conns.insert("SIGNEDA".to_owned(), bit(sa));
+        conns.insert("SIGNEDB".to_owned(), bit(sb));
+        conns.insert("SOURCEA".to_owned(), bit(false));
+        conns.insert("SOURCEB".to_owned(), bit(false));
+        for i in 0..p.width() {
+            conns.insert(format!("P{i}"), p.slice(i, 1));
+        }
+        HCell::Instance { ty: "MULT18X18D".to_owned(), name, params: BTreeMap::new(), conns, attrs: BTreeMap::new() }
+    };
+
+    let mut n = 0;
+    let mut split: Vec<(usize, SigSpec, SigSpec, bool, SigSpec)> = Vec::new();
+    for (ci, c) in m.cells.iter_mut().enumerate() {
+        let HCell::Binary { op: Op::Mul, a, b, signed, y } = c else { continue };
+        let (a, b) = (trim(a, *signed), trim(b, *signed));
+        let (wa, wb, wy) = (a.width(), b.width(), y.width());
+        if wa < 2 || wb < 2 || wy == 0 || (is_const(&a) && is_const(&b)) {
+            continue;
+        }
+        if wa <= 18 && wb <= 18 && wy <= 36 {
+            *c = mult(format!("$mul{n}"), &a.extend(18, *signed), &b.extend(18, *signed), *signed, *signed, y);
+            n += 1;
+            continue;
+        }
+        let chunks = |w: u32| w.div_ceil(18) as usize;
+        let made = (0..chunks(wa))
+            .flat_map(|i| (0..chunks(wb)).map(move |j| (i, j)))
+            .filter(|&(i, j)| 18 * (i + j) < wy as usize)
+            .count();
+        if made <= MAX_SPLIT {
+            split.push((ci, a, b, *signed, y.clone()));
+        }
+    }
+    // The split multiplies: each cell becomes its chunk MULTs and adders.
+    let mut out: Vec<(usize, Vec<HCell>)> = Vec::new();
+    for (ci, a, b, signed, y) in split {
+        let wy = y.width();
+        let cut = |s: &SigSpec| -> Vec<(SigSpec, bool)> {
+            let w = s.width();
+            let k = w.div_ceil(18);
+            (0..k)
+                .map(|i| {
+                    let lo = 18 * i;
+                    let top = i == k - 1;
+                    let sg = signed && top;
+                    (s.slice(lo, (w - lo).min(18)).extend(18, sg), sg)
+                })
+                .collect()
+        };
+        let (ac, bc) = (cut(&a), cut(&b));
+        let mut cells = Vec::new();
+        let mut terms: Vec<SigSpec> = Vec::new();
+        for (i, (ai, sa)) in ac.iter().enumerate() {
+            for (j, (bj, sb)) in bc.iter().enumerate() {
+                let sh = 18 * (i + j) as u32;
+                if sh >= wy {
+                    continue;
+                }
+                let pw = 36.min(wy - sh);
+                let p = m.wire(pw);
+                cells.push(mult(format!("$mul{n}"), ai, bj, *sa, *sb, &p));
+                n += 1;
+                // p << sh, extended to wy.
+                let ext = p.extend(wy - sh, *sa || *sb);
+                terms.push(SigSpec::constant(0, sh).concat(&ext));
+            }
+        }
+        // Sum the terms; the last add drives y.
+        let mut acc = terms[0].clone();
+        for (k, t) in terms.iter().enumerate().skip(1) {
+            let s = if k == terms.len() - 1 { y.clone() } else { m.wire(wy) };
+            cells.push(HCell::Binary { op: Op::Add, a: acc, b: t.clone(), signed: false, y: s.clone() });
+            acc = s;
+        }
+        if terms.len() == 1 {
+            m.connects.push((y.clone(), acc));
+        }
+        out.push((ci, cells));
+    }
+    // Replace from the back so indices stay valid.
+    for (ci, cells) in out.into_iter().rev() {
+        m.cells.splice(ci..=ci, cells);
+    }
+    n
+}

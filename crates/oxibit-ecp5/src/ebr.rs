@@ -45,9 +45,302 @@ use crate::config::{ChipConfig, TileConfig};
 use crate::db::DeviceDb;
 use crate::graph::Graph;
 use crate::io::{tie, tie_high};
-use crate::netlist::{Cell, Ebr, EbrWidth, NetId, Netlist, Polarity};
+use crate::netlist::{Cell, Ebr, EbrWidth, NetId, Netlist, Polarity, Prim, PrimPin};
+use oxibit_hdl::netlist::Param;
 use crate::{Result, err};
 
+
+/// Port declarations of the instantiable block RAMs, for synthesis.
+pub const PRIMITIVES: &str = "
+module DP16KD(input DIA17, DIA16, DIA15, DIA14, DIA13, DIA12, DIA11, DIA10, DIA9, DIA8, DIA7, DIA6, 
+DIA5, DIA4, DIA3, DIA2, DIA1, DIA0, ADA13, ADA12, ADA11, ADA10, ADA9, ADA8, ADA7, ADA6, ADA5, ADA4, 
+ADA3, ADA2, ADA1, ADA0, CEA, OCEA, CLKA, WEA, CSA2, CSA1, CSA0, RSTA, DIB17, DIB16, DIB15, DIB14, 
+DIB13, DIB12, DIB11, DIB10, DIB9, DIB8, DIB7, DIB6, DIB5, DIB4, DIB3, DIB2, DIB1, DIB0, ADB13, 
+ADB12, ADB11, ADB10, ADB9, ADB8, ADB7, ADB6, ADB5, ADB4, ADB3, ADB2, ADB1, ADB0, CEB, OCEB, CLKB, 
+WEB, CSB2, CSB1, CSB0, RSTB,
+  output DOA17, DOA16, DOA15, DOA14, DOA13, DOA12, DOA11, DOA10, DOA9, DOA8, DOA7, DOA6, DOA5, 
+DOA4, DOA3, DOA2, DOA1, DOA0, DOB17, DOB16, DOB15, DOB14, DOB13, DOB12, DOB11, DOB10, DOB9, DOB8, 
+DOB7, DOB6, DOB5, DOB4, DOB3, DOB2, DOB1, DOB0);
+endmodule
+module PDPW16KD(input DI35, DI34, DI33, DI32, DI31, DI30, DI29, DI28, DI27, DI26, DI25, DI24, DI23, 
+DI22, DI21, DI20, DI19, DI18, DI17, DI16, DI15, DI14, DI13, DI12, DI11, DI10, DI9, DI8, DI7, DI6, 
+DI5, DI4, DI3, DI2, DI1, DI0, ADW8, ADW7, ADW6, ADW5, ADW4, ADW3, ADW2, ADW1, ADW0, BE3, BE2, BE1, 
+BE0, CEW, CLKW, CSW2, CSW1, CSW0, ADR13, ADR12, ADR11, ADR10, ADR9, ADR8, ADR7, ADR6, ADR5, ADR4, 
+ADR3, ADR2, ADR1, ADR0, CER, OCER, CLKR, CSR2, CSR1, CSR0, RST,
+  output DO35, DO34, DO33, DO32, DO31, DO30, DO29, DO28, DO27, DO26, DO25, DO24, DO23, DO22, DO21, 
+DO20, DO19, DO18, DO17, DO16, DO15, DO14, DO13, DO12, DO11, DO10, DO9, DO8, DO7, DO6, DO5, DO4, 
+DO3, DO2, DO1, DO0);
+endmodule
+";
+
+/// The instantiable block RAM types. A PDPW16KD becomes a DP16KD in
+/// synthesis (nextpnr's `pack_ebr` renaming), with `DATA_WIDTH_A` 36 to
+/// mark it.
+pub const TYPES: &[&str] = &["DP16KD", "PDPW16KD"];
+
+pub fn is_bram(ty: &str) -> bool {
+    TYPES.contains(&ty)
+}
+
+pub fn is_clock_input(ty: &str, pin: &str) -> bool {
+    is_bram(ty) && matches!(pin, "CLKA" | "CLKB" | "CLKW" | "CLKR")
+}
+
+/// A control input: on a CIB CE, LSR or CLK wire. A constant on one is its
+/// `<PIN>MUX` (the pin itself for 1, INV for 0) over a high tie.
+pub fn control(pin: &str) -> bool {
+    ["CLK", "CE", "OCE", "WE", "RST", "CS"].iter().any(|p| pin.starts_with(p))
+}
+
+/// The DP16KD pins a PDPW16KD pin becomes (nextpnr `pack_ebr`).
+pub fn pdp_pins(pin: &str) -> Vec<String> {
+    let bus = |p: &str| pin.strip_prefix(p).and_then(|n| n.parse::<usize>().ok());
+    let one = |s: String| vec![s];
+    if let Some(i) = bus("BE") {
+        return one(format!("ADA{i}"));
+    }
+    if let Some(i) = bus("ADW") {
+        return one(format!("ADA{}", i + 5));
+    }
+    if let Some(i) = bus("ADR") {
+        return one(format!("ADB{i}"));
+    }
+    if let Some(i) = bus("CSW") {
+        return one(format!("CSA{i}"));
+    }
+    if let Some(i) = bus("CSR") {
+        return one(format!("CSB{i}"));
+    }
+    if let Some(i) = bus("DI") {
+        return one(if i < 18 { format!("DIA{i}") } else { format!("DIB{}", i - 18) });
+    }
+    if let Some(i) = bus("DO") {
+        return one(if i < 18 { format!("DOB{i}") } else { format!("DOA{}", i - 18) });
+    }
+    match pin {
+        "CLKW" => one("CLKA".into()),
+        "CLKR" => one("CLKB".into()),
+        "CEW" => one("CEA".into()),
+        "CER" => one("CEB".into()),
+        "OCER" => one("OCEB".into()),
+        "RST" => vec!["RSTA".into(), "RSTB".into()],
+        _ => one(pin.to_owned()),
+    }
+}
+
+
+/// The PDPW16KD pin a renamed DP16KD pin came from (the inverse of
+/// [`pdp_pins`]), for checks against the design.
+pub fn pdp_pin(pin: &str) -> String {
+    let bus = |p: &str| pin.strip_prefix(p).and_then(|n| n.parse::<usize>().ok());
+    if let Some(i) = bus("ADA") {
+        return if i < 4 { format!("BE{i}") } else { format!("ADW{}", i - 5) };
+    }
+    if let Some(i) = bus("ADB") {
+        return format!("ADR{i}");
+    }
+    if let Some(i) = bus("CSA") {
+        return format!("CSW{i}");
+    }
+    if let Some(i) = bus("CSB") {
+        return format!("CSR{i}");
+    }
+    if let Some(i) = bus("DIA") {
+        return format!("DI{i}");
+    }
+    if let Some(i) = bus("DIB") {
+        return format!("DI{}", i + 18);
+    }
+    if let Some(i) = bus("DOB") {
+        return format!("DO{i}");
+    }
+    if let Some(i) = bus("DOA") {
+        return format!("DO{}", i + 18);
+    }
+    match pin {
+        "CLKA" => "CLKW",
+        "CLKB" => "CLKR",
+        "CEA" => "CEW",
+        "CEB" => "CER",
+        "OCEB" => "OCER",
+        "RSTA" | "RSTB" => "RST",
+        p => p,
+    }
+    .to_owned()
+}
+
+/// The attribute marking a DP16KD that was a PDPW16KD in the design.
+pub const FROM_PDP: &str = "oxibit.from_pdpw16kd";
+/// A PDPW16KD's parameters as a DP16KD's (nextpnr `pack_ebr`).
+pub fn pdp_params(params: &mut BTreeMap<String, Param>) {
+    params.insert("DATA_WIDTH_A".into(), Param::Int(36));
+    params.remove("DATA_WIDTH_W");
+    let mut rename = |o: &str, n: &str| {
+        if let Some(v) = params.remove(o) {
+            params.insert(n.to_owned(), v);
+        }
+    };
+    rename("CLKWMUX", "CLKAMUX");
+    rename("CLKRMUX", "CLKBMUX");
+    rename("CSDECODE_W", "CSDECODE_A");
+    rename("CSDECODE_R", "CSDECODE_B");
+    rename("DATA_WIDTH_R", "DATA_WIDTH_B");
+    for (k, from, to) in [("CLKAMUX", "CLKW", "CLKA"), ("CLKBMUX", "CLKR", "CLKB")] {
+        if matches!(params.get(k), Some(Param::Str(s)) if s == from) {
+            params.insert(k.to_owned(), Param::Str(to.to_owned()));
+        }
+    }
+    let reg = match params.remove("REGMODE") {
+        Some(v) => v,
+        None => Param::Str("NOREG".into()),
+    };
+    params.insert("REGMODE_A".into(), reg.clone());
+    params.insert("REGMODE_B".into(), reg);
+}
+
+/// A parameter's bits, LSB first, `n` of them: a Verilog literal or a
+/// `0x` / `0b` string.
+fn param_bits(p: &Prim, name: &str, n: usize) -> Result<Vec<bool>> {
+    let mut v = vec![false; n];
+    match p.params.get(name) {
+        None => {}
+        Some(Param::Bits(b)) => {
+            for (i, x) in b.iter().take(n).enumerate() {
+                v[i] = *x == Some(true);
+            }
+        }
+        Some(Param::Int(i)) => {
+            for (k, x) in v.iter_mut().enumerate().take(63) {
+                *x = (i >> k) & 1 == 1;
+            }
+        }
+        Some(Param::Str(s)) => {
+            let s = s.replace('_', "");
+            let (digits, radix) = if let Some(h) = s.strip_prefix("0x") {
+                (h.to_owned(), 16)
+            } else if let Some(b) = s.strip_prefix("0b") {
+                (b.to_owned(), 2)
+            } else {
+                return Err(err!("{} {}: {name} {s:?} is not 0x.. or 0b..", p.ty, p.name));
+            };
+            let per = if radix == 16 { 4 } else { 1 };
+            for (k, c) in digits.chars().rev().enumerate() {
+                let d = c.to_digit(radix).ok_or_else(|| err!("{} {}: bad digit in {name}", p.ty, p.name))?;
+                for j in 0..per {
+                    if let Some(x) = v.get_mut(k * per + j) {
+                        *x = (d >> j) & 1 == 1;
+                    }
+                }
+            }
+        }
+    }
+    Ok(v)
+}
+
+/// An instantiated DP16KD (or a renamed PDPW16KD): nextpnr's `write_bram`,
+/// setting for setting and tie for tie.
+fn configure_prim(
+    g: &Graph,
+    db: &DeviceDb,
+    bels: &Bels,
+    b: BelId,
+    p: &Prim,
+    wid: usize,
+    cc: &mut ChipConfig,
+) -> Result<()> {
+    let bel = bels.bels[b as usize];
+    let name = bels.template(b).name.clone();
+    let loc = (bel.x, bel.y, name.as_str());
+    let s = |k: &str, d: &str| p.param_str(k).unwrap_or_else(|| d.to_owned());
+    let pdp = p.param_int("DATA_WIDTH_A") == Some(36);
+    let tiles = &mut cc.tiles;
+    if pdp {
+        set_enum(g, db, loc, "MODE", "PDPW16KD", tiles)?;
+        set_enum(g, db, loc, "PDPW16KD.DATA_WIDTH_R", &s("DATA_WIDTH_B", "36"), tiles)?;
+    } else {
+        set_enum(g, db, loc, "MODE", "DP16KD", tiles)?;
+        set_enum(g, db, loc, "DP16KD.DATA_WIDTH_A", &s("DATA_WIDTH_A", "18"), tiles)?;
+        set_enum(g, db, loc, "DP16KD.DATA_WIDTH_B", &s("DATA_WIDTH_B", "18"), tiles)?;
+        set_enum(g, db, loc, "DP16KD.WRITEMODE_A", &s("WRITEMODE_A", "NORMAL"), tiles)?;
+        set_enum(g, db, loc, "DP16KD.WRITEMODE_B", &s("WRITEMODE_B", "NORMAL"), tiles)?;
+    }
+    set_enum(g, db, loc, "REGMODE_A", &s("REGMODE_A", "NOREG"), tiles)?;
+    set_enum(g, db, loc, "REGMODE_B", &s("REGMODE_B", "NOREG"), tiles)?;
+    set_enum(g, db, loc, "RESETMODE", &s("RESETMODE", "SYNC"), tiles)?;
+    set_enum(g, db, loc, "ASYNC_RESET_RELEASE", &s("ASYNC_RESET_RELEASE", "SYNC"), tiles)?;
+    set_enum(g, db, loc, "GSR", &s("GSR", "DISABLED"), tiles)?;
+    let wid_bits: Vec<bool> = (0..9).map(|k| (wid >> (8 - k)) & 1 == 1).collect();
+    set_word(g, db, loc, "WID", &wid_bits, tiles)?;
+
+    // Ties, and the mux each unused control pin needs for its level.
+    let mut mux: BTreeMap<String, String> = BTreeMap::new();
+    for (k, _) in p.params.iter().filter(|(k, _)| k.ends_with("MUX")) {
+        if let Some(v) = p.param_str(k) {
+            mux.insert(k.clone(), v);
+        }
+    }
+    let ins: Vec<String> = bels
+        .pins(b)
+        .filter(|(pp, _)| pp.dir == crate::bels::PinDir::In)
+        .map(|(pp, _)| pp.name.clone())
+        .collect();
+    for pin in ins {
+        if pdp && matches!(pin.as_str(), "WEA" | "WEB" | "ADA4") {
+            continue;
+        }
+        if matches!(p.pin(&pin), Some(PrimPin::In(Some(_)))) {
+            continue;
+        }
+        let wire = bels.pin_wire(b, &pin).ok_or_else(|| err!("{name} has no pin {pin}"))?;
+        let at = |er| err!("{} {} ({name} R{}C{}) {pin}: {er}", p.ty, p.name, bel.y, bel.x);
+        let key = format!("{pin}MUX");
+        if control(&pin) {
+            tie_high(g, db, wire, tiles).map_err(at)?;
+            let low = matches!(pin.as_str(), "CLKA" | "CLKB" | "WEA" | "WEB" | "RSTA" | "RSTB") || pin.starts_with("CS");
+            mux.entry(key).or_insert_with(|| if low { "INV".to_owned() } else { pin.clone() });
+        } else {
+            let high = mux.get(&key).is_some_and(|v| v == "1");
+            tie(g, db, wire, if high { Level::High } else { Level::Low }, tiles).map_err(at)?;
+        }
+    }
+    let m = |k: &str, d: &str| mux.get(k).cloned().unwrap_or_else(|| d.to_owned());
+    for (port, dflt) in [("CLKA", "CLKA"), ("CLKB", "CLKB"), ("RSTA", "RSTA"), ("RSTB", "RSTB"), ("CEA", "CEA"), ("CEB", "CEB"), ("OCEA", "OCEA"), ("OCEB", "OCEB")] {
+        set_enum(g, db, loc, &format!("{port}MUX"), &m(&format!("{port}MUX"), dflt), tiles)?;
+    }
+    if !pdp {
+        set_enum(g, db, loc, "WEAMUX", &m("WEAMUX", "WEA"), tiles)?;
+        set_enum(g, db, loc, "WEBMUX", &m("WEBMUX", "WEB"), tiles)?;
+    }
+    // CSDECODE, with the bit flipped where a chip select is inverted, then
+    // MSB first as the database has it.
+    for (port, param) in [("CSA", "CSDECODE_A"), ("CSB", "CSDECODE_B")] {
+        let text = s(param, "0b000");
+        let digits = text.strip_prefix("0b").unwrap_or(&text);
+        let mut bits: Vec<bool> = (0..3).map(|i| digits.chars().rev().nth(i) == Some('1')).collect();
+        for (i, x) in bits.iter_mut().enumerate() {
+            if m(&format!("{port}{i}MUX"), "") == "INV" {
+                *x = !*x;
+            }
+        }
+        bits.reverse();
+        set_word(g, db, loc, param, &bits, tiles)?;
+    }
+    // INITVAL_00..3F: sixteen 18-bit words each, two padding bits apart.
+    let mut init = vec![0u16; 2048];
+    for i in 0..0x40 {
+        let v = param_bits(p, &format!("INITVAL_{i:02X}"), 320)?;
+        for j in 0..16 {
+            for k in 0..18 {
+                if v[20 * j + k] {
+                    init[i * 32 + j * 2 + k / 9] |= 1 << (k % 9);
+                }
+            }
+        }
+    }
+    let wid = u16::try_from(wid).map_err(|_| err!("too many block RAMs"))?;
+    cc.bram_data.insert(wid, init);
+    Ok(())
+}
 /// How a DP16KD pin is used.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Use {
@@ -178,7 +471,7 @@ pub fn assign(bels: &Bels, nl: &Netlist, near: (f64, f64)) -> Result<HashMap<usi
     let mut out = HashMap::new();
     let mut it = free.into_iter();
     for (i, c) in nl.cells.iter().enumerate() {
-        if matches!(c, Cell::Ebr(_)) {
+        if matches!(c, Cell::Ebr(_)) || matches!(c, Cell::Prim(p) if is_bram(&p.ty)) {
             let b = it
                 .next()
                 .ok_or_else(|| err!("more block RAMs than the device has"))?;
@@ -270,8 +563,13 @@ pub fn configure(
     let mut cells: Vec<(usize, BelId)> = at.iter().map(|(&c, &b)| (c, b)).collect();
     cells.sort_unstable();
     for (wid, (c, b)) in cells.into_iter().enumerate() {
-        let Cell::Ebr(e) = &nl.cells[c] else {
-            return Err(err!("cell {c} is not a block RAM"));
+        let e = match &nl.cells[c] {
+            Cell::Ebr(e) => e,
+            Cell::Prim(p) if is_bram(&p.ty) => {
+                configure_prim(g, db, bels, b, p, wid, cc)?;
+                continue;
+            }
+            _ => return Err(err!("cell {c} is not a block RAM")),
         };
         let bel = bels.bels[b as usize];
         let name = bels.template(b).name.clone();

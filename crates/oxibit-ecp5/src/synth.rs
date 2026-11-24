@@ -39,9 +39,9 @@
 //! Not yet: asynchronous reads (distributed RAM), memories deeper than
 //! 2048 words, other primitives.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
-use oxibit_hdl::netlist::{Dir, Module};
+use oxibit_hdl::netlist::{Dir, Module, Param};
 use oxibit_synth::aig::{Lit, Node};
 use oxibit_synth::lib_ports::PrimPorts;
 use oxibit_synth::lower::{self, FfKind, Lowered};
@@ -72,13 +72,24 @@ endmodule
 module JTAGG(input TCK, TMS, TDI, JTDO2, JTDO1,
   output TDO, JTDI, JTCK, JRTI2, JRTI1, JSHIFT, JUPDATE, JRSTN, JCE2, JCE1);
 endmodule
+module TRELLIS_DPR16X4S(input DI0, DI1, DI2, DI3, WAD0, WAD1, WAD2, WAD3,
+  RAD0, RAD1, RAD2, RAD3, WRE, WCK, output DO0, DO1, DO2, DO3);
+endmodule
 ";
 
 /// The primitive port table synthesis lowers instances against.
 pub fn primitive_ports() -> PrimPorts {
-    oxibit_synth::lib_ports::scan(PRIMITIVES)
+    oxibit_synth::lib_ports::scan(&format!(
+        "{PRIMITIVES}{}{}{}{}{}{}",
+        crate::iol::PRIMITIVES,
+        crate::sys::PRIMITIVES,
+        crate::clk::PRIMITIVES,
+        crate::dsp::PRIMITIVES,
+        crate::ebr::PRIMITIVES,
+        crate::dqs::PRIMITIVES
+    ))
 }
-use crate::{Result, err};
+use crate::{Result, err, soft};
 
 /// What synthesis is asked to do.
 #[derive(Clone, Copy, Debug)]
@@ -87,6 +98,8 @@ pub struct SynthOptions {
     pub carry_min: usize,
     pub area_passes: usize,
     pub exact_passes: usize,
+    /// Multiplies onto MULT18X18D (yosys synth_ecp5 does this unless -nodsp).
+    pub infer_dsp: bool,
 }
 
 impl Default for SynthOptions {
@@ -95,6 +108,7 @@ impl Default for SynthOptions {
             carry_min: 4,
             area_passes: 2,
             exact_passes: 1,
+            infer_dsp: true,
         }
     }
 }
@@ -326,6 +340,16 @@ impl Builder<'_> {
 
 /// The AIG nodes a literal's consumers need, by node.
 /// The single bit an instance connects to `pin`.
+/// A clock primitive kept as a cell: every DCSC, and a DCCA whose CE is
+/// not tied high (an ungated one dissolves into the flow's own DCC).
+fn kept_clock(inst: &lower::InstL) -> bool {
+    match inst.ty.as_str() {
+        "DCSC" | "ECLKSYNCB" | "ECLKBRIDGECS" | "CLKDIVF" => true,
+        "DCCA" => inst_bit(inst, "CE").is_some_and(|ce| ce != Lit::TRUE),
+        _ => false,
+    }
+}
+
 fn inst_bit(inst: &lower::InstL, pin: &str) -> Option<Lit> {
     inst.conns
         .iter()
@@ -381,18 +405,26 @@ pub fn synth_module(m: &Module, opts: SynthOptions) -> Result<(Netlist, SynthRep
 /// `synth_module`, also returning the lowered design (for checking).
 pub fn synth_lowered(m: &Module, opts: SynthOptions) -> Result<(Netlist, SynthReport, Lowered)> {
     let dirs = primitive_ports();
+    // Soft primitives (LUT4, flops, gates, ...) become plain logic first.
+    let mut m = m.clone();
+    soft::rewrite(&mut m)?;
+    // Pad buffer variants (IBPU, ILVDS, TRELLIS_IO, ...) as IB / OB / OBZ / BB.
+    crate::pads::canonicalize(&mut m)?;
+    // Small multiplies onto MULT18X18D (yosys mul2dsp limits).
+    if opts.infer_dsp {
+        crate::dsp::infer_mul(&mut m);
+    }
     for c in &m.cells {
         if let oxibit_hdl::netlist::Cell::Instance { ty, name, .. } = c {
             if !dirs.contains_key(ty) {
                 return Err(err!(
-                    "instance {name}: primitive {ty} is not supported (supported: EHXPLLL, DCCA, BB, OBZ, IB, OB)"
+                    "instance {name}: primitive {ty} is not supported"
                 ));
             }
         }
     }
     // Read-data registers into the read ports, one copy per read port,
     // multi-write memories to flops.
-    let mut m = m.clone();
     oxibit_synth::memdff::merge(&mut m);
     let mp_stats = oxibit_synth::memports::reshape(&mut m);
     if let Some((name, why)) = mp_stats.left.first() {
@@ -407,6 +439,10 @@ pub fn synth_lowered(m: &Module, opts: SynthOptions) -> Result<(Netlist, SynthRe
         },
     )
     .map_err(|e| err!("lower: {e}"))?;
+    // The design as lowered, kept for the simulation check: the rewrites
+    // below keep its meaning, so it is the independent reference.
+    let reference = lw.clone();
+    lutram_mems(&mut lw)?;
     let plans = plan_mems(&mut lw)?;
     fold_init_conflicts(&mut lw);
     lw.sweep();
@@ -439,7 +475,8 @@ pub fn synth_lowered(m: &Module, opts: SynthOptions) -> Result<(Netlist, SynthRe
     build(&mut b)?;
     let rep = b.report;
     let nl = b.nl;
-    Ok((nl, rep, lw))
+    let _ = lw;
+    Ok((nl, rep, reference))
 }
 
 /// A carry half before it becomes part of a CCU2C.
@@ -494,6 +531,9 @@ fn build(b: &mut Builder<'_>) -> Result<()> {
                 match on {
                     Some(k) if lw.insts[k].ty == "BB" => {
                         pad_port.insert(k, port);
+                        if !lw.insts[k].attrs.is_empty() {
+                            b.nl.pad_attrs.insert(port, lw.insts[k].attrs.clone());
+                        }
                     }
                     _ => {
                         return Err(err!(
@@ -510,6 +550,9 @@ fn build(b: &mut Builder<'_>) -> Result<()> {
                     return Err(err!("{} {} on port bit {pname}: wrong direction", lw.insts[k].ty, lw.insts[k].name));
                 }
                 pad_port.insert(k, port);
+                if !lw.insts[k].attrs.is_empty() {
+                    b.nl.pad_attrs.insert(port, lw.insts[k].attrs.clone());
+                }
             }
             b.nl.ports.push(Port {
                 name: pname.clone(),
@@ -536,7 +579,7 @@ fn build(b: &mut Builder<'_>) -> Result<()> {
     // pass their input through (the pad and the flow's own DCC).
     let dirs = primitive_ports();
     for inst in &lw.insts {
-        if matches!(inst.ty.as_str(), "EHXPLLL" | "BB" | "JTAGG") {
+        if matches!(inst.ty.as_str(), "EHXPLLL" | "BB" | "JTAGG" | soft::LUTRAM) || crate::iol::is_iol(&inst.ty) || crate::sys::is_sys(&inst.ty) || kept_clock(inst) || crate::dsp::is_dsp(&inst.ty) || crate::ebr::is_bram(&inst.ty) || crate::dqs::is_dqs(&inst.ty) {
             for (pin, bits) in &inst.conns {
                 if dirs[&inst.ty][pin].dir != Dir::Output {
                     continue;
@@ -557,7 +600,8 @@ fn build(b: &mut Builder<'_>) -> Result<()> {
         for inst in &lw.insts {
             let (from, to) = match inst.ty.as_str() {
                 "IB" => ("I", "O"),
-                "DCCA" => ("CLKI", "CLKO"),
+                "DCCA" if !kept_clock(inst) => ("CLKI", "CLKO"),
+                "TRELLIS_ECLKBUF" => ("ECLKI", "ECLKO"),
                 _ => continue,
             };
             let (Some(f), Some(t)) = (inst_bit(inst, from), inst_bit(inst, to)) else {
@@ -579,15 +623,7 @@ fn build(b: &mut Builder<'_>) -> Result<()> {
         }
     }
     for inst in &lw.insts {
-        if inst.ty == "DCCA" {
-            if let Some(ce) = inst_bit(inst, "CE") {
-                if ce != Lit::TRUE {
-                    return Err(err!(
-                        "DCCA {}: a gated clock buffer (CE not tied high) is not supported",
-                        inst.name
-                    ));
-                }
-            }
+        if inst.ty == "DCCA" && !kept_clock(inst) {
             let ok = inst_bit(inst, "CLKO").is_some_and(|l| b.net.contains_key(&l.node()));
             if !ok {
                 return Err(err!(
@@ -896,14 +932,49 @@ fn build(b: &mut Builder<'_>) -> Result<()> {
     }
     // Kept primitives, in instance order.
     for (k, inst) in lw.insts.iter().enumerate() {
-        if !matches!(inst.ty.as_str(), "EHXPLLL" | "BB" | "OBZ" | "JTAGG") {
+        let io = crate::iol::is_iol(&inst.ty) || crate::dsp::is_dsp(&inst.ty);
+        let bram = crate::ebr::is_bram(&inst.ty);
+        if !io && !bram && !crate::dqs::is_dqs(&inst.ty) && !crate::sys::is_sys(&inst.ty) && !kept_clock(inst) && !matches!(inst.ty.as_str(), "EHXPLLL" | "BB" | "OBZ" | soft::LUTRAM) {
             continue;
         }
         let mut pins = Vec::new();
-        for (pin, bits) in &inst.conns {
-            let d = dirs[&inst.ty][pin].dir;
+        let mut attrs = inst.attrs.clone();
+        let mut params = inst.params.clone();
+        // A PDPW16KD's pins as the DP16KD it becomes.
+        let pdp = inst.ty == "PDPW16KD";
+        let conns: Vec<(String, &String, &Vec<Lit>)> = inst
+            .conns
+            .iter()
+            .flat_map(|(pin, bits)| {
+                let names = if pdp { crate::ebr::pdp_pins(pin) } else { vec![pin.clone()] };
+                names.into_iter().map(move |n| (n, pin, bits))
+            })
+            .collect();
+        for (pin, orig, bits) in &conns {
+            let pin = &*pin;
+            let d = dirs[&inst.ty][*orig].dir;
             let Some(&l) = bits.first() else { continue };
             match d {
+                // A block RAM's constant input is its <PIN>MUX, as nextpnr's
+                // pack_constants sets it: on a control pin the pin itself
+                // (1) or INV (0) over a high tie, else the tie level.
+                Dir::Input if bram && l.is_const() => {
+                    let v = match (crate::ebr::control(pin), l == Lit::TRUE) {
+                        (true, true) => pin.clone(),
+                        (true, false) => "INV".to_owned(),
+                        (false, true) => "1".to_owned(),
+                        (false, false) => "0".to_owned(),
+                    };
+                    params.insert(format!("{pin}MUX"), oxibit_hdl::netlist::Param::Str(v));
+                }
+                // An IO primitive's constant input is a mux setting or a tie
+                // at its IOLOGIC, not a routed constant.
+                // An ALU54B input only its MULT18s reach: no constant.
+                Dir::Input if l.is_const() && crate::dsp::dedicated(&inst.ty, pin) => {}
+                // A DSP's CE, LSR and CLK fed inputs take a routed constant.
+                Dir::Input if io && l.is_const() && !(crate::dsp::is_dsp(&inst.ty) && crate::dsp::routed_const(pin)) => {
+                    attrs.insert(crate::iol::tie_attr(pin), if l == Lit::TRUE { "1" } else { "0" }.to_owned());
+                }
                 Dir::Input => pins.push((pin.clone(), PrimPin::In(Some(b.lit(l)?)))),
                 Dir::Output => {
                     let n = if inst.ty == "OBZ" { None } else { b.net.get(&l.node()).copied() };
@@ -912,11 +983,23 @@ fn build(b: &mut Builder<'_>) -> Result<()> {
                 Dir::Inout => {}
             }
         }
+        // A DQSBUFM's open control inputs: routed constant 0 (tie_zero).
+        if inst.ty == "DQSBUFM" {
+            for &z in crate::dqs::TIE_ZERO {
+                if !pins.iter().any(|(n, _)| n == z) {
+                    pins.push((z.to_owned(), PrimPin::In(Some(b.lit(Lit::FALSE)?))));
+                }
+            }
+        }
+        if pdp {
+            crate::ebr::pdp_params(&mut params);
+            attrs.insert(crate::ebr::FROM_PDP.to_owned(), "1".to_owned());
+        }
         let mut prim = Prim {
-            ty: inst.ty.clone(),
+            ty: if pdp { "DP16KD".to_owned() } else { inst.ty.clone() },
             name: inst.name.clone(),
-            params: inst.params.clone(),
-            attrs: inst.attrs.clone(),
+            params,
+            attrs,
             pins,
             pad: pad_port.get(&k).copied(),
             inst: k,
@@ -1199,4 +1282,93 @@ fn fold_init_conflicts(lw: &mut Lowered) {
         f.sr_inv = false;
         f.kind = FfKind::Fdre;
     }
+}
+
+/// Memories read asynchronously become distributed RAM: one
+/// TRELLIS_DPR16X4S per read port and 4-bit column, sharing the write port
+/// (so a second read port is a second copy of the RAM, as in the
+/// Lattice dual-port use). Up to 16 words; one write port with one enable
+/// per column.
+fn lutram_mems(lw: &mut Lowered) -> Result<usize> {
+    let mut n = 0;
+    let mut k = 0;
+    while k < lw.mems.len() {
+        let ml = &lw.mems[k];
+        if ml.rd.iter().any(|(clk, _, _)| clk.is_some()) {
+            k += 1;
+            continue;
+        }
+        let name = ml.mem.name.clone();
+        if ml.mem.size > 16 {
+            return Err(err!(
+                "memory {name}: asynchronous read of {} words; distributed RAM deeper than 16 \
+                 is not supported yet (register the read data to use block RAM)",
+                ml.mem.size
+            ));
+        }
+        if ml.mem.offset != 0 {
+            return Err(err!("memory {name}: nonzero address offset is not supported yet"));
+        }
+        if ml.wr.len() > 1 {
+            return Err(err!("memory {name}: {} write ports", ml.wr.len()));
+        }
+        let width = ml.mem.width as usize;
+        let mut init = vec![0u64; width.div_ceil(4)];
+        for (&a, bits) in &ml.mem.init {
+            for (j, b) in bits.iter().enumerate().take(width) {
+                if *b == Some(true) && a < 16 {
+                    init[j / 4] |= 1 << (4 * a as usize + j % 4);
+                }
+            }
+        }
+        let pad = |v: &[Lit], i: usize| v.get(i).copied().unwrap_or(Lit::FALSE);
+        let mut insts = Vec::new();
+        for (r, (_, raddr, rdata)) in ml.rd.iter().enumerate() {
+            for col in 0..width.div_ceil(4) {
+                let mut conns: Vec<(String, Vec<Lit>)> = Vec::new();
+                for i in 0..4 {
+                    conns.push((format!("RAD{i}"), vec![pad(raddr, i)]));
+                    if let Some(&d) = rdata.get(col * 4 + i) {
+                        conns.push((format!("DO{i}"), vec![d]));
+                    }
+                }
+                let mut params = BTreeMap::new();
+                let mut wckmux = "WCK";
+                if let Some(((clk, posedge), waddr, wdata, en)) = ml.wr.first() {
+                    let cols: Vec<Lit> = (0..4).filter_map(|i| en.get(col * 4 + i).copied()).collect();
+                    if cols.iter().any(|&e| e != cols[0]) {
+                        return Err(err!(
+                            "memory {name}: per-bit write enables inside 4-bit column {col} are not supported"
+                        ));
+                    }
+                    for i in 0..4 {
+                        conns.push((format!("WAD{i}"), vec![pad(waddr, i)]));
+                        conns.push((format!("DI{i}"), vec![pad(wdata, col * 4 + i)]));
+                    }
+                    conns.push(("WRE".to_owned(), vec![cols.first().copied().unwrap_or(Lit::FALSE)]));
+                    conns.push(("WCK".to_owned(), vec![*clk]));
+                    if !posedge {
+                        wckmux = "INV";
+                    }
+                } else {
+                    conns.push(("WRE".to_owned(), vec![Lit::FALSE]));
+                }
+                let bits: Vec<Option<bool>> = (0..64).map(|b| Some((init[col] >> b) & 1 == 1)).collect();
+                params.insert("INITVAL".to_owned(), Param::Bits(bits));
+                params.insert("WCKMUX".to_owned(), Param::Str(wckmux.to_owned()));
+                params.insert("WREMUX".to_owned(), Param::Str("WRE".to_owned()));
+                insts.push(lower::InstL {
+                    ty: soft::LUTRAM.to_owned(),
+                    name: format!("{name}$lutram{r}_{col}"),
+                    params,
+                    attrs: BTreeMap::new(),
+                    conns,
+                });
+            }
+        }
+        lw.insts.extend(insts);
+        lw.mems.remove(k);
+        n += 1;
+    }
+    Ok(n)
 }

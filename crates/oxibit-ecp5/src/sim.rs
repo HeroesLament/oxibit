@@ -43,7 +43,7 @@ pub fn probes(nl: &Netlist) -> Vec<Probe> {
         .cells
         .iter()
         .filter_map(|c| match c {
-            Cell::Prim(p) => Some(&**p),
+            Cell::Prim(p) if p.ty != crate::soft::LUTRAM => Some(&**p),
             _ => None,
         })
         .collect();
@@ -58,7 +58,7 @@ pub fn probes(nl: &Netlist) -> Vec<Probe> {
             };
             v.push(Probe {
                 inst: p.inst,
-                pin: pin.clone(),
+                pin: if p.attrs.contains_key(crate::ebr::FROM_PDP) { crate::ebr::pdp_pin(pin) } else { pin.clone() },
                 out,
                 net,
             });
@@ -185,6 +185,20 @@ pub fn simulate_netlist(nl: &Netlist, inputs: &[Vec<u64>]) -> Result<Vec<Vec<u64
             rams.insert(i, (m, vec![0; e.read_width.bits()]));
         }
     }
+    // Distributed RAMs.
+    let mut luts: HashMap<usize, LutramSim> = HashMap::new();
+    for (i, c) in nl.cells.iter().enumerate() {
+        if let Cell::Prim(p) = c {
+            if p.ty == crate::soft::LUTRAM {
+                luts.insert(i, LutramSim::new(&p.params));
+            }
+        }
+    }
+    let (di_n, wad_n, rad_n, do_n) = lutram_pin_names();
+    let net_in = |p: &crate::netlist::Prim, pin: &str, val: &[u64]| match p.pin(pin) {
+        Some(PrimPin::In(Some(n))) => val[n as usize],
+        _ => 0,
+    };
     let input_ports: Vec<usize> = (0..nl.ports.len()).filter(|&p| is_input(&nl.ports[p])).collect();
     let output_ports: Vec<usize> = (0..nl.ports.len()).filter(|&p| nl.ports[p].output).collect();
     let probes = probes(nl);
@@ -245,6 +259,15 @@ pub fn simulate_netlist(nl: &Netlist, inputs: &[Vec<u64>]) -> Result<Vec<Vec<u64
                     Cell::Lut { inputs, init, z } => {
                         let ins = inputs.map(|x| x.map_or(0, |n| val[n as usize]));
                         val[*z as usize] = lut4(*init, ins);
+                    }
+                    Cell::Prim(p) if p.ty == crate::soft::LUTRAM => {
+                        let addr: Vec<u64> = rad_n.iter().map(|r| net_in(p, r, &val)).collect();
+                        let d = luts[&i].m.read(&addr);
+                        for (k, o) in do_n.iter().enumerate() {
+                            if let Some(PrimPin::Out(Some(n))) = p.pin(o) {
+                                val[n as usize] = d[k];
+                            }
+                        }
                     }
                     Cell::Ccu2 { cin: None, .. } => {
                         // Walk the chain from its head.
@@ -311,6 +334,17 @@ pub fn simulate_netlist(nl: &Netlist, inputs: &[Vec<u64>]) -> Result<Vec<Vec<u64
                     next = (next & !a) | (v & a);
                 }
                 state.insert(i, next);
+            }
+        }
+        for (i, c) in nl.cells.iter().enumerate() {
+            if let Cell::Prim(p) = c {
+                if let Some(l) = luts.get_mut(&i) {
+                    let mux = p.param_str("WREMUX").unwrap_or_else(|| "WRE".to_owned());
+                    let we = LutramSim::we(&mux, net_in(p, "WRE", &val));
+                    let addr: Vec<u64> = wad_n.iter().map(|w| net_in(p, w, &val)).collect();
+                    let data: Vec<u64> = di_n.iter().map(|d| net_in(p, d, &val)).collect();
+                    l.m.write(&addr, &data, &[we; 4]);
+                }
             }
         }
         for (i, c) in nl.cells.iter().enumerate() {
@@ -412,6 +446,15 @@ pub fn simulate_lowered(lw: &Lowered, inputs: &[Vec<u64>], probes: &[Probe]) -> 
             (m, abits, regs)
         })
         .collect();
+    // Distributed RAMs, by instance.
+    let mut luts: Vec<(usize, LutramSim)> = lw
+        .insts
+        .iter()
+        .enumerate()
+        .filter(|(_, i)| i.ty == crate::soft::LUTRAM)
+        .map(|(k, i)| (k, LutramSim::new(&i.params)))
+        .collect();
+    let (di_n, wad_n, rad_n, do_n) = lutram_pin_names();
     let mut out = Vec::new();
     for ins in inputs {
         let mut iv: HashMap<u32, u64> = HashMap::new();
@@ -435,7 +478,10 @@ pub fn simulate_lowered(lw: &Lowered, inputs: &[Vec<u64>], probes: &[Probe]) -> 
             iv.insert(f.q.node(), s);
         }
         for (ml, (_, _, regs)) in lw.mems.iter().zip(&mems) {
-            for ((_, _, data), reg) in ml.rd.iter().zip(regs) {
+            for ((clk, _, data), reg) in ml.rd.iter().zip(regs) {
+                if clk.is_none() {
+                    continue;
+                }
                 for (d, &r) in data.iter().zip(reg) {
                     iv.insert(d.node(), r);
                 }
@@ -443,10 +489,34 @@ pub fn simulate_lowered(lw: &Lowered, inputs: &[Vec<u64>], probes: &[Probe]) -> 
         }
         let mut v = eval_aig(g, &iv);
         // Async set/reset and carry chains until stable.
-        for _ in 0..(g.chains.len() + lw.ffs.len() + through.len() + 2) {
+        for _ in 0..(g.chains.len() + lw.ffs.len() + through.len() + luts.len() * 4 + lw.mems.len() * 4 + 2) {
             let before = iv.clone();
             for &(f, t) in &through {
                 iv.insert(t.node(), lit(&v, f) ^ if t.compl() { !0 } else { 0 });
+            }
+            // Asynchronous memory reads.
+            for (ml, (m, abits, _)) in lw.mems.iter().zip(&mems) {
+                for (clk, a, d) in &ml.rd {
+                    if clk.is_some() {
+                        continue;
+                    }
+                    let addr: Vec<u64> = (0..*abits).map(|k| a.get(k).map_or(0, |&l| lit(&v, l))).collect();
+                    for (bit, &x) in m.read(&addr).iter().zip(d) {
+                        if !x.is_const() {
+                            iv.insert(x.node(), bit ^ if x.compl() { !0 } else { 0 });
+                        }
+                    }
+                }
+            }
+            for (k, l) in &luts {
+                let addr: Vec<u64> = rad_n.iter().map(|r| lit(&v, pin_lit(*k, r))).collect();
+                let d = l.m.read(&addr);
+                for (j, o) in do_n.iter().enumerate() {
+                    let t = pin_lit(*k, o);
+                    if !t.is_const() {
+                        iv.insert(t.node(), d[j] ^ if t.compl() { !0 } else { 0 });
+                    }
+                }
             }
             for (f, &s) in lw.ffs.iter().zip(&state) {
                 if matches!(f.kind, FfKind::Fdce | FfKind::Fdpe) && f.sr != Lit::FALSE {
@@ -489,6 +559,16 @@ pub fn simulate_lowered(lw: &Lowered, inputs: &[Vec<u64>], probes: &[Probe]) -> 
                 next = (next & !a) | (val & a);
             }
             *s = next;
+        }
+        for (k, l) in luts.iter_mut() {
+            let mux = match lw.insts[*k].params.get("WREMUX") {
+                Some(oxibit_hdl::netlist::Param::Str(s)) => s.clone(),
+                _ => "WRE".to_owned(),
+            };
+            let we = LutramSim::we(&mux, lit(&v, pin_lit(*k, "WRE")));
+            let addr: Vec<u64> = wad_n.iter().map(|w| lit(&v, pin_lit(*k, w))).collect();
+            let data: Vec<u64> = di_n.iter().map(|d| lit(&v, pin_lit(*k, d))).collect();
+            l.m.write(&addr, &data, &[we; 4]);
         }
         for (ml, (m, abits, regs)) in lw.mems.iter().zip(mems.iter_mut()) {
             let addr = |a: &Vec<Lit>| -> Vec<u64> {
@@ -548,4 +628,40 @@ pub fn check_synthesis(
         }
     }
     Ok(None)
+}
+
+/// A distributed RAM (TRELLIS_DPR16X4S) for the simulators: contents from
+/// INITVAL, asynchronous read, write on the (single, lockstep) clock edge.
+struct LutramSim {
+    m: LaneMem,
+}
+
+impl LutramSim {
+    fn new(params: &std::collections::BTreeMap<String, oxibit_hdl::netlist::Param>) -> LutramSim {
+        let mut m = LaneMem::new(4, 16);
+        if let Some(oxibit_hdl::netlist::Param::Bits(b)) = params.get("INITVAL") {
+            for (k, x) in b.iter().enumerate().take(64) {
+                if *x == Some(true) {
+                    m.bits[k] = !0;
+                }
+            }
+        }
+        LutramSim { m }
+    }
+
+    /// Write enable after WREMUX.
+    fn we(mux: &str, wre: u64) -> u64 {
+        match mux {
+            "INV" => !wre,
+            "0" => 0,
+            "1" => !0,
+            _ => wre,
+        }
+    }
+}
+
+/// The pins of a LUTRAM: (DI, WAD, RAD, WRE, DO) by name.
+fn lutram_pin_names() -> ([String; 4], [String; 4], [String; 4], [String; 4]) {
+    let n = |p: &str| [0, 1, 2, 3].map(|i| format!("{p}{i}"));
+    (n("DI"), n("WAD"), n("RAD"), n("DO"))
 }

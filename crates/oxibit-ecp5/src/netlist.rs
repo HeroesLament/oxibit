@@ -235,6 +235,9 @@ pub struct Netlist {
     /// Net names, where synthesis knows one.
     pub net_names: BTreeMap<NetId, String>,
     pub nets: u32,
+    /// The pad buffer attributes of each port (PULLMODE from IBPU, BBPD, ...),
+    /// under the LPF settings.
+    pub pad_attrs: BTreeMap<usize, BTreeMap<String, String>>,
 }
 
 impl Netlist {
@@ -278,6 +281,12 @@ impl Netlist {
                     "BB" => "BB",
                     "OBZ" => "OBZ",
                     "JTAGG" => "JTAGG",
+                    t if crate::sys::is_sys(t) => "config",
+                    t if crate::iol::is_iol(t) => "IOLOGIC",
+                    t if crate::dsp::is_dsp(t) => "DSP",
+                    t if crate::ebr::is_bram(t) => "EBR",
+                    t if crate::dqs::is_dqs(t) => "DDR",
+                    "TRELLIS_DPR16X4S" => "LUTRAM",
                     _ => "primitive",
                 },
             };
@@ -346,7 +355,23 @@ pub fn inputs(c: &Cell) -> Vec<NetId> {
 }
 
 /// The clock inputs of a primitive: they route on the global network.
-pub const PRIM_CLOCK_INPUTS: &[(&str, &str)] = &[("EHXPLLL", "CLKI"), ("EHXPLLL", "CLKFB")];
+pub const PRIM_CLOCK_INPUTS: &[(&str, &str)] = &[
+    ("EHXPLLL", "CLKI"),
+    ("EHXPLLL", "CLKFB"),
+    ("TRELLIS_DPR16X4S", "WCK"),
+];
+
+/// Whether a primitive pin is a clock input.
+pub fn is_clock_input(ty: &str, pin: &str) -> bool {
+    PRIM_CLOCK_INPUTS
+        .iter()
+        .chain(crate::iol::CLOCK_INPUTS)
+        .chain(crate::clk::CLOCK_INPUTS)
+        .any(|&(t, q)| t == ty && q == pin)
+        || crate::dsp::is_clock_input(ty, pin)
+        || crate::ebr::is_clock_input(ty, pin)
+        || crate::dqs::is_clock_input(ty, pin)
+}
 
 /// The clock nets: flop clocks, block RAM port clocks, PLL references.
 pub fn clock_nets(nl: &Netlist) -> std::collections::BTreeSet<NetId> {
@@ -354,9 +379,9 @@ pub fn clock_nets(nl: &Netlist) -> std::collections::BTreeSet<NetId> {
     for c in &nl.cells {
         match c {
             Cell::Prim(p) => {
-                for &(ty, pin) in PRIM_CLOCK_INPUTS {
-                    if p.ty == ty {
-                        if let Some(PrimPin::In(Some(n))) = p.pin(pin) {
+                for (pin, conn) in &p.pins {
+                    if let PrimPin::In(Some(n)) = *conn {
+                        if is_clock_input(&p.ty, pin) {
                             s.insert(n);
                         }
                     }

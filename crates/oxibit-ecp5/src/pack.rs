@@ -36,6 +36,11 @@ pub enum SliceKind {
     Logic([Lane; 2]),
     /// A CCU2C; each half's flop (`ff[j]`) takes D from that half's sum.
     Carry { ccu2: CellId, ff: [Option<CellId>; 2] },
+    /// Half of a distributed RAM (TRELLIS_DPR16X4S `ram`): slice A holds
+    /// its LUTs 0 and 1, slice B LUTs 2 and 3 (`half` 0 or 1).
+    Dpram { ram: CellId, half: usize },
+    /// Slice C of a distributed RAM tile: the write port (WAD, DI).
+    Ramw { ram: CellId },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -335,6 +340,31 @@ pub fn pack(nl: &Netlist) -> Result<(Packed, PackStats)> {
         }
         stats.slices += 1;
         open.retain(|(_, st)| st.slices < 4);
+    }
+    // Distributed RAMs: one tile each, slices A and B in DPRAM mode and
+    // slice C as the write port (slice D stays empty, since the RAM
+    // holds the tile's CLK1 and LSR1).
+    for (i, c) in nl.cells.iter().enumerate() {
+        let Cell::Prim(p) = c else { continue };
+        if p.ty != crate::soft::LUTRAM {
+            continue;
+        }
+        let ram = CellId::try_from(i).expect("fits");
+        let t = packed.tiles.len();
+        let mut tile = Tile::default();
+        for half in 0..2 {
+            tile.slices[half] = Some(Slice {
+                kind: SliceKind::Dpram { ram, half },
+                ctrl: None,
+            });
+        }
+        tile.slices[2] = Some(Slice {
+            kind: SliceKind::Ramw { ram },
+            ctrl: None,
+        });
+        packed.tiles.push(tile);
+        packed.loc[i] = Some(Loc { tile: t, z: 0, lane: 0 });
+        stats.slices += 3;
     }
     stats.tiles = packed.tiles.len();
     Ok((packed, stats))

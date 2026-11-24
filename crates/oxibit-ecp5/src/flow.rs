@@ -28,10 +28,12 @@ use crate::clock::{ClockNetwork, ClockOptions, ClockTree, route_clock, tree_conf
 use crate::config::{ChipConfig, TileConfig};
 use crate::db::DeviceDb;
 use crate::graph::{Graph, PipKind, Wire};
-use crate::io::{PioSite, pio_enum, tie};
+use crate::io::{PioSite, tie};
+use crate::iol;
+use crate::clk;
 use crate::lpf::Lpf;
 use crate::ebr::{self, Use};
-use crate::netlist::{Cell, NetId, Netlist, Polarity, PrimPin, RegSet, SrMode, clock_nets, PRIM_CLOCK_INPUTS};
+use crate::netlist::{Cell, NetId, Netlist, Polarity, PrimPin, RegSet, SrMode, clock_nets};
 use crate::pll;
 use crate::sys;
 use crate::pack::{Loc, PackStats, Packed, SliceKind, pack};
@@ -153,7 +155,17 @@ pub fn run(
     let mut t = t;
 
     // 1. Synthesis.
-    let m = elaborate(src, opts.top.as_deref())?;
+    let mut m = elaborate(src, opts.top.as_deref())?;
+    // Open drain pads in logic (the OPENDRAIN bits alone leave a BIDIR
+    // pad driving high).
+    let od: BTreeSet<String> = Lpf::parse(lpf_text)?
+        .ports
+        .iter()
+        .filter(|(_, p)| p.iobuf.get("OPENDRAIN").is_some_and(|v| v.eq_ignore_ascii_case("ON")))
+        .map(|(k, _)| k.clone())
+        .collect();
+    crate::pads::canonicalize(&mut m)?;
+    crate::pads::open_drain(&mut m, &od)?;
     let (nl, srep, lw) = synth_lowered(&m, opts.synth)?;
     if opts.check_cycles > 0 {
         if let Some((c, port)) = crate::sim::check_synthesis(&lw, &nl, opts.check_cycles, 0x5EED)? {
@@ -221,6 +233,87 @@ pub fn run(
     let sys_at = sys::assign(&bels, &nl)?;
     hard_at.extend(pll_at.iter().map(|(&k, &v)| (k, v)));
     hard_at.extend(sys_at.iter().map(|(&k, &v)| (k, v)));
+    let dsp_at = crate::dsp::assign(&bels, &nl)?;
+    hard_at.extend(dsp_at.iter().map(|(&k, &v)| (k, v)));
+    // DQSBUFMs beside their DQS pads, DDRDLLAs in their users' corner.
+    let dqs_groups = crate::dqs::load_groups(root, &opts.device)?;
+    let dqs_at = crate::dqs::assign(
+        &bels,
+        &nl,
+        &dqs_groups,
+        |n| match drivers[n as usize].map(|d| &nl.cells[d as usize]) {
+            Some(Cell::Ib { port, .. }) => Some(pads[*port].site),
+            Some(Cell::Prim(p)) if p.pad.is_some() && p.pins.iter().any(|(pin, c)| pin == "O" && *c == PrimPin::Out(Some(n))) => {
+                p.pad.map(|k| pads[k].site)
+            }
+            _ => None,
+        },
+        g.height,
+    )?;
+    hard_at.extend(dqs_at.iter().map(|(&k, &v)| (k, v)));
+    // IO logic beside its pads.
+    let sites: Vec<PioSite> = pads.iter().map(|p| p.site).collect();
+    let iol_plan = iol::plan(&bels, &nl, &sites)?;
+    hard_at.extend(iol_plan.bels());
+    // Kept clock primitives (gated DCCA, DCSC, ECLKSYNCB, ECLKBRIDGECS,
+    // CLKDIVF): a bel whose clock input the driver reaches over the clock
+    // network (where the driver is on a bel) and, for an edge clock, whose
+    // output reaches the IOLOGIC ECLK pins it drives.
+    let clk_at = {
+        let hard = &hard_at;
+        // The IOLOGIC ECLK pin wires on each net.
+        let mut eclk_sinks: HashMap<NetId, Vec<Wire>> = HashMap::new();
+        for (&c, (k, map)) in &iol_plan.cells {
+            let Cell::Prim(p) = &nl.cells[c] else { continue };
+            for (pin, bp) in map {
+                if *bp == Some("ECLK") {
+                    if let (Some(PrimPin::In(Some(n))), Ok(w)) = (p.pin(pin), pin_wire(&bels, iol_plan.iols[*k].bel, "ECLK")) {
+                        eclk_sinks.entry(n).or_default().push(w);
+                    }
+                }
+            }
+        }
+        // A DQSBUFM's ECLK is on the bank edge clock too.
+        for (&c, &b) in &dqs_at {
+            let Cell::Prim(p) = &nl.cells[c] else { continue };
+            if let (Some(PrimPin::In(Some(n))), Ok(w)) = (p.pin("ECLK"), pin_wire(&bels, b, "ECLK")) {
+                eclk_sinks.entry(n).or_default().push(w);
+            }
+        }
+        for v in eclk_sinks.values_mut() {
+            v.sort();
+        }
+        clk::assign(&bels, &nl, |p, b, so_far| {
+            let pin = clk::clock_in(&p.ty);
+            let reach = |s: Wire, sinks: &[Wire]| {
+                route_clock(&g, &cnet, s, sinks, &HashSet::new(), opts.clock).is_ok()
+            };
+            // Output side: the ECLK pins this edge clock drives.
+            if matches!(p.ty.as_str(), "ECLKSYNCB" | "ECLKBRIDGECS") {
+                let out = clk::clock_out(&p.ty);
+                if let (Some(PrimPin::Out(Some(n))), Ok(o)) = (p.pin(out), pin_wire(&bels, b, out)) {
+                    if let Some(s) = eclk_sinks.get(&n) {
+                        if !reach(o, s) {
+                            return false;
+                        }
+                    }
+                }
+            }
+            let Some(PrimPin::In(Some(n))) = p.pin(pin) else { return true };
+            let Ok(sink) = pin_wire(&bels, b, pin) else { return false };
+            let src = match drivers[n as usize].map(|d| (d as usize, &nl.cells[d as usize])) {
+                Some((_, Cell::Ib { port, .. })) => pin_wire(&bels, pads[*port].bel, "O").ok(),
+                Some((d, Cell::Prim(q))) => hard.get(&d).or_else(|| so_far.get(&d)).and_then(|&qb| {
+                    let out = q.pins.iter().find(|(_, c)| *c == PrimPin::Out(Some(n)))?;
+                    pin_wire(&bels, qb, &out.0).ok()
+                }),
+                _ => None,
+            };
+            src.is_none_or(|s| reach(s, &[sink]))
+        })?
+    };
+    hard_at.extend(clk_at.iter().map(|(&k, &v)| (k, v)));
+    let clk_pins = clk::pin_wires(&bels, &clk_at);
 
     // 3. Placement.
     let (tile_xy, hpwl) = place_tiles(&g, &bels, &nl, &packed, &pads, &hard_at, opts)?;
@@ -228,7 +321,7 @@ pub fn run(
     lap("place", &mut report, &mut t);
 
     // 4. Routing.
-    let pins = net_pins(&bels, &nl, &packed, &tile_xy, &pads, &hard_at)?;
+    let pins = net_pins(&bels, &nl, &packed, &tile_xy, &pads, &hard_at, &iol_plan)?;
     let clock_nets: BTreeSet<NetId> = clock_nets(&nl);
     let entries = cib_entries(&g, &bels);
     if std::env::var_os("OXIBIT_DEBUG_CIB").is_some() {
@@ -240,6 +333,7 @@ pub fn run(
     let mut trees: Vec<(NetId, ClockTree)> = Vec::new();
     let mut taken: HashSet<Wire> = HashSet::new();
     let mut signal: Vec<(NetId, Net)> = Vec::new();
+    let mut src_groups = HashMap::new();
     for (&n, np) in &pins {
         let Some((sbel, spin)) = &np.source else {
             if np.sinks.is_empty() && np.clock_sinks.is_empty() {
@@ -248,6 +342,25 @@ pub fn run(
             return Err(err!("net {} has sinks but no driver", net_name(&nl, n)));
         };
         let source = pin_wire(&bels, *sbel, spin)?;
+        // A DQSBUFM's group signal: on the DQSG wires, no route. Every
+        // sink must be an IOLOGIC of the same DQS group.
+        if bels.template(*sbel).ty == "DQSBUFM" && crate::dqs::GROUP_SIGNALS.contains(&spin.as_str()) {
+            let own = crate::dqs::bel_group(&bels, *sbel, &dqs_groups);
+            for (b, p) in np.sinks.iter().chain(&np.clock_sinks) {
+                let t = bels.template(*b);
+                let theirs = crate::dqs::bel_group(&bels, *b, &dqs_groups);
+                if !t.name.starts_with("IOLOGIC") || p != spin || own.is_none() || theirs != own {
+                    return Err(err!(
+                        "net {}: DQSBUFM {spin} (group {}) drives {} {p} (group {}): it reaches only the {spin} of its own group's IOLOGICs",
+                        net_name(&nl, n),
+                        own.unwrap_or("?"),
+                        t.name,
+                        theirs.unwrap_or("none")
+                    ));
+                }
+            }
+            continue;
+        }
         let mut data_sinks: Vec<Wire> = np
             .sinks
             .iter()
@@ -260,20 +373,50 @@ pub fn run(
             .collect::<Result<BTreeSet<_>>>()?
             .into_iter()
             .collect();
+        // Data sinks on origin wires (a gated DCC's CE, a DCS's selects)
+        // route to the CIB wire fixed to them.
+        for w in &mut data_sinks {
+            *w = local_sink(&g, *w);
+        }
+        if std::env::var_os("OXIBIT_DEBUG_CLOCK").is_some() {
+            for (b, p) in &np.clock_sinks {
+                let w = pin_wire(&bels, *b, p)?;
+                if !g.wire_name(w).contains("_SLICE") {
+                    eprintln!("clock sink {}: {} {p} -> {}", net_name(&nl, n), bels.template(*b).name, g.wire_name(w));
+                }
+            }
+        }
         if clock_nets.contains(&n) && !clk_sinks.is_empty() {
-            match route_clock(&g, &cnet, source, &clk_sinks, &taken, opts.clock) {
+            // Other nets keep off the kept clock primitives' pins.
+            let own: HashSet<Wire> = clk_sinks.iter().copied().chain([source]).collect();
+            let mut taken_n = taken.clone();
+            taken_n.extend(clk_pins.iter().filter(|w| !own.contains(w)));
+            // A tree with no global wire is general routing near the
+            // pads (a fabric signal on an IOLOGIC clock): not a clock tree.
+            let tree = route_clock(&g, &cnet, source, &clk_sinks, &taken_n, opts.clock).and_then(|t| {
+                if t.wires().any(|w| route::is_global(&g, w)) {
+                    Ok(t)
+                } else {
+                    Err(err!("no global wire"))
+                }
+            });
+            match tree {
                 Ok(tree) => {
-                    taken.extend(tree.wires());
+                    // The source stays open for the net's own data route.
+                    taken.extend(tree.wires().filter(|&w| w != source));
                     report
                         .clocks
                         .push((net_name(&nl, n), clk_sinks.len(), true));
                     trees.push((n, tree));
                 }
-                Err(_) => {
+                Err(e) => {
+                    if std::env::var_os("OXIBIT_DEBUG_CLOCK").is_some() {
+                        eprintln!("clock {}: {e}", net_name(&nl, n));
+                    }
                     // Not a dedicated clock source: general routing to a
                     // CIB entry of the global network (a `*PCLKCIB*`
                     // input of a DCC), the tree from there.
-                    match via_cib(&g, &cnet, &entries, source, &clk_sinks, &taken, opts.clock) {
+                    match via_cib(&g, &cnet, &entries, source, &clk_sinks, &taken_n, opts.clock) {
                         Some((entry, tree)) => {
                             // The entry and the wire it is fixed to stay open for the
                             // general route that reaches the entry.
@@ -300,6 +443,11 @@ pub fn run(
         }
         data_sinks.sort();
         data_sinks.dedup();
+        // A sink on the source's own electrical node needs no route: the
+        // DSP's bypassed registers (MULT A -> ROA -> ALU A) and its products
+        // to the ALU (P -> MA) are fixed wires.
+        let own = route::fixed_group(&g, source, &mut src_groups);
+        data_sinks.retain(|w| !own.contains(w));
         if !data_sinks.is_empty() {
             signal.push((
                 n,
@@ -312,9 +460,57 @@ pub fn run(
             ));
         }
     }
+    if std::env::var_os("OXIBIT_DEBUG_CLOCK").is_some() {
+        for (n, t) in &trees {
+            let general = t.wires().filter(|&w| !route::is_global(&g, w)).count();
+            eprintln!("tree {}: {} arcs, {general} general wire ends", net_name(&nl, *n), t.arcs.len());
+        }
+        for (n, net) in &signal {
+            if clock_nets.contains(n) {
+                eprintln!("signal clock net {}: {} sinks", net_name(&nl, *n), net.sinks.len());
+            }
+        }
+    }
     let nets: Vec<Net> = signal.iter().map(|(_, n)| n.clone()).collect();
     let routes = route::route_with(&g, &nets, opts.route, &taken)?;
     route::check(&g, &nets, &routes)?;
+    // Clock trees against each other and against the signal routes: no
+    // electrical node may carry two nets.
+    {
+        let mut groups = HashMap::new();
+        let mut owner: HashMap<Wire, (NetId, Wire)> = HashMap::new();
+        let mut claim = |w: Wire, n: NetId, what: &str| -> Result<()> {
+            for m in route::fixed_group(&g, w, &mut groups) {
+                match owner.get(&m) {
+                    Some(&(o, ow)) if o != n => {
+                        return Err(err!(
+                            "{what}: nets {} and {} share {} (via {} and {})",
+                            net_name(&nl, o),
+                            net_name(&nl, n),
+                            g.wire_name(m),
+                            g.wire_name(ow),
+                            g.wire_name(w)
+                        ));
+                    }
+                    _ => {
+                        owner.insert(m, (n, w));
+                    }
+                }
+            }
+            Ok(())
+        };
+        for (n, tree) in &trees {
+            for w in tree.wires() {
+                claim(w, *n, "clock tree")?;
+            }
+        }
+        for ((n, net), arcs) in signal.iter().zip(&routes.nets) {
+            claim(net.source, *n, "route")?;
+            for a in arcs {
+                claim(a.to, *n, "route")?;
+            }
+        }
+    }
     report.nets = nets.len();
     report.arcs = routes.nets.iter().map(Vec::len).sum();
     report.passes = routes.passes;
@@ -322,11 +518,16 @@ pub fn run(
 
     // 5. Configuration.
     let mut cc = configure(
-        &g, &db, &bels, &nl, &packed, &tile_xy, &pads, &lpf, &signal, &routes, &trees, opts,
+        &g, &db, root, &bels, &nl, &packed, &tile_xy, &pads, &lpf, &signal, &routes, &trees, opts,
     )?;
     ebr::configure(&g, &db, &bels, &nl, &ebr_at, &mut cc)?;
     pll::configure(&g, &db, &bels, &nl, &pll_at, &mut cc.tiles)?;
     sys::configure(&g, &db, &nl, &sys_at, &mut cc.tiles)?;
+    iol::configure(&g, &db, &bels, &iol_plan, &mut cc.tiles)?;
+    clk::configure(&g, &db, &bels, &nl, &clk_at, &mut cc.tiles)?;
+    crate::dsp::configure(&g, &db, &bels, &nl, &dsp_at, &mut cc.tiles)?;
+    crate::dqs::configure(&g, &db, &bels, &nl, &dqs_at, &mut cc.tiles)?;
+    sys::sysconfig(&g, &db, &lpf.sysconfig, &mut cc)?;
     for tc in cc.tiles.values_mut() {
         tc.enums.sort();
         tc.enums.dedup();
@@ -401,8 +602,8 @@ fn place_tiles(
     // Nets: every netlist net over the instances and pads it touches,
     // clocks excepted.
     let clock_nets = clock_nets(nl);
-    let mut on_net: HashMap<NetId, (BTreeSet<u32>, BTreeSet<(i64, i64)>)> = HashMap::new();
-    let mut touch = |n: NetId, cell: usize, on_net: &mut HashMap<NetId, (BTreeSet<u32>, BTreeSet<(i64, i64)>)>| {
+    let mut on_net: BTreeMap<NetId, (BTreeSet<u32>, BTreeSet<(i64, i64)>)> = BTreeMap::new();
+    let mut touch = |n: NetId, cell: usize, on_net: &mut BTreeMap<NetId, (BTreeSet<u32>, BTreeSet<(i64, i64)>)>| {
         if clock_nets.contains(&n) {
             return;
         }
@@ -416,7 +617,7 @@ fn place_tiles(
                 let s = pads[p.pad.unwrap_or_default()].site;
                 e.1.insert((i64::from(s.row), i64::from(s.col)));
             }
-            Cell::Ebr(_) | Cell::Prim(_) => {
+            Cell::Ebr(_) | Cell::Prim(_) if packed.loc[cell].is_none() => {
                 if let Some(&b) = ebr_at.get(&cell) {
                     let bel = bels.bels[b as usize];
                     e.1.insert((i64::from(bel.y), i64::from(bel.x)));
@@ -496,6 +697,7 @@ fn net_pins(
     xy: &[(i16, i16)],
     pads: &[Pad],
     ebr_at: &HashMap<usize, BelId>,
+    iol_plan: &iol::Plan,
 ) -> Result<BTreeMap<NetId, NetPins>> {
     let mut pins: BTreeMap<NetId, NetPins> = BTreeMap::new();
     let slice_at = |l: Loc| {
@@ -559,10 +761,69 @@ fn net_pins(
                 pins.entry(*o).or_default().source = Some((pads[*port].bel, "O".to_owned()));
             }
             Cell::Ob { port, i: n } => {
+                let pin = iol_plan.pio_pin.get(n).copied().unwrap_or("I");
                 pins.entry(*n)
                     .or_default()
                     .sinks
-                    .push((pads[*port].bel, "I".to_owned()));
+                    .push((pads[*port].bel, pin.to_owned()));
+            }
+            Cell::Prim(p) if p.ty == crate::soft::LUTRAM => {
+                let l = packed.loc[i].ok_or_else(|| err!("distributed RAM {} unpacked", p.name))?;
+                let sl = |z: usize| slice_at(Loc { tile: l.tile, z, lane: 0 });
+                let (a, bb, c) = (sl(0)?, sl(1)?, sl(2)?);
+                for (pin, conn) in &p.pins {
+                    let (n, out) = match *conn {
+                        PrimPin::In(Some(n)) => (n, false),
+                        PrimPin::Out(Some(n)) => (n, true),
+                        _ => continue,
+                    };
+                    let k: usize = pin[pin.len() - 1..].parse().unwrap_or(0);
+                    let e = pins.entry(n).or_default();
+                    match &pin[..pin.len().min(3)] {
+                        // Read address on every DPRAM LUT: A = RAD3, B =
+                        // RAD1, C = RAD2, D = RAD0.
+                        "RAD" => {
+                            let letter = ["D", "B", "C", "A"][k];
+                            for s in [a, bb] {
+                                for lane in 0..2 {
+                                    e.sinks.push((s, format!("{letter}{lane}")));
+                                }
+                            }
+                        }
+                        // Write port on slice C (nextpnr dram_to_ramw_split).
+                        "WAD" => e.sinks.push((c, ["D0", "B0", "C0", "A0"][k].to_owned())),
+                        "DI0" | "DI1" | "DI2" | "DI3" => {
+                            e.sinks.push((c, ["C1", "A1", "D1", "B1"][k].to_owned()));
+                        }
+                        "DO0" | "DO1" | "DO2" | "DO3" if out => {
+                            e.source = Some((if k < 2 { a } else { bb }, format!("F{}", k % 2)));
+                        }
+                        "WRE" => e.sinks.push((a, "WRE".to_owned())),
+                        "WCK" => e.clock_sinks.push((a, "WCK".to_owned())),
+                        _ => return Err(err!("distributed RAM {}: unknown pin {pin}", p.name)),
+                    }
+                }
+            }
+            Cell::Prim(p) if iol_plan.cells.contains_key(&i) => {
+                let (k, map) = &iol_plan.cells[&i];
+                let b = iol_plan.iols[*k].bel;
+                for (pin, bp) in map {
+                    let Some(bp) = bp else { continue };
+                    match p.pin(pin) {
+                        Some(PrimPin::In(Some(n))) => {
+                            let e = pins.entry(n).or_default();
+                            if matches!(*bp, "CLK" | "ECLK") {
+                                e.clock_sinks.push((b, (*bp).to_owned()));
+                            } else {
+                                e.sinks.push((b, (*bp).to_owned()));
+                            }
+                        }
+                        Some(PrimPin::Out(Some(n))) => {
+                            pins.entry(n).or_default().source = Some((b, (*bp).to_owned()));
+                        }
+                        _ => {}
+                    }
+                }
             }
             Cell::Prim(p) => {
                 let b = match p.pad {
@@ -574,12 +835,17 @@ fn net_pins(
                 for (pin, conn) in &p.pins {
                     match *conn {
                         PrimPin::In(Some(n)) => {
-                            let clock = PRIM_CLOCK_INPUTS.iter().any(|&(t, q)| t == p.ty && q == pin);
+                            let clock = crate::netlist::is_clock_input(&p.ty, pin);
+                            // A pad's I / T from its IOLOGIC.
+                            let pin = match iol_plan.pio_pin.get(&n) {
+                                Some(pp) if p.pad.is_some() && matches!(pin.as_str(), "I" | "T") => (*pp).to_owned(),
+                                _ => crate::sys::bel_pin(&p.ty, pin).to_owned(),
+                            };
                             let e = pins.entry(n).or_default();
                             if clock {
-                                e.clock_sinks.push((b, pin.clone()));
+                                e.clock_sinks.push((b, pin));
                             } else {
-                                e.sinks.push((b, pin.clone()));
+                                e.sinks.push((b, pin));
                             }
                         }
                         PrimPin::Out(Some(n)) => {
@@ -624,6 +890,7 @@ fn d_from_lane(nl: &Netlist, packed: &Packed, l: Loc, d: NetId) -> bool {
         SliceKind::Carry { ccu2, .. } => {
             matches!(&nl.cells[ccu2 as usize], Cell::Ccu2 { halves, .. } if halves[l.lane].s == Some(d))
         }
+        SliceKind::Dpram { .. } | SliceKind::Ramw { .. } => false,
     }
 }
 
@@ -635,6 +902,7 @@ fn init_word(init: u16) -> Vec<bool> {
 fn configure(
     g: &Graph,
     db: &DeviceDb,
+    root: &Path,
     bels: &Bels,
     nl: &Netlist,
     packed: &Packed,
@@ -683,6 +951,30 @@ fn configure(
                         tc.enums.push((format!("{sl}.CCU2.INJECT1_{j}"), "NO".to_owned()));
                     }
                     ffs = ff;
+                }
+                SliceKind::Dpram { ram, half } => {
+                    let Cell::Prim(p) = &nl.cells[ram as usize] else {
+                        return Err(err!("distributed RAM cell {ram} is not a primitive"));
+                    };
+                    tc.enums.push((format!("{sl}.MODE"), "DPRAM".to_owned()));
+                    let init = lutram_init(p);
+                    for lane in 0..2 {
+                        let word = lutram_lut_init(init, half * 2 + lane);
+                        tc.words.push((format!("{sl}.K{lane}.INIT"), init_word(word)));
+                    }
+                    if half == 0 {
+                        let wre = p.param_str("WREMUX").unwrap_or_else(|| "WRE".to_owned());
+                        tc.enums.push(("SLICEA.WREMUX".to_owned(), wre));
+                        let wck = p.param_str("WCKMUX").unwrap_or_else(|| "WCK".to_owned());
+                        let wck = if wck == "INV" { "INV" } else { "CLK" };
+                        tc.enums.push(("CLK1.CLKMUX".to_owned(), wck.to_owned()));
+                    }
+                }
+                SliceKind::Ramw { .. } => {
+                    tc.enums.push((format!("{sl}.MODE"), "RAMW".to_owned()));
+                    for lane in 0..2 {
+                        tc.words.push((format!("{sl}.K{lane}.INIT"), init_word(0)));
+                    }
                 }
             }
             // Flops: D source, set/reset value; the slice's enable.
@@ -786,9 +1078,9 @@ fn configure(
             _ => None,
         })
         .collect();
+    let mut uses = Vec::new();
     for (k, p) in nl.ports.iter().enumerate() {
         let pad = pads[k];
-        let io = lpf.io_type(&p.name);
         let dir = if p.bidir {
             "BIDIR"
         } else if p.output {
@@ -796,22 +1088,19 @@ fn configure(
         } else {
             "INPUT"
         };
-        pio_enum(g, db, pad.site, "BASE_TYPE", &format!("{dir}_{io}"), &mut tiles)?;
-        if let Some(pp) = lpf.port(&p.name) {
-            for (key, setting) in [("PULLMODE", "PULLMODE"), ("DRIVE", "DRIVE"), ("SLEWRATE", "SLEWRATE")] {
-                if let Some(v) = pp.iobuf.get(key) {
-                    if setting == "DRIVE" && !p.output && !p.bidir {
-                        continue;
-                    }
-                    pio_enum(g, db, pad.site, setting, v, &mut tiles)?;
-                }
-            }
-        }
+        uses.push(crate::pads::PadUse {
+            name: &p.name,
+            dir,
+            site: pad.site,
+            prefs: lpf.port(&p.name).map(|pp| &pp.iobuf),
+            attrs: nl.pad_attrs.get(&k),
+        });
         if p.output && !t_routed.contains(&k) {
             let t = pin_wire(bels, pad.bel, "T")?;
             tie(g, db, t, Level::Low, &mut tiles)?;
         }
     }
+    crate::pads::configure(g, db, root, &opts.device, &uses, &mut tiles)?;
     // Duplicate enums (a tile seen from two nets) once each.
     for tc in tiles.values_mut() {
         tc.enums.sort();
@@ -884,4 +1173,57 @@ fn via_cib(
                 None
             }
         })
+}
+
+/// A distributed RAM's 64-bit INITVAL: word `w` in bits `4w..4w+3`.
+fn lutram_init(p: &crate::netlist::Prim) -> u64 {
+    use oxibit_hdl::netlist::Param;
+    match p.params.get("INITVAL") {
+        Some(Param::Bits(b)) => b
+            .iter()
+            .enumerate()
+            .fold(0u64, |a, (i, x)| a | (u64::from(*x == Some(true)) << i)),
+        _ => 0,
+    }
+}
+
+/// The physical INIT of LUT `bit` (0..4) of a distributed RAM. The read
+/// address reaches the LUT as A = RAD3, B = RAD1, C = RAD2, D = RAD0 (the
+/// write address the same way through WAD), so physical index `{D,C,B,A}`
+/// holds the word at logical address `{A,C,B,D}` (as nextpnr
+/// `dram_to_comb`).
+fn lutram_lut_init(init: u64, bit: usize) -> u16 {
+    let mut word = 0u16;
+    for i in 0..16usize {
+        let addr = (if i & 1 != 0 { 8 } else { 0 })
+            | (if i & 2 != 0 { 2 } else { 0 })
+            | (if i & 4 != 0 { 4 } else { 0 })
+            | (if i & 8 != 0 { 1 } else { 0 });
+        if (init >> (4 * addr + bit)) & 1 == 1 {
+            word |= 1 << i;
+        }
+    }
+    word
+}
+
+/// A pin wire at the chip origin (a global-network bel's control input)
+/// fed by one fixed connection: the wire feeding it, where a route ends.
+fn local_sink(g: &Graph, w: Wire) -> Wire {
+    let mut w = w;
+    for _ in 0..4 {
+        if w.x != 0 || w.y != 0 {
+            break;
+        }
+        let up: Vec<Wire> = g
+            .uphill(w)
+            .into_iter()
+            .filter(|a| g.pip(a).kind == PipKind::Fixed)
+            .map(|a| a.from)
+            .collect();
+        match up.as_slice() {
+            [one] => w = *one,
+            _ => break,
+        }
+    }
+    w
 }

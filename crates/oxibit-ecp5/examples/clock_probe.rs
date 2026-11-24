@@ -23,7 +23,7 @@ fn main() {
     let tree = route_clock(&g, &cn, src, &sinks, &HashSet::new(), ClockOptions::default()).expect("route");
     eprintln!("{:?} in {:.2}s", tree.stats, t.elapsed().as_secs_f64());
     for a in &tree.arcs {
-        let kind = match a { ClockArc::Pip(p) => g.tiles[p.tile as usize].name.clone(), ClockArc::Span { .. } => "span".into(), ClockArc::RefCs { .. } => "refcs".into(), ClockArc::Dcc { side, index, .. } => format!("DCC {side}{index}") };
+        let kind = match a { ClockArc::Pip(p) => g.tiles[p.tile as usize].name.clone(), ClockArc::Span { .. } => "span".into(), ClockArc::RefCs { .. } => "refcs".into(), ClockArc::Sync { .. } => "eclksync".into(), ClockArc::Dcc { side, index, .. } => format!("DCC {side}{index}") };
         eprintln!("  {} -> {}  [{kind}]", g.wire_name(a.from()), g.wire_name(a.to()));
     }
 }
