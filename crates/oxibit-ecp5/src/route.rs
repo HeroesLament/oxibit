@@ -326,6 +326,17 @@ pub fn route_with(
     opts: Options,
     reserved: &HashSet<Wire>,
 ) -> Result<Routes> {
+    route_progress(g, nets, opts, reserved, &oxibit_report::Silent)
+}
+
+/// `route_with`, reporting each pass (`pass`, `nets`, `overused`) to `progress`.
+pub fn route_progress(
+    g: &Graph,
+    nets: &[Net],
+    opts: Options,
+    reserved: &HashSet<Wire>,
+    progress: &dyn oxibit_report::Progress,
+) -> Result<Routes> {
     let mut st = State::new(g, opts, nets.len());
     let mut reserved: Vec<Wire> = reserved.iter().copied().collect();
     reserved.sort();
@@ -378,6 +389,16 @@ pub fn route_with(
             routes[i] = arcs;
         }
         let overused: Vec<usize> = (0..st.users.len()).filter(|&k| st.users[k].len() > 1).collect();
+        progress.emit(oxibit_report::Event::Progress {
+            phase: "route".into(),
+            data: [
+                ("pass".to_owned(), serde_json::Value::from(pass)),
+                ("nets".to_owned(), serde_json::Value::from(nets.len())),
+                ("overused".to_owned(), serde_json::Value::from(overused.len())),
+            ]
+            .into_iter()
+            .collect(),
+        });
         if overused.is_empty() {
             return Ok(Routes {
                 nets: routes,

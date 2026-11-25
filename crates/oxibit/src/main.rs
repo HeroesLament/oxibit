@@ -9,6 +9,7 @@
 )]
 
 mod build;
+mod ecp5_cmd;
 mod pnr_cmd;
 mod report;
 mod route_cmd;
@@ -24,7 +25,7 @@ use input::{Found, load};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use oxibit_bitstream::packet::{self, Item, Reg, cmd};
 use oxibit_bitstream::zynq_boot::{BootImage, Destination};
 use oxibit_bitstream::{Bitstream, Report, analyze, part};
@@ -249,6 +250,38 @@ enum Command {
         #[arg(long)]
         clock: Option<String>,
     },
+    /// ECP5: Verilog to a bitstream, `<input stem>.bit` here (ULX3S pins unless --lpf).
+    Build {
+        /// Verilog source.
+        #[arg(value_hint = clap::ValueHint::FilePath)]
+        input: PathBuf,
+        /// Pin preferences (default: the ULX3S set).
+        #[arg(long, value_hint = clap::ValueHint::FilePath)]
+        lpf: Option<PathBuf>,
+        /// Part (default LFE5U-85F).
+        #[arg(long, value_parser = ["LFE5U-12F", "LFE5U-25F", "LFE5U-45F", "LFE5U-85F", "LFE5UM-25F", "LFE5UM-45F", "LFE5UM-85F", "LFE5UM5G-25F", "LFE5UM5G-45F", "LFE5UM5G-85F"])]
+        device: Option<String>,
+        /// Package (default CABGA381).
+        #[arg(long, value_parser = ["CABGA256", "CABGA381", "CABGA554", "CABGA756", "CSFBGA285", "TQFP144"])]
+        package: Option<String>,
+        /// Top module (default: the last in the file).
+        #[arg(long)]
+        top: Option<String>,
+        /// Output bitstream (default: <input stem>.bit here).
+        #[arg(short, long, value_hint = clap::ValueHint::FilePath)]
+        out: Option<PathBuf>,
+        /// Also program the board's SRAM.
+        #[arg(long)]
+        load: bool,
+    },
+    /// ECP5: program a bitstream into the ULX3S SRAM over JTAG.
+    Prog {
+        /// Bitstream to load.
+        #[arg(value_hint = clap::ValueHint::FilePath)]
+        file: PathBuf,
+    },
+    /// Print a shell completion script (zsh: save it as `_oxibit` on the fpath).
+    Completions { shell: clap_complete::Shell },
     /// Silicon timing characterization from phase sweeps.
     Timing {
         #[command(subcommand)]
@@ -396,6 +429,14 @@ fn main() -> ExitCode {
             build::fasm2bit(&input, &output, &db_root, &part, frames.as_deref(), &cli.report)
         }
         Command::BuildPort { db_root, part } => return build::serve(&db_root, &part),
+        Command::Build { input, lpf, device, package, top, out, load } => {
+            ecp5_cmd::build(ecp5_cmd::BuildArgs { input, lpf, device, package, top, out, load }, &cli.report)
+        }
+        Command::Prog { file } => ecp5_cmd::prog(&file, &cli.report),
+        Command::Completions { shell } => {
+            clap_complete::generate(shell, &mut Cli::command(), "oxibit", &mut std::io::stdout());
+            Ok(ExitCode::SUCCESS)
+        }
         Command::Timing { cmd: TimingCmd::Abs { dir, a, b, tags, split, vote, calib, verbose, json } } => {
             timing_cmd::abs(timing_cmd::AbsArgs { dir: &dir, a: &a, b: &b, tags: &tags, split: &split, vote: &vote, calib: &calib, verbose, json })
         }

@@ -8,12 +8,14 @@ publish.workspace = true
 
 [dependencies]
 oxibit-bitstream.workspace = true
+oxibit-ecp5.workspace = true
 oxibit-fasm.workspace = true
 oxibit-pnr.workspace = true
 oxibit-report.workspace = true
 oxibit-timing.workspace = true
 libc.workspace = true
 clap.workspace = true
+clap_complete.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 flate2.workspace = true

@@ -146,11 +146,41 @@ pub fn run(
     lpf_text: &str,
     opts: &FlowOptions,
 ) -> Result<(ChipConfig, FlowReport)> {
+    run_with(root, src, lpf_text, opts, &oxibit_report::Silent)
+}
+
+/// `run`, reporting its phases (synth, pack, device, place, route, config)
+/// and the router's passes to `progress`.
+pub fn run_with(
+    root: &Path,
+    src: &str,
+    lpf_text: &str,
+    opts: &FlowOptions,
+    progress: &dyn oxibit_report::Progress,
+) -> Result<(ChipConfig, FlowReport)> {
+    use oxibit_report::{Event, PhaseState};
+    let phase = |name: &str, state: PhaseState| {
+        progress.emit(Event::Phase { phase: name.into(), state, ms: None });
+    };
     let mut report = FlowReport::default();
     let t = std::time::Instant::now();
+    phase("synth", PhaseState::Begin);
+    // A lap closes its phase and opens the one that follows it.
     let mut lap = |name: &'static str, report: &mut FlowReport, t: &mut std::time::Instant| {
         report.ms.insert(name, t.elapsed().as_millis());
         *t = std::time::Instant::now();
+        phase(name, PhaseState::End);
+        let next = match name {
+            "synth" => Some("pack"),
+            "pack" => Some("device"),
+            "device" => Some("place"),
+            "place" => Some("route"),
+            "route" => Some("config"),
+            _ => None,
+        };
+        if let Some(n) = next {
+            phase(n, PhaseState::Begin);
+        }
     };
     let mut t = t;
 
@@ -472,7 +502,7 @@ pub fn run(
         }
     }
     let nets: Vec<Net> = signal.iter().map(|(_, n)| n.clone()).collect();
-    let routes = route::route_with(&g, &nets, opts.route, &taken)?;
+    let routes = route::route_progress(&g, &nets, opts.route, &taken, progress)?;
     route::check(&g, &nets, &routes)?;
     // Clock trees against each other and against the signal routes: no
     // electrical node may carry two nets.
