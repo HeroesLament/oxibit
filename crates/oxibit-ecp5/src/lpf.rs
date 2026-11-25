@@ -148,12 +148,79 @@ impl Lpf {
             .or_else(|| self.ports.get(&format!("{name}[0]")))
     }
 
+    /// Why `port` cannot be placed, with the located names nearest to it.
+    #[must_use]
+    pub fn no_locate(&self, port: &str) -> String {
+        let base = base_name(port);
+        let hint = if self.ports.keys().any(|k| k != port && base_name(k) == base) {
+            format!("; {base} is located, but not this bit")
+        } else {
+            match self.similar(base) {
+                near if near.is_empty() => String::new(),
+                near => format!("; did you mean {}?", near.join(", ")),
+            }
+        };
+        format!("port {port} has no LOCATE in the preferences{hint} (`oxibit pins` lists the located ports)")
+    }
+
+    /// Located port base names closest to `base`, nearest first, three at most.
+    fn similar(&self, base: &str) -> Vec<String> {
+        let want = base.to_ascii_lowercase();
+        let mut scored: Vec<(usize, &str)> = Vec::new();
+        for name in self.ports.keys().map(|k| base_name(k)) {
+            if scored.iter().any(|&(_, n)| n == name) {
+                continue;
+            }
+            let have = name.to_ascii_lowercase();
+            let d = edit_distance(&want, &have);
+            let within = have.contains(&want) || want.contains(&have);
+            if within || d <= (want.len() / 3).max(2) {
+                // A shared prefix is the likeliest slip (`clk` for `clk_25mhz`).
+                let rank = if have.starts_with(&want) || want.starts_with(&have) {
+                    0
+                } else if within {
+                    1
+                } else {
+                    d + 1
+                };
+                scored.push((rank, name));
+            }
+        }
+        scored.sort_unstable();
+        scored.into_iter().take(3).map(|(_, n)| n.to_owned()).collect()
+    }
+
     pub fn io_type(&self, port: &str) -> String {
         self.port(port)
             .and_then(|p| p.iobuf.get("IO_TYPE"))
             .cloned()
             .unwrap_or_else(|| "LVCMOS33".to_owned())
     }
+}
+
+/// `led` for `led[3]`; a scalar is its own base.
+#[must_use]
+pub fn base_name(port: &str) -> &str {
+    match port.split_once('[') {
+        Some((base, rest)) if rest.ends_with(']') => base,
+        _ => port,
+    }
+}
+
+/// Levenshtein distance.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut prev = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cur = row[j + 1];
+            row[j + 1] = (prev + usize::from(ca != *cb)).min(row[j] + 1).min(cur + 1);
+            prev = cur;
+        }
+    }
+    row[b.len()]
 }
 
 #[cfg(test)]
@@ -174,5 +241,22 @@ IOBUF  PORT "led[0]" PULLMODE=NONE IO_TYPE=LVCMOS33 DRIVE=4;
         assert_eq!(l.ports["led[0]"].iobuf["DRIVE"], "4");
         assert_eq!(l.io_type("led[0]"), "LVCMOS33");
         assert_eq!(l.ignored, 2);
+    }
+
+    #[test]
+    fn no_locate_names_near_ports() {
+        let l = Lpf::parse(r#"LOCATE COMP "clk_25mhz" SITE "G2"; LOCATE COMP "led[0]" SITE "B2";"#).unwrap();
+        assert!(l.no_locate("clk").contains("did you mean clk_25mhz?"));
+        assert!(l.no_locate("leds[0]").contains("did you mean led?"));
+        assert!(l.no_locate("led[9]").contains("led is located, but not this bit"));
+        assert!(!l.no_locate("hdmi_d").contains("did you mean"));
+    }
+
+    #[test]
+    fn board_file_parses() {
+        let l = Lpf::parse(include_str!("../boards/ulx3s.lpf")).unwrap();
+        assert_eq!(l.ports["clk_25mhz"].site.as_deref(), Some("G2"));
+        assert_eq!(l.ports["led[7]"].site.as_deref(), Some("H3"));
+        assert_eq!(l.sysconfig["MASTER_SPI_PORT"], "ENABLE");
     }
 }

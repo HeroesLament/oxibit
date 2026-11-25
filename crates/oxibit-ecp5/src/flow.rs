@@ -228,7 +228,7 @@ pub fn run_with(
         let site = lpf
             .port(&p.name)
             .and_then(|pp| pp.site.as_ref())
-            .ok_or_else(|| err!("port {} has no LOCATE in the preferences", p.name))?;
+            .ok_or_else(|| err!("{}", lpf.no_locate(&p.name)))?;
         let s = ball_site(root, &opts.device, &opts.package, site)?;
         let bel = bels
             .find(s.col, s.row, &format!("PIO{}", s.pio))

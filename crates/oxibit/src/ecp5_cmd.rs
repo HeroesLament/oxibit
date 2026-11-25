@@ -11,11 +11,11 @@ use oxibit_report::{Event, Progress, Reporter};
 use crate::input::Result;
 use crate::report::ReportArgs;
 
-fn start(r: &Reporter, cmd: &str) {
+pub(crate) fn start(r: &Reporter, cmd: &str) {
     r.emit(Event::Start { cmd: cmd.into(), version: env!("CARGO_PKG_VERSION").into(), args: std::env::args().skip(1).collect() });
 }
 
-fn done(r: &Reporter, ok: bool, stats: serde_json::Value, outputs: Vec<String>) {
+pub(crate) fn done(r: &Reporter, ok: bool, stats: serde_json::Value, outputs: Vec<String>) {
     r.emit(Event::Done {
         ok,
         exit: if ok { 0 } else { 2 },
@@ -29,8 +29,8 @@ fn done(r: &Reporter, ok: bool, stats: serde_json::Value, outputs: Vec<String>) 
     r.finish();
 }
 
-/// ULX3S pin preferences, used when no `--lpf` is given.
-const ULX3S_LPF: &str = include_str!("../../oxibit-ecp5/designs/ulx3s.lpf");
+/// The ULX3S board's pin preferences, used when no `--constraints` is given.
+pub const ULX3S_LPF: &str = include_str!("../../oxibit-ecp5/boards/ulx3s.lpf");
 
 /// OpenOCD setup for the ULX3S onboard FT231X (bit-banged JTAG). trst / srst
 /// are assigned because the ft232r defaults put them on pins this map uses.

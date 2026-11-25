@@ -10,6 +10,9 @@
 
 mod build;
 mod ecp5_cmd;
+mod nexus_cmd;
+mod xc7_cmd;
+mod pins_cmd;
 mod pnr_cmd;
 mod report;
 mod route_cmd;
@@ -156,6 +159,27 @@ enum TimingCmd {
     },
 }
 
+/// Boards `build` knows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum Board {
+    /// Radiona ULX3S, LFE5U-85F (pins built in).
+    Ulx3s,
+    /// LibreSDR, Zynq xc7z020clg400-1 (give --constraints).
+    Libresdr,
+    /// Lattice CrossLink-NX EVN, LIFCL-40 (LED pins built in; load with openFPGALoader).
+    Clnx,
+}
+
+impl Board {
+    fn part(self) -> &'static str {
+        match self {
+            Board::Ulx3s => "LFE5U-85F",
+            Board::Libresdr => "xc7z020clg400-1",
+            Board::Clnx => "LIFCL-40",
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// Describe bitstreams: container, header, device, frames, commands, CRC.
@@ -250,35 +274,75 @@ enum Command {
         #[arg(long)]
         clock: Option<String>,
     },
-    /// ECP5: Verilog to a bitstream, `<input stem>.bit` here (ULX3S pins unless --lpf).
+    /// Source to a bitstream, `<input stem>.bit` here. The part picks the
+    /// flow: ECP5 (`LFE5...`), CrossLink-NX (`LIFCL...`) or 7-series (`xc7...`).
     Build {
-        /// Verilog source.
+        /// Verilog source; for 7-series also a synthesized netlist (`.json`).
         #[arg(value_hint = clap::ValueHint::FilePath)]
         input: PathBuf,
-        /// Pin preferences (default: the ULX3S set).
-        #[arg(long, value_hint = clap::ValueHint::FilePath)]
-        lpf: Option<PathBuf>,
-        /// Part (default LFE5U-85F).
-        #[arg(long, value_parser = ["LFE5U-12F", "LFE5U-25F", "LFE5U-45F", "LFE5U-85F", "LFE5UM-25F", "LFE5UM-45F", "LFE5UM-85F", "LFE5UM5G-25F", "LFE5UM5G-45F", "LFE5UM5G-85F"])]
-        device: Option<String>,
-        /// Package (default CABGA381).
-        #[arg(long, value_parser = ["CABGA256", "CABGA381", "CABGA554", "CABGA756", "CSFBGA285", "TQFP144"])]
+        /// A board: its part, package and, where built in, its pins.
+        #[arg(long, value_enum)]
+        board: Option<Board>,
+        /// Part, e.g. LFE5U-85F or xc7z020clg400-1 (default: the board's, else LFE5U-85F).
+        #[arg(long, alias = "device")]
+        part: Option<String>,
+        /// ECP5 package (default CABGA381).
+        #[arg(long)]
         package: Option<String>,
+        /// Pin and clock constraints: `.lpf` for ECP5, `.xdc` for 7-series.
+        #[arg(long, alias = "lpf", alias = "xdc", value_hint = clap::ValueHint::FilePath)]
+        constraints: Option<PathBuf>,
         /// Top module (default: the last in the file).
         #[arg(long)]
         top: Option<String>,
         /// Output bitstream (default: <input stem>.bit here).
         #[arg(short, long, value_hint = clap::ValueHint::FilePath)]
         out: Option<PathBuf>,
-        /// Also program the board's SRAM.
+        /// Also program the board's SRAM (ECP5).
         #[arg(long)]
         load: bool,
+        /// 7-series: also write <stem>.placed.json and <stem>.fasm.
+        #[arg(long)]
+        keep: bool,
+        /// 7-series: prjxray family directory (default $OXIBIT_XRAY_DB).
+        #[arg(long, value_hint = clap::ValueHint::DirPath)]
+        db_root: Option<PathBuf>,
+        /// 7-series: nextpnr-xilinx-meta family directory (default $OXIBIT_XC7_META).
+        #[arg(long, value_hint = clap::ValueHint::DirPath)]
+        meta: Option<PathBuf>,
+        /// 7-series synthesis: Verilog giving primitive port directions; repeatable.
+        #[arg(long, value_hint = clap::ValueHint::FilePath)]
+        lib: Vec<PathBuf>,
+        /// 7-series: the placer's bin grid, N a side.
+        #[arg(long)]
+        bins: Option<usize>,
+        /// 7-series: route for timing, clock periods in ps: `clk=10000,*=31250`.
+        #[arg(long)]
+        timing: Option<String>,
     },
-    /// ECP5: program a bitstream into the ULX3S SRAM over JTAG.
+    /// The port names a board's constraints locate, with their pins: what a
+    /// design may call its top-level ports.
+    Pins {
+        /// Only ports whose name contains this.
+        filter: Option<String>,
+        /// The board (default ulx3s).
+        #[arg(long, value_enum)]
+        board: Option<Board>,
+        /// Constraints to list instead of the board's built-in ones (`.lpf` or `.xdc`).
+        #[arg(long, alias = "lpf", alias = "xdc", value_hint = clap::ValueHint::FilePath)]
+        constraints: Option<PathBuf>,
+        /// A JSON array on stdout instead of the table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Program a bitstream into the board's SRAM over JTAG (ULX3S, or the CrossLink-NX EVN with `--board clnx`).
     Prog {
         /// Bitstream to load.
         #[arg(value_hint = clap::ValueHint::FilePath)]
         file: PathBuf,
+        /// Board to program; the ULX3S unless given.
+        #[arg(long, value_enum)]
+        board: Option<Board>,
     },
     /// Print a shell completion script (zsh: save it as `_oxibit` on the fpath).
     Completions { shell: clap_complete::Shell },
@@ -429,10 +493,34 @@ fn main() -> ExitCode {
             build::fasm2bit(&input, &output, &db_root, &part, frames.as_deref(), &cli.report)
         }
         Command::BuildPort { db_root, part } => return build::serve(&db_root, &part),
-        Command::Build { input, lpf, device, package, top, out, load } => {
-            ecp5_cmd::build(ecp5_cmd::BuildArgs { input, lpf, device, package, top, out, load }, &cli.report)
+        Command::Build { input, board, part, package, constraints, top, out, load, keep, db_root, meta, lib, bins, timing } => {
+            let part = part.or_else(|| board.map(|b| b.part().to_owned())).unwrap_or_else(|| "LFE5U-85F".to_owned());
+            if part.to_ascii_lowercase().starts_with("lifcl") {
+                nexus_cmd::build(nexus_cmd::BuildArgs { input, pdc: constraints, device: part.to_ascii_uppercase(), package, out, load }, &cli.report)
+            } else if part.to_ascii_lowercase().starts_with("xc7") {
+                if load {
+                    Err("--load is not wired for 7-series boards yet".to_owned())
+                } else {
+                    xc7_cmd::build(xc7_cmd::BuildArgs { input, part, constraints, top, out, keep, db_root, meta, libs: lib, bins, timing }, &cli.report)
+                }
+            } else {
+                ecp5_cmd::build(ecp5_cmd::BuildArgs { input, lpf: constraints, device: Some(part), package, top, out, load }, &cli.report)
+            }
         }
-        Command::Prog { file } => ecp5_cmd::prog(&file, &cli.report),
+        Command::Pins { filter, board, constraints, json } => {
+            let source = match (&constraints, board.unwrap_or(Board::Ulx3s)) {
+                (Some(path), _) => Ok(pins_cmd::Source::File(path)),
+                (None, Board::Ulx3s) => Ok(pins_cmd::Source::BuiltIn { board: "ulx3s", lpf: ecp5_cmd::ULX3S_LPF }),
+                (None, Board::Libresdr) => Err("libresdr has no built-in constraints; give --constraints FILE.xdc".to_owned()),
+                (None, Board::Clnx) => Err("pins is not wired for clnx yet; its built-in pins are crates/oxibit-nexus/boards/evn.pdc".to_owned()),
+            };
+            source.and_then(|s| pins_cmd::pins(&s, filter.as_deref(), json))
+        }
+        Command::Prog { file, board } => match board.unwrap_or(Board::Ulx3s) {
+            Board::Ulx3s => ecp5_cmd::prog(&file, &cli.report),
+            Board::Clnx => nexus_cmd::prog(&file, &cli.report),
+            Board::Libresdr => Err("prog is not wired for libresdr".to_owned()),
+        },
         Command::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "oxibit", &mut std::io::stdout());
             Ok(ExitCode::SUCCESS)

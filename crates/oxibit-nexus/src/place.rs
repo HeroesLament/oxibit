@@ -175,8 +175,13 @@ pub fn place(chip: &Chip, g: &Graph, nl: &Netlist, package: &str, pins: &HashMap
         }
         groups.entry(ctrl).or_default().push((lut, i));
     }
+    // A PLC's CLK, CE and LSR are shared by slice pairs (A with B, C with D),
+    // so each control set takes whole pairs: an odd run of slices is padded
+    // with an empty one (a lone LUT may still fill it) and the next set
+    // starts on a pair boundary.
     let mut slices: Vec<Slice> = Vec::new();
     for (_, members) in groups {
+        let first = slices.len();
         for pair in members.chunks(2) {
             let mut s = Slice::default();
             for (k, (lut, ff)) in pair.iter().enumerate() {
@@ -184,6 +189,9 @@ pub fn place(chip: &Chip, g: &Graph, nl: &Netlist, package: &str, pins: &HashMap
                 s.ff[k] = Some(*ff);
             }
             slices.push(s);
+        }
+        if (slices.len() - first) % 2 == 1 {
+            slices.push(Slice::default());
         }
     }
     let lone: Vec<CellId> = nl

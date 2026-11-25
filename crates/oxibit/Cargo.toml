@@ -9,6 +9,10 @@ publish.workspace = true
 [dependencies]
 oxibit-bitstream.workspace = true
 oxibit-ecp5.workspace = true
+oxibit-nexus.workspace = true
+oxibit-place.workspace = true
+oxibit-synth = { path = "../oxibit-synth" }
+oxibit-hdl = { path = "../oxibit-hdl" }
 oxibit-fasm.workspace = true
 oxibit-pnr.workspace = true
 oxibit-report.workspace = true
