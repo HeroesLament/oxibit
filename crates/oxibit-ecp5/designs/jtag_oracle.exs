@@ -6,7 +6,7 @@
 # Exit status 0 when every check passes, 1 otherwise.
 #
 #   elixir jtag_oracle.exs [--design pll|soft|lutram|iol|clk|gear|dsp] [--bit F.bit] [--cfg F]
-#       [--samples N] [--gap-ms MS] [--clk-hz HZ] [--pll-hz HZ] [--gp0 0|1]
+#       [--samples N] [--gap-ms MS] [--clk-hz HZ] [--pll-hz HZ] [--gp0 0|1] [--sign-pins 0..15]
 #
 # --design pll (default): pll_jtag.v (counters, PLL lock, TDI round trip).
 # --design soft: soft_probe.v (x written over TDI, LUT / gate / MUX / ROM /
@@ -1287,22 +1287,44 @@ end
 
 defmodule Dsp do
   @moduledoc false
-  # dsp_probe.v: 18x18 products, unregistered (p0) and registered (p1).
-  @magic 0xD5D50000
+  # dsp_probe.v: 18x18 products, unregistered (p0) and registered (p1),
+  # and the split modes, all read over the probe's EIO register bus.
+  # EIO VERSION register: {major, minor, "IO"}.
+  @magic 0x0005494F
   import Bitwise
 
   defp f(v, lo, w), do: v >>> lo &&& (1 <<< w) - 1
   defp sext(v, w), do: if((v >>> (w - 1) &&& 1) == 1, do: v - (1 <<< w), else: v)
 
-  defp scan(s, x) do
-    _ = Ocd.cmd(s, "irscan ecp5.tap 0x32")
-    tdi = "0x" <> String.pad_leading(Integer.to_string(x <<< 192, 16), 64, "0")
-    v = Ocd.cmd(s, "drscan ecp5.tap 256 #{tdi}") |> String.trim() |> String.to_integer(16)
-    hi = f(v, 128, 32)
-    %{sent: x, magic: f(v, 0, 32), x: f(v, 32, 64),
-      p0: f(v, 96, 32) ||| f(hi, 0, 4) <<< 32, p1: f(v, 160, 32) ||| f(hi, 4, 4) <<< 32,
-      tag: f(v, 192, 8), ncap: f(v, 200, 8),
-      p2: f(v, 208, 18), po: f(v, 226, 8), r4hi: f(v, 242, 8)}
+  # One 49-bit EIO scan (ER1 stays selected): returns the captured data word.
+  defp dr(s, v) do
+    tdi = "0x" <> String.pad_leading(Integer.to_string(v, 16), 13, "0")
+    Ocd.cmd(s, "drscan ecp5.tap 49 #{tdi}") |> String.trim() |> String.to_integer(16) |> f(0, 32)
+  end
+
+  defp wr(s, a, d), do: dr(s, 1 <<< 48 ||| a <<< 32 ||| d)
+
+  # Reads the registers at `addrs`: each scan selects the next address and
+  # captures the one selected before it.
+  defp rd(s, [a0 | rest]) do
+    _ = dr(s, a0 <<< 32)
+    for a <- rest ++ [0], do: dr(s, a <<< 32)
+  end
+
+  # VERSION, IN_W and OUT_W, read once per run.
+  defp ident(s) do
+    [ver, in_w, out_w] = rd(s, [0x0, 0x4, 0x8])
+    %{magic: ver, tag: in_w, out_w: out_w}
+  end
+
+  defp scan(s, x, id) do
+    _ = wr(s, 0x100, f(x, 0, 32))
+    _ = wr(s, 0x104, f(x, 32, 32))
+    ws = rd(s, [0x10, 0x14, 0x18, 0x1C, 0x20, 0x24])
+    v = ws |> Enum.with_index() |> Enum.reduce(0, fn {w, i}, acc -> acc ||| w <<< (32 * i) end)
+    %{sent: x, magic: id.magic, tag: id.tag, out_w: id.out_w, x: f(v, 123, 64),
+      p0: f(v, 0, 36), p1: f(v, 36, 36), p2: f(v, 72, 18), po: f(v, 90, 9),
+      r4: f(v, 99, 24), r4hi: f(v, 115, 8)}
   end
 
   # The product the MULT18 should give for x: A, B and their signedness.
@@ -1329,9 +1351,11 @@ defmodule Dsp do
   # observes constant 0 this revision.
   def want_po(_x), do: 0
 
-  # The ALU24 sum's top byte: MA/MB open (0) and CIN = x[23:0] with
-  # OPCINSEL high, so r4 = CIN.
-  def want_r4hi(x), do: f(x, 16, 8)
+  # The ALU24 sum's top byte: r4 = MA + MB, the paired multipliers'
+  # unsigned products (m5: x[8:0]*x[17:9], m6: x[26:18]*x[35:27]),
+  # CIN grounded per the pairing rule.
+  def want_r4(x), do: f(x, 0, 9) * f(x, 9, 9) + f(x, 18, 9) * f(x, 27, 9)
+  def want_r4hi(x), do: f(want_r4(x), 16, 8)
 
   def run(s, o) do
     :rand.seed(:exsss, {31, 37, 41})
@@ -1339,17 +1363,21 @@ defmodule Dsp do
     edges = for a <- [0, 1, 0x1FFFF, 0x20000, 0x3FFFF], b <- [0, 1, 0x1FFFF, 0x20000, 0x3FFFF], sg <- 0..3,
                 do: a ||| b <<< 18 ||| sg <<< 36
     xs = edges ++ for(_ <- 1..o.samples, do: :rand.uniform(1 <<< 38) - 1)
+    # --sign-pins: x[63:60], the m5/m6 SIGNEDA/SIGNEDB pins (m5 A, m5 B, m6 A, m6 B).
+    xs = Enum.map(xs, &(&1 ||| o.sign_pins <<< 60))
+    _ = Ocd.cmd(s, "irscan ecp5.tap 0x32")
+    id = ident(s)
     reads =
       for x <- xs do
-        r = scan(s, x)
-        IO.puts(Oracle.line(r))
+        r = scan(s, x, id)
+        IO.puts(Oracle.line(Map.put(r, :want_r4, want_r4(r.x))))
         r
       end
     check(reads)
   end
 
   def check(reads) do
-    rs = tl(reads)
+    rs = reads
     bad0 = Enum.filter(rs, &(&1.p0 != want(&1.x)))
     bad1 = Enum.filter(rs, &(&1.p1 != &1.p0))
     sgn = fn r -> f(r.x, 36, 2) end
@@ -1361,8 +1389,8 @@ defmodule Dsp do
     valid = Enum.all?(reads, &(&1.magic == @magic))
     [
       {"magic", valid, "0x" <> Integer.to_string(hd(reads).magic, 16)},
-      {"tag", Enum.all?(reads, &(&1.tag == 0xD5)), "#{hd(reads).tag}"},
-      {"x_roundtrip", Enum.all?(Enum.zip(rs, reads), fn {r, p} -> r.x == p.sent end), "#{length(rs)} reads"},
+      {"tag", Enum.all?(reads, &(&1.tag == 187 and &1.out_w == 64)), "in #{hd(reads).tag} out #{hd(reads).out_w}"},
+      {"x_roundtrip", Enum.all?(rs, &(&1.x == &1.sent)), "#{length(rs)} reads"},
       {"mult18_comb", bad0 == [], "#{length(bad0)} of #{length(rs)} wrong #{by_sign}#{ex}"},
       {"mult18_reg", bad1 == [], "#{length(bad1)} of #{length(rs)} differ from comb"},
       {"mult9_comb", Enum.all?(rs, &(&1.p2 == want9(&1.x))),
@@ -1370,7 +1398,7 @@ defmodule Dsp do
       {"pradd9", Enum.all?(rs, &(&1.po == want_po(&1.x))),
        "#{Enum.count(rs, &(&1.po != want_po(&1.x)))} of #{length(rs)} wrong"},
       {"alu24", Enum.all?(rs, &(&1.r4hi == want_r4hi(&1.x))),
-       "#{Enum.count(rs, &(&1.r4hi != want_r4hi(&1.x)))} of #{length(rs)} wrong"}
+       "#{Enum.count(rs, &(&1.r4hi != want_r4hi(&1.x)))} of #{length(rs)} wrong (all 24 bits: #{Enum.count(rs, &(&1.r4 != want_r4(&1.x)))} wrong)"}
     ]
     |> Enum.map(fn
       {"magic", ok, d} -> {"magic", ok, d}
@@ -1381,7 +1409,7 @@ end
 
 {o, _, _} =
   OptionParser.parse(System.argv(),
-    strict: [design: :string, bit: :string, osc_div: :integer, cfg: :string, samples: :integer, gap_ms: :integer, clk_hz: :float, pll_hz: :float, gp0: :integer, port: :integer]
+    strict: [design: :string, bit: :string, osc_div: :integer, cfg: :string, samples: :integer, gap_ms: :integer, clk_hz: :float, pll_hz: :float, gp0: :integer, port: :integer, sign_pins: :integer]
   )
 
 o = %{
@@ -1394,6 +1422,7 @@ o = %{
   gp0: o[:gp0],
   port: o[:port] || 6667,
   osc_div: o[:osc_div],
+  sign_pins: o[:sign_pins] || 0,
   bit: o[:bit]
 }
 

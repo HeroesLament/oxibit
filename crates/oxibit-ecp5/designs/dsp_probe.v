@@ -1,9 +1,14 @@
 // sysDSP probe for the ULX3S, read by jtag_oracle.exs --design dsp.
 //
-// 256-bit ER1 frame, LSB first: magic 0xD5D50000, x[31:0], x[63:32],
-// p0[31:0], {24'h0, p1[35:32], p0[35:32]}, p1[31:0], then
-// {tag 0xD5, ncap, p2[17:0], po[7:0], 8'h00, r4[23:16], 6'h0}.
-// x is the last 64 bits shifted in, latched on Update-DR.
+// Transport: an EIO register bus on ER1, from the local model. One 49-bit
+// data register, LSB first: data[31:0], addr[47:32], write flag [48]. A
+// scan with the flag set writes data to addr on Update-DR; a scan with it
+// clear selects addr, and the next scan's capture returns that register.
+//   0x0000 VERSION  {8'h00, 8'h05, "IO"}
+//   0x0004 IN_W     187
+//   0x0008 OUT_W    64
+//   0x0010.. IN     {x[63:0], r4[23:0], po[8:0], p2[17:0], p1[35:0], p0[35:0]}
+//   0x0100.. OUT    x[31:0], x[63:32]
 //   m0: MULT18X18D, no registers: A x[17:0], B x[35:18], SIGNEDA x36,
 //       SIGNEDB x37, P -> p0.
 //   m1: the same operands with the A, B and output registers on JTCK
@@ -30,34 +35,46 @@ module dsp_probe (
     tdi <= jtdi;
   end
   reg shifted = 0;
-  reg [63:0] rx = 0;
+  reg [48:0] rx = 0;
   always @(posedge jtck) begin
     shifted <= ce1 & shift;
-    if (shifted) rx <= {tdi, rx[63:1]};
+    if (shifted) rx <= {tdi, rx[48:1]};
   end
 
-  reg [255:0] sr = 0;
-  reg [63:0] x = 0;
-  reg [7:0] ncap = 0;
+  reg [48:0] sr = 0;
+  reg [15:0] addr = 0;
+  reg [31:0] xl = 0, xh = 0;
+  wire [63:0] x = {xh, xl};
   reg armed = 0;
   wire step = upd & armed;
   wire [35:0] p0, p1;
   wire [17:0] p2;
-  wire [23:0] r4;
+  wire [23:0] r4; wire [17:0] pa, pb;
+
+  wire [191:0] pin = {5'h00, x, r4, 9'h000, p2, p1, p0};
+  wire [31:0] rdata =
+    addr == 16'h0000 ? 32'h0005494F :
+    addr == 16'h0004 ? 32'd187 :
+    addr == 16'h0008 ? 32'd64 :
+    addr == 16'h0010 ? pin[31:0] :
+    addr == 16'h0014 ? pin[63:32] :
+    addr == 16'h0018 ? pin[95:64] :
+    addr == 16'h001C ? pin[127:96] :
+    addr == 16'h0020 ? pin[159:128] :
+    addr == 16'h0024 ? pin[191:160] :
+    addr == 16'h0100 ? xl :
+    addr == 16'h0104 ? xh : 32'h00000000;
 
   always @(posedge jtck) begin
     if (ce1) begin
       armed <= 1'b1;
-      if (shift) sr <= {1'b0, sr[255:1]};
-      else begin
-        sr <= {6'h00, r4[23:16], 8'h00, 8'h00, p2[17:0], ncap, 8'hD5,
-               p1[31:0], 24'h0, p1[35:32], p0[35:32],
-               p0[31:0], x, 32'hD5D50000};
-        ncap <= ncap + 1;
-      end
+      if (shift) sr <= {1'b0, sr[48:1]};
+      else sr <= {17'h00000, rdata};
     end else if (step) begin
       armed <= 1'b0;
-      x <= rx;
+      addr <= rx[47:32];
+      if (rx[48] & (rx[47:32] == 16'h0100)) xl <= rx[31:0];
+      if (rx[48] & (rx[47:32] == 16'h0104)) xh <= rx[31:0];
     end
   end
 
@@ -102,6 +119,32 @@ module dsp_probe (
 
   // MULT9X9D, from the local model. Unregistered combinatorial split
   // multiplier: p2 = A*B (18-bit product of 9-bit operands).
+  // Companion multipliers for the ALU24B, from the local model: the
+  // ALU24B's MA/MB are dedicated wires from the paired multiplier sites
+  // (z-3, z-2) of its block, so the pair must sit there. The products
+  // are real: r4 = MA + MB. The sign pins ride x[63:60] (m5 A, m5 B,
+  // m6 A, m6 B), low for unsigned operands.
+  MULT9X9D m5 (
+    .CE0(one), .CE1(one), .CE2(one), .CE3(one),
+    .CLK0(jtck), .CLK1(jtck), .CLK2(jtck), .CLK3(jtck),
+    .RST0(zero), .RST1(zero), .RST2(zero), .RST3(zero),
+    .SIGNEDA(x[60]), .SIGNEDB(x[61]), .SOURCEA(zero), .SOURCEB(zero),
+    .A8(x[8]), .A7(x[7]), .A6(x[6]), .A5(x[5]), .A4(x[4]), .A3(x[3]), .A2(x[2]), .A1(x[1]), .A0(x[0]),
+    .B8(x[17]), .B7(x[16]), .B6(x[15]), .B5(x[14]), .B4(x[13]), .B3(x[12]), .B2(x[11]), .B1(x[10]), .B0(x[9]),
+    .P17(pa[17]), .P16(pa[16]), .P15(pa[15]), .P14(pa[14]), .P13(pa[13]), .P12(pa[12]), .P11(pa[11]), .P10(pa[10]), .P9(pa[9]), .P8(pa[8]),
+    .P7(pa[7]), .P6(pa[6]), .P5(pa[5]), .P4(pa[4]), .P3(pa[3]), .P2(pa[2]), .P1(pa[1]), .P0(pa[0])
+  );
+  MULT9X9D m6 (
+    .CE0(one), .CE1(one), .CE2(one), .CE3(one),
+    .CLK0(jtck), .CLK1(jtck), .CLK2(jtck), .CLK3(jtck),
+    .RST0(zero), .RST1(zero), .RST2(zero), .RST3(zero),
+    .SIGNEDA(x[62]), .SIGNEDB(x[63]), .SOURCEA(zero), .SOURCEB(zero),
+    .A8(x[26]), .A7(x[25]), .A6(x[24]), .A5(x[23]), .A4(x[22]), .A3(x[21]), .A2(x[20]), .A1(x[19]), .A0(x[18]),
+    .B8(x[35]), .B7(x[34]), .B6(x[33]), .B5(x[32]), .B4(x[31]), .B3(x[30]), .B2(x[29]), .B1(x[28]), .B0(x[27]),
+    .P17(pb[17]), .P16(pb[16]), .P15(pb[15]), .P14(pb[14]), .P13(pb[13]), .P12(pb[12]), .P11(pb[11]), .P10(pb[10]), .P9(pb[9]), .P8(pb[8]),
+    .P7(pb[7]), .P6(pb[6]), .P5(pb[5]), .P4(pb[4]), .P3(pb[3]), .P2(pb[2]), .P1(pb[1]), .P0(pb[0])
+  );
+
   MULT9X9D m2 (
     .A8(x[8]), .A7(x[7]), .A6(x[6]), .A5(x[5]), .A4(x[4]), .A3(x[3]), .A2(x[2]), .A1(x[1]), .A0(x[0]),
     .B8(x[17]), .B7(x[16]), .B6(x[15]), .B5(x[14]), .B4(x[13]), .B3(x[12]), .B2(x[11]), .B1(x[10]), .B0(x[9]),
@@ -124,18 +167,25 @@ module dsp_probe (
     .PO8(), .PO7(), .PO6(), .PO5(), .PO4(), .PO3(), .PO2(), .PO1(), .PO0()
   );
 
-  // ALU24B, from the local model. MA/MB are the paired multiplier products
-  // (dedicated wires; left unconnected, so the addend is 0). The fabric
-  // operand is CIN with OPCINSEL high: r4 = MA + MB + CIN = CIN.
+  // ALU24B, from the local model. MA/MB are the paired multiplier
+  // products (dedicated wires from m5/m6) and CIN is grounded (the
+  // cascade input; the pairing rule forbids fabric on it), so
+  // r4 = MA + MB.
   ALU24B m4 (
     .CE0(one), .CE1(one), .CE2(one), .CE3(one),
     .CLK0(jtck), .CLK1(jtck), .CLK2(jtck), .CLK3(jtck),
     .RST0(zero), .RST1(zero), .RST2(zero), .RST3(zero),
     .SIGNEDIA(zero), .SIGNEDIB(zero),
-    .CIN23(x[23]), .CIN22(x[22]), .CIN21(x[21]), .CIN20(x[20]), .CIN19(x[19]), .CIN18(x[18]),
-    .CIN17(x[17]), .CIN16(x[16]), .CIN15(x[15]), .CIN14(x[14]), .CIN13(x[13]), .CIN12(x[12]),
-    .CIN11(x[11]), .CIN10(x[10]), .CIN9(x[9]), .CIN8(x[8]), .CIN7(x[7]), .CIN6(x[6]),
-    .CIN5(x[5]), .CIN4(x[4]), .CIN3(x[3]), .CIN2(x[2]), .CIN1(x[1]), .CIN0(x[0]),
+    .MA17(pa[17]), .MA16(pa[16]), .MA15(pa[15]), .MA14(pa[14]), .MA13(pa[13]), .MA12(pa[12]),
+    .MA11(pa[11]), .MA10(pa[10]), .MA9(pa[9]), .MA8(pa[8]), .MA7(pa[7]), .MA6(pa[6]),
+    .MA5(pa[5]), .MA4(pa[4]), .MA3(pa[3]), .MA2(pa[2]), .MA1(pa[1]), .MA0(pa[0]),
+    .MB17(pb[17]), .MB16(pb[16]), .MB15(pb[15]), .MB14(pb[14]), .MB13(pb[13]), .MB12(pb[12]),
+    .MB11(pb[11]), .MB10(pb[10]), .MB9(pb[9]), .MB8(pb[8]), .MB7(pb[7]), .MB6(pb[6]),
+    .MB5(pb[5]), .MB4(pb[4]), .MB3(pb[3]), .MB2(pb[2]), .MB1(pb[1]), .MB0(pb[0]),
+    .CIN23(zero), .CIN22(zero), .CIN21(zero), .CIN20(zero), .CIN19(zero), .CIN18(zero),
+    .CIN17(zero), .CIN16(zero), .CIN15(zero), .CIN14(zero), .CIN13(zero), .CIN12(zero),
+    .CIN11(zero), .CIN10(zero), .CIN9(zero), .CIN8(zero), .CIN7(zero), .CIN6(zero),
+    .CIN5(zero), .CIN4(zero), .CIN3(zero), .CIN2(zero), .CIN1(zero), .CIN0(zero),
     .CFB23(zero), .CFB22(zero), .CFB21(zero), .CFB20(zero), .CFB19(zero), .CFB18(zero),
     .CFB17(zero), .CFB16(zero), .CFB15(zero), .CFB14(zero), .CFB13(zero), .CFB12(zero),
     .CFB11(zero), .CFB10(zero), .CFB9(zero), .CFB8(zero), .CFB7(zero), .CFB6(zero),

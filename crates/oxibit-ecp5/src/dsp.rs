@@ -471,12 +471,30 @@ pub fn assign(bels: &Bels, nl: &Netlist) -> Result<HashMap<usize, BelId>> {
     }
     // Split modes, from the local model: any free site (no chaining yet;
     // a PRADD driving a MULT arrives with the packing work).
+    // A MULT9X9D that feeds an ALU24B's MA/MB is placed by the ALU24B's
+    // own pass (pinned at the pair site), so it is skipped here.
+    let feeds_alu24 = |nl: &Netlist, i: usize| -> bool {
+        nl.cells.iter().any(|c| {
+            let Cell::Prim(q) = c else { return false };
+            if q.ty != "ALU24B" { return false }
+            ["MA", "MB"].iter().any(|bus| {
+                matches!(q.pin(&format!("{bus}0")), Some(PrimPin::In(Some(n)))
+                    if drivers[n as usize] == Some(i as u32))
+            })
+        })
+    };
     for (i, c) in nl.cells.iter().enumerate() {
         let Cell::Prim(p) = c else { continue };
+        if p.ty == "MULT9X9D" && feeds_alu24(nl, i) {
+            continue;
+        }
         let pool: Vec<BelId> = match p.ty.as_str() {
             "MULT9X9D" => mults9.clone(),
             "PRADD9A" => pradds9.clone(),
-            "ALU24B" => alus24.clone(),
+            // From the local model: the split fuse tables below are those
+            // of the low half of a block (sites 0..3), so an ALU24B and its
+            // pair go there.
+            "ALU24B" => alus24.iter().copied().filter(|&b| block(bels, b).0 < 4).collect(),
             _ => Vec::new(),
         };
         if pool.is_empty() {
@@ -498,12 +516,54 @@ pub fn assign(bels: &Bels, nl: &Netlist) -> Result<HashMap<usize, BelId>> {
             })
         };
         let free = |b: &BelId| !used.contains(b) && !site_used(&used, bels, *b);
+        // From the local model: an ALU24B's MA/MB are dedicated wires from
+        // the paired multiplier sites (z-3, z-2) of its block, so the
+        // pair must be placeable there; netlist MULT9X9Ds are grabbed as
+        // companions (products 0 with tied inputs, the ALU sees MA+MB=0).
+        let pair_free = |b: &BelId| -> bool {
+            if p.ty != "ALU24B" {
+                return true;
+            }
+            let (z, x0, y) = block(bels, *b);
+            [z - 3, z - 2].iter().all(|&mz| {
+                mults9.iter().any(|&m| {
+                    let (z2, x2, y2) = block(bels, m);
+                    z2 == mz && x2 == x0 && y2 == y && !used.contains(&m)
+                })
+            })
+        };
         let b = pool
             .iter()
             .copied()
-            .find(|b| free(b) && !block_used(&used, bels, *b))
+            .find(|b| free(b) && !block_used(&used, bels, *b) && pair_free(b))
+            .or_else(|| pool.iter().copied().find(|b| free(b) && pair_free(b)))
             .or_else(|| pool.iter().copied().find(|b| free(b)))
             .ok_or_else(|| err!("{} {}: no free {} site", p.ty, p.name, p.ty))?;
+        if p.ty == "ALU24B" {
+            // From the local model: the ALU24B's MA/MB are dedicated block
+            // wires, so the driving MULT9X9Ds (feeder cells, below) are
+            // pinned at the pair sites (z-3, z-2) of the ALU's block.
+            let (z, x0, y) = block(bels, b);
+            let feeder9 = |p: &Prim, bus: &str| -> Option<usize> {
+                let Some(PrimPin::In(Some(n))) = p.pin(&format!("{bus}0")) else { return None };
+                let d = drivers[n as usize]? as usize;
+                matches!(&nl.cells[d], Cell::Prim(q) if q.ty == "MULT9X9D").then_some(d)
+            };
+            for (feeder, mz) in [(feeder9(p, "MA"), z - 3), (feeder9(p, "MB"), z - 2)] {
+                if let Some(f) = feeder {
+                    if out.contains_key(&f) {
+                        return Err(err!("ALU24B {}: a MULT9X9D feeds two ALU24Bs", p.name));
+                    }
+                    let mb = mults9
+                        .iter()
+                        .copied()
+                        .find(|&mm| block(bels, mm) == (mz, x0, y) && !used.contains(&mm))
+                        .ok_or_else(|| err!("no MULT9 at z={mz} beside ALU24B {}", p.name))?;
+                    used.insert(mb);
+                    out.insert(f, mb);
+                }
+            }
+        }
         used.insert(b);
         out.insert(i, b);
     }
@@ -520,6 +580,53 @@ fn pattern(p: &Prim, name: &str) -> Result<Vec<bool>> {
 }
 
 /// Write every DSP primitive's settings and ties.
+// Ties for an ALU24B-cluster cell. From the local model: the cluster's
+// whole-tile image sets every input mux the block needs, so unconnected
+// inputs take no tie; only netlist-tied pins (Some("1")/Some("0")) tie.
+// Sign pins on the cluster's MULT9X9Ds are inverted under the image: pin
+// low is signed, pin high unsigned, so a netlist-tied constant is flipped.
+fn tie_cluster(
+    g: &Graph,
+    db: &DeviceDb,
+    bels: &Bels,
+    nl: &Netlist,
+    i: usize,
+    bel: BelId,
+    tiles: &mut BTreeMap<String, TileConfig>,
+) -> Result<()> {
+    let Cell::Prim(p) = &nl.cells[i] else { return Ok(()) };
+    let sign_pin = |p: &Prim, pin: &str| p.ty == "MULT9X9D" && (pin == "SIGNEDA" || pin == "SIGNEDB");
+    for (pin, w) in bels
+        .pins(bel)
+        .filter(|(pp, _)| pp.dir == crate::bels::PinDir::In)
+        .map(|(pp, w)| (pp.name.clone(), w))
+        .collect::<Vec<_>>()
+    {
+        if matches!(p.pin(&pin), Some(PrimPin::In(Some(_)))) {
+            continue;
+        }
+        let level = match p.attrs.get(&crate::iol::tie_attr(&pin)).map(String::as_str) {
+            Some("1") => Level::High,
+            Some("0") => Level::Low,
+            _ => continue,
+        };
+        // Invert a tied constant sign pin: the cluster image inverts the
+        // pin's sense (low = signed), from the local model.
+        let level = if sign_pin(p, &pin)
+            && matches!(p.pin(&pin), None)
+        {
+            match level {
+                Level::High => Level::Low,
+                Level::Low => Level::High,
+            }
+        } else {
+            level
+        };
+        crate::io::tie(g, db, w, level, tiles)?;
+    }
+    Ok(())
+}
+
 pub fn configure(
     g: &Graph,
     db: &DeviceDb,
@@ -530,6 +637,21 @@ pub fn configure(
 ) -> Result<()> {
     let mut cells: Vec<usize> = at.keys().copied().collect();
     cells.sort_unstable();
+    // From the local model: an ALU24B and the MULT9X9Ds at its pair sites
+    // (z-3, z-2) are configured as one unit, by one bit set.
+    let mut cluster: HashSet<usize> = HashSet::new();
+    for (&i, &b) in at {
+        let Cell::Prim(p) = &nl.cells[i] else { continue };
+        if p.ty != "ALU24B" { continue }
+        let (z, x0, y) = block(bels, b);
+        cluster.insert(i);
+        for (&j, &m) in at {
+            let (mz, mx, my) = block(bels, m);
+            if mx == x0 && my == y && (mz == z - 3 || mz == z - 2) {
+                cluster.insert(j);
+            }
+        }
+    }
     for i in cells {
         let Cell::Prim(p) = &nl.cells[i] else { continue };
         if !is_dsp(&p.ty) {
@@ -537,6 +659,53 @@ pub fn configure(
         }
         let bel = at[&i];
         let (z, x0, y) = block(bels, bel);
+        // From the local model: the ALU24B cluster (the ALU plus the two
+        // MULT9X9Ds at its pair sites) is one whole-tile image; nothing
+        // else is emitted into its tiles from these cells.
+        if cluster.contains(&i) {
+            if p.ty == "ALU24B" {
+                const ALU24_CLUSTER: &[(&str, &[(usize, usize)])] = &[
+                    ("MIB_DSP0", &[(61, 0), (62, 0), (64, 0), (67, 0), (68, 0)]),
+                    ("MIB2_DSP0", &[(4, 1), (5, 1), (15, 1), (16, 1), (23, 1), (24, 1), (28, 1), (30, 1),
+                        (31, 1), (40, 1), (41, 1), (42, 1), (43, 1), (44, 1), (45, 1), (46, 1), (47, 1),
+                        (48, 1), (60, 1), (61, 1), (75, 1), (76, 1), (79, 1), (83, 1), (84, 1), (86, 1),
+                        (88, 1), (92, 1), (93, 1)]),
+                    ("MIB_DSP1", &[(51, 0), (61, 0), (103, 0), (104, 0), (105, 0)]),
+                    ("MIB2_DSP1", &[(14, 1), (28, 1), (31, 1), (32, 1), (33, 1), (56, 1), (57, 1), (58, 1),
+                        (59, 1), (72, 0), (90, 0), (101, 0)]),
+                    ("MIB_DSP2", &[(0, 0), (6, 0), (7, 0), (16, 0), (19, 0), (20, 0), (21, 0), (22, 0),
+                        (26, 0), (27, 0), (28, 0), (33, 0), (34, 0), (35, 0), (36, 0), (42, 0), (54, 0),
+                        (55, 0), (56, 0), (58, 0), (59, 0), (60, 0), (61, 0), (62, 0), (63, 0), (64, 0)]),
+                    ("MIB2_DSP2", &[(0, 1), (1, 0), (1, 1), (2, 1), (3, 1), (14, 0), (24, 1), (25, 1),
+                        (26, 1), (27, 1), (46, 1), (47, 1), (56, 1), (57, 1), (60, 1), (61, 1), (62, 1),
+                        (63, 1), (68, 1), (69, 1), (70, 1), (71, 1), (82, 0), (83, 0), (84, 1), (85, 1),
+                        (86, 0), (92, 1), (93, 1), (94, 1), (95, 1), (104, 1), (105, 1)]),
+                    ("MIB2_DSP3", &[(10, 1), (11, 1), (22, 1), (23, 1), (28, 1), (30, 0), (34, 1), (76, 1),
+                        (78, 1), (90, 1), (91, 1), (92, 1), (93, 1)]),
+                    ("MIB_DSP4", &[(34, 0), (35, 0), (41, 0), (46, 0), (47, 0), (48, 0), (49, 0)]),
+                    ("MIB2_DSP4", &[(0, 1), (2, 1), (3, 1), (4, 1), (6, 1), (7, 1), (8, 1), (9, 1), (16, 1),
+                        (17, 1), (18, 1), (19, 1), (20, 1), (21, 1), (26, 1), (27, 1), (30, 1), (31, 1),
+                        (34, 1), (35, 1)]),
+                ];
+                let block_tiles: Vec<&crate::graph::TileLoc> = g
+                    .tiles
+                    .iter()
+                    .filter(|t| t.y == y && (x0..=x0 + 8).contains(&t.x))
+                    .collect();
+                for t in &block_tiles {
+                    let Some((_, suffix)) = t.name.rsplit_once(':') else { continue };
+                    let Some((_, bits)) = ALU24_CLUSTER.iter().find(|(s, _)| *s == suffix) else { continue };
+                    tiles
+                        .entry(t.name.clone())
+                        .or_default()
+                        .unknowns
+                        .extend(bits.iter().copied());
+                }
+                // Ties still apply (see below); everything else is skipped.
+                tie_cluster(g, db, bels, nl, i, bel, tiles)?;
+            }
+            continue;
+        }
         let s = |k: &str, d: &str| p.param_str(k).unwrap_or_else(|| d.to_owned());
         let mut enums: Vec<(String, String)> = Vec::new();
         let mut words: Vec<(String, Vec<bool>)> = Vec::new();
@@ -604,27 +773,44 @@ pub fn configure(
         } else if p.ty == "ALU24B" {
             // The 24-bit split's settings ride the shared ALU key the
             // device database maps, from the local model.
+            // The 24-bit split rides the shared ALU keys, from the local
+            // model: the same key set the 54-bit mode uses, on the paired
+            // site.
             (
                 format!("ALU54_{z}"),
                 &[
-                    ("REG_OUTPUT_CLK", "NONE"),
-                    ("REG_OUTPUT_CE", "CE0"),
-                    ("REG_OUTPUT_RST", "RST0"),
-                    ("REG_OPCODE_0_CLK", "NONE"),
-                    ("REG_OPCODE_0_CE", "CE0"),
-                    ("REG_OPCODE_0_RST", "RST0"),
-                    ("REG_OPCODE_1_CLK", "NONE"),
-                    ("REG_OPCODE_1_CE", "CE0"),
-                    ("REG_OPCODE_1_RST", "RST0"),
-                    ("REG_INPUTCFB_CLK", "NONE"),
-                    ("REG_INPUTCFB_CE", "CE0"),
-                    ("REG_INPUTCFB_RST", "RST0"),
+                    ("MODE", "ALU54B"),
+                    ("REG_INPUTC0_CLK", "NONE"),
+                    ("REG_INPUTC1_CLK", "NONE"),
+                    ("REG_OPCODEOP0_0_CLK", "NONE"),
+                    ("REG_OPCODEOP0_0_CE", "CE0"),
+                    ("REG_OPCODEOP0_0_RST", "RST0"),
+                    ("REG_OPCODEOP0_1_CLK", "NONE"),
+                    ("REG_OPCODEOP0_1_CE", "CE0"),
+                    ("REG_OPCODEOP0_1_RST", "RST0"),
+                    ("REG_OPCODEOP1_0_CLK", "NONE"),
+                    ("REG_OPCODEOP1_1_CLK", "NONE"),
+                    ("REG_OPCODEIN_0_CLK", "NONE"),
+                    ("REG_OPCODEIN_0_CE", "CE0"),
+                    ("REG_OPCODEIN_0_RST", "RST0"),
+                    ("REG_OPCODEIN_1_CLK", "NONE"),
+                    ("REG_OPCODEIN_1_CE", "CE0"),
+                    ("REG_OPCODEIN_1_RST", "RST0"),
+                    ("REG_OUTPUT0_CLK", "NONE"),
+                    ("REG_OUTPUT0_RST", "RST0"),
+                    ("REG_OUTPUT1_CLK", "NONE"),
+                    ("REG_OUTPUT1_RST", "RST0"),
+                    ("REG_FLAG_CLK", "NONE"),
+                    ("MCPAT_SOURCE", "STATIC"),
+                    ("MASKPAT_SOURCE", "STATIC"),
                     ("CLK0_DIV", "ENABLED"),
                     ("CLK1_DIV", "ENABLED"),
                     ("CLK2_DIV", "ENABLED"),
                     ("CLK3_DIV", "ENABLED"),
-                    ("GSR", "ENABLED"),
-                    ("RESETMODE", "SYNC"),
+                    ("GSR", "DISABLED"),
+                    ("RESETMODE", "ASYNC"),
+                    ("FORCE_ZERO_BARREL_SHIFT", "DISABLED"),
+                    ("LEGACY", "DISABLED"),
                 ],
             )
         } else if p.ty == "MULT18X18D" {
@@ -713,7 +899,9 @@ pub fn configure(
             // 18-mode OFF (MODE NONE, clearing the 18x18 mode fuse); the
             // split selector itself rides the unnamed fuse the device
             // database maps (one fuse flipping the paired sites together).
-            enums.push((format!("{pre}.MODE"), "NONE".to_owned()));
+            // From the local model: the partner keeps full 18-mode enums;
+            // the split itself rides the unnamed MC1_M9_S1 fuse bits.
+            enums.push((format!("{pre}.MODE"), "MULT18X18D".to_owned()));
             for sig in ["CLK", "CE", "RST"] {
                 for k in 0..4 {
                     enums.push((format!("{pre}.{sig}{k}MUX"), format!("{sig}{k}")));
@@ -735,6 +923,35 @@ pub fn configure(
                 words.push((format!("{pre}.{w}"), pattern(p, w)?));
             }
             enums.push((format!("{pre}.MODE"), "ALU54B".to_owned()));
+        }
+        if p.ty == "ALU24B" {
+            // From the local model: the split fuse sets the ALU24 site's
+            // mode and its ALU54 partner's mode together; the ALU24 keys
+            // are Trellis-known, the ALU54 partner key carries the
+            // register settings emitted above.
+            enums.push((format!("ALU24_{}.MODE", z - 1), "ALU24B".to_owned()));
+        }
+        if p.ty == "MULT9X9D" {
+            // From the local model (076-dsp_cibo silicon lesson): an
+            // unregistered product reads 0 unless the output register is
+            // bypassed; the split's product exits through both sites.
+            if s("REG_OUTPUT_CLK", "NONE") == "NONE" {
+                enums.push((format!("{pre}.CIBOUT_BYP"), "ON".to_owned()));
+                enums.push((format!("MULT18_{}.CIBOUT_BYP", z ^ 1), "ON".to_owned()));
+            }
+            // From the local model: the split fuse flips both sites of the
+            // pair (MULT18_{z} and MULT18_{z^1}) together; the partner
+            // carries the same 18-mode settings.
+            let pre2 = format!("MULT18_{}", z ^ 1);
+            for &(k, d) in regs {
+                enums.push((format!("{pre2}.{k}"), s(k, d)));
+            }
+            enums.push((format!("{pre2}.MODE"), "MULT18X18D".to_owned()));
+            for sig in ["CLK", "CE", "RST"] {
+                for k in 0..4 {
+                    enums.push((format!("{pre2}.{sig}{k}MUX"), format!("{sig}{k}")));
+                }
+            }
         }
         let side = if z < 4 { "DSP_LEFT" } else { "DSP_RIGHT" };
         enums.push((format!("{side}.CIBOUT"), "ON".to_owned()));
@@ -764,6 +981,46 @@ pub fn configure(
                     continue;
                 }
                 return Err(err!("{} {}: no tile of its block has {k}", p.ty, p.name));
+            }
+        }
+        // Split-mode selector fuses (from the local model): the physical
+        // bits of the MC1_M9_S1 (9x9 split) and MC1_OPR_S1_0 (ALU24
+        // split) fuse groups. They ride no Trellis key; a MULT9X9D or
+        // ALU24B placed in the block flips its paired sites together, so
+        // the bits go into every block tile whose suffix matches.
+        if matches!(p.ty.as_str(), "MULT9X9D" | "ALU24B") {
+            // (tile suffix, [(frame, bit) ...]) of the selector.
+            let fuses: &[(&str, &[(usize, usize)])] = if p.ty == "MULT9X9D" {
+                &[
+                    ("MIB_DSP0", &[(67, 0), (68, 0)]),
+                    ("MIB2_DSP0", &[(27, 1), (79, 1), (83, 1)]),
+                    ("MIB2_DSP1", &[(64, 1), (65, 1), (78, 1), (79, 1)]),
+                    ("MIB2_DSP2", &[(60, 1), (61, 1), (70, 1), (71, 1)]),
+                    ("MIB_DSP2", &[(0, 0)]),
+                    (
+                        "MIB2_DSP4",
+                        &[
+                            (17, 1), (18, 1), (26, 1), (27, 1), (30, 1), (31, 1),
+                            (34, 1), (35, 1), (36, 1), (37, 1), (40, 1), (41, 1),
+                            (42, 1), (43, 1),
+                        ],
+                    ),
+                ]
+            } else {
+                &[
+                    ("MIB_DSP2", &[(10, 0), (12, 0), (25, 0), (39, 0), (48, 0), (54, 0)]),
+                    ("MIB2_DSP3", &[(77, 1)]),
+                    ("MIB_DSP4", &[(35, 0)]),
+                ]
+            };
+            for t in &block_tiles {
+                let Some((_, suffix)) = t.name.rsplit_once(':') else { continue };
+                let Some((_, bits)) = fuses.iter().find(|(s, _)| *s == suffix) else { continue };
+                tiles
+                    .entry(t.name.clone())
+                    .or_default()
+                    .unknowns
+                    .extend(bits.iter().copied());
             }
         }
         for (k, v) in &words {

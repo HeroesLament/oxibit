@@ -128,7 +128,7 @@ impl<'g> Builder<'g> {
         self.pin(name, PinDir::Out, PinAt::Origin, wire)
     }
 
-    /// `pin` on wire `<J?><pin><suffix>`, as Bels.cpp's `add_input` lambdas.
+    /// `pin` on wire `<J?><pin><suffix>`
     fn input_j(&mut self, pin: &str, j: Prefix, suffix: &str) -> &mut Self {
         let wire = format!("{}{pin}{suffix}", j.as_str());
         self.input(pin, &wire)
