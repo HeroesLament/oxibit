@@ -1354,7 +1354,12 @@ defmodule Dsp do
   # The ALU24 sum's top byte: r4 = MA + MB, the paired multipliers'
   # unsigned products (m5: x[8:0]*x[17:9], m6: x[26:18]*x[35:27]),
   # CIN grounded per the pairing rule.
-  def want_r4(x), do: f(x, 0, 9) * f(x, 9, 9) + f(x, 18, 9) * f(x, 27, 9)
+  # m5: x[8:0] * x[17:9], m6: x[26:18] * x[35:27]; an operand is signed
+  # when its sign pin is high (x[60] m5 A, x[61] m5 B, x[62] m6 A, x[63] m6 B).
+  def want_r4(x) do
+    op = fn lo, pin -> if f(x, pin, 1) == 1, do: sext(f(x, lo, 9), 9), else: f(x, lo, 9) end
+    (op.(0, 60) * op.(9, 61) + op.(18, 62) * op.(27, 63)) &&& 0xFFFFFF
+  end
   def want_r4hi(x), do: f(want_r4(x), 16, 8)
 
   def run(s, o) do
