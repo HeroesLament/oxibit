@@ -1,0 +1,15 @@
+[package]
+name = "oxibit-arch-gen"
+description = "Builds oxibit-arch tables from upstream chip databases and generates the checked-in family crates"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+oxibit-arch = { path = "../oxibit-arch" }
+oxibit-ecp5 = { path = "../oxibit-ecp5" }
+serde_json.workspace = true
+
+[lints]
+workspace = true

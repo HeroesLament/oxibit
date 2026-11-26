@@ -64,3 +64,99 @@ pub struct TileTypeLit {
     /// `(sink, source)` wires joined with no configuration bit.
     pub fixed: &'static [(&'static str, &'static str)],
 }
+
+/// A tile of a device: its type and its window of configuration memory.
+#[derive(Debug)]
+pub struct TileLit {
+    pub name: &'static str,
+    pub ty: &'static TileTypeLit,
+    pub start_frame: u32,
+    pub start_bit: u32,
+    pub frames: u32,
+    pub bits: u32,
+}
+
+/// A clock quadrant: its tile rectangle.
+#[derive(Debug)]
+pub struct QuadrantLit {
+    pub name: &'static str,
+    pub x0: u32,
+    pub y0: u32,
+    pub x1: u32,
+    pub y1: u32,
+}
+
+/// A clock tap: the columns it feeds on each side.
+#[derive(Debug)]
+pub struct TapLit {
+    pub name: &'static str,
+    pub lx0: u32,
+    pub lx1: u32,
+    pub rx0: u32,
+    pub rx1: u32,
+}
+
+/// A clock spine's tile.
+#[derive(Debug)]
+pub struct SpineLit {
+    pub name: &'static str,
+    pub x: u32,
+    pub y: u32,
+}
+
+/// A package pin and the pad it reaches: tile column and row, and which PIO
+/// (`A`, `B`, ...) of that tile.
+#[derive(Debug)]
+pub struct PinLit {
+    pub name: &'static str,
+    pub col: u32,
+    pub row: u32,
+    pub pio: &'static str,
+}
+
+#[derive(Debug)]
+pub struct PackageLit {
+    pub name: &'static str,
+    pub pins: &'static [PinLit],
+}
+
+/// Bank, DQS group and special function of a PIO.
+#[derive(Debug)]
+pub struct PioMetaLit {
+    pub bank: u32,
+    pub col: u32,
+    pub row: u32,
+    pub pio: &'static str,
+    pub dqs: Option<&'static str>,
+    pub function: Option<&'static str>,
+}
+
+/// One device: frame geometry, clock landmarks, pad data and its tiles, which
+/// are sorted by name.
+#[derive(Debug)]
+pub struct DeviceLit {
+    pub name: &'static str,
+    pub family: &'static str,
+    pub idcode: u32,
+    pub frames: u32,
+    pub bits_per_frame: u32,
+    pub pad_bits_after_frame: u32,
+    pub pad_bits_before_frame: u32,
+    pub max_row: u32,
+    pub max_col: u32,
+    pub quadrants: &'static [QuadrantLit],
+    pub taps: &'static [TapLit],
+    pub spines: &'static [SpineLit],
+    pub packages: &'static [PackageLit],
+    pub pio_meta: &'static [PioMetaLit],
+    pub tiles: &'static [TileLit],
+}
+
+impl DeviceLit {
+    /// The tile named `name`.
+    #[must_use]
+    pub fn tile(&self, name: &str) -> Option<&'static TileLit> {
+        let tiles = self.tiles;
+        tiles.binary_search_by(|t| t.name.cmp(name)).ok().map(|i| &tiles[i])
+    }
+}

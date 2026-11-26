@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/oxibit-bitstream", "crates/oxibit-fasm", "crates/oxibit-hdl", "crates/oxibit-synth", "crates/oxibit-cec", "crates/oxibit-prof", "crates/oxibit-prof-macros", "crates/oxibit-guard", "crates/oxibit-zynq7", "crates/oxibit-pnr", "crates/oxibit-place", "crates/oxibit-report", "crates/oxibit-timing", "crates/oxibit-nexus", "crates/oxibit-ecp5", "crates/oxibit-arch", "crates/oxibit-policy", "crates/oxibit"]
+members = ["crates/oxibit-bitstream", "crates/oxibit-fasm", "crates/oxibit-hdl", "crates/oxibit-synth", "crates/oxibit-cec", "crates/oxibit-prof", "crates/oxibit-prof-macros", "crates/oxibit-guard", "crates/oxibit-zynq7", "crates/oxibit-pnr", "crates/oxibit-place", "crates/oxibit-report", "crates/oxibit-timing", "crates/oxibit-nexus", "crates/oxibit-ecp5", "crates/oxibit-arch", "crates/oxibit-arch-gen", "crates/oxibit-arch-ecp5", "crates/oxibit-policy", "crates/oxibit"]
 # oxibit-sta (main's first timer) reads pnr::placed::Import fields the
 # lutperm line dropped (cells, sink_pins, driver_pins); pnr::sta is the
 # timer now. Out of the build until it is ported or retired.

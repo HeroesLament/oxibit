@@ -386,7 +386,19 @@ dependencies = [
 [[package]]
 name = "oxibit-arch"
 version = "0.2.0"
+
+[[package]]
+name = "oxibit-arch-ecp5"
+version = "0.2.0"
 dependencies = [
+ "oxibit-arch",
+]
+
+[[package]]
+name = "oxibit-arch-gen"
+version = "0.2.0"
+dependencies = [
+ "oxibit-arch",
  "oxibit-ecp5",
  "serde_json",
 ]
