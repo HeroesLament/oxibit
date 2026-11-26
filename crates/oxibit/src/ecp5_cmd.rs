@@ -56,6 +56,7 @@ pub enum ChipData {
     /// copy). The default.
     Text,
     /// The data compiled into oxibit (`oxibit-arch-ecp5`); no external files.
+    /// Needs a build with `--features builtin-ecp5`.
     Builtin,
 }
 
@@ -80,7 +81,12 @@ fn chip_source(choice: Option<ChipData>) -> std::result::Result<Source, String> 
     };
     Ok(match choice {
         ChipData::Text => Source::text(trellis_db()),
+        #[cfg(feature = "builtin-ecp5")]
         ChipData::Builtin => Source::Builtin,
+        #[cfg(not(feature = "builtin-ecp5"))]
+        ChipData::Builtin => {
+            return Err("this oxibit was built without the built-in ECP5 data; rebuild with --features builtin-ecp5".to_owned());
+        }
     })
 }
 

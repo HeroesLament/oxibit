@@ -46,7 +46,7 @@ The binary is `target/release/oxibit`. A zsh completion script comes from `oxibi
 ECP5 can take its chip data from two places, chosen with `--chip-data text|builtin` or `OXIBIT_CHIP_DATA`:
 
 - `text` (default): the Project Trellis text database, read at run time from `OXIBIT_TRELLIS_DB`.
-- `builtin`: the same data compiled into oxibit as Rust (`oxibit-arch-ecp5`), so no database checkout is needed. Currently LFE5U-25F and LFE5U-85F only.
+- `builtin`: the same data compiled into oxibit as Rust (`oxibit-arch-ecp5`), so no database checkout is needed. Currently LFE5U-25F and LFE5U-85F only. It is a cargo feature, off by default (the generated crate is about 11 MB of source): build with `cargo build --release --features builtin-ecp5`. A default build does not compile it, and `--chip-data builtin` then reports that the feature is missing.
 
 Both produce byte-identical bitstreams; `crates/oxibit-ecp5/tests/builtin_source.rs` compares them field for field. The built-in data is generated from Trellis by `cargo run --release -p oxibit-arch-gen --example gen_ecp5 -- <trellis database> crates/oxibit-arch-ecp5` (add `--check` to verify it is current). CrossLink-NX and 7-series still read their databases at run time.
 

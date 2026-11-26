@@ -30,3 +30,8 @@ oxibit-zynq7.workspace = true
 
 [lints]
 workspace = true
+
+[features]
+default = []
+# Compile the built-in ECP5 chip data in (`--chip-data builtin`); large.
+builtin-ecp5 = ["oxibit-ecp5/builtin-data"]

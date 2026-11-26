@@ -124,6 +124,7 @@ pub struct DeviceDb {
     pub bits: BTreeMap<String, TileBits>,
 }
 
+#[cfg(feature = "builtin-data")]
 fn lit_group(bits: &[oxibit_arch::lit::Bit]) -> BitGroup {
     BitGroup(
         bits.iter()
@@ -132,6 +133,7 @@ fn lit_group(bits: &[oxibit_arch::lit::Bit]) -> BitGroup {
     )
 }
 
+#[cfg(feature = "builtin-data")]
 fn lit_tile_bits(t: &oxibit_arch::lit::TileTypeLit) -> TileBits {
     let mut tb = TileBits::default();
     for m in t.muxes {
@@ -160,11 +162,13 @@ impl DeviceDb {
     pub fn load_from(source: &Source, device: &str) -> Result<DeviceDb> {
         match source {
             Source::Text(root) => DeviceDb::load(root, device),
+            #[cfg(feature = "builtin-data")]
             Source::Builtin => DeviceDb::builtin(device),
         }
     }
 
     /// The database of `device` from the data compiled into `oxibit-arch-ecp5`.
+    #[cfg(feature = "builtin-data")]
     ///
     /// # Errors
     ///
@@ -288,6 +292,7 @@ fn device_info(root: &Path, device: &str) -> Result<DeviceInfo> {
 pub fn device_for_idcode_in(source: &Source, idcode: u32) -> Result<String> {
     match source {
         Source::Text(root) => device_for_idcode(root, idcode),
+        #[cfg(feature = "builtin-data")]
         Source::Builtin => oxibit_arch_ecp5::devices::ALL
             .iter()
             .find(|d| d.idcode == idcode)

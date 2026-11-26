@@ -1,3 +1,4 @@
+#![cfg(feature = "builtin-data")]
 //! The built-in chip data must equal the Trellis text it was generated from.
 //! Skipped when no Trellis checkout is found ($OXIBIT_TRELLIS_DB or the
 //! oss-cad-suite copy).

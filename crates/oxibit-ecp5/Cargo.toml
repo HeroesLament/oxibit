@@ -10,10 +10,15 @@ publish.workspace = true
 serde_json.workspace = true
 oxibit-hdl = { path = "../oxibit-hdl" }
 oxibit-synth = { path = "../oxibit-synth" }
-oxibit-arch = { path = "../oxibit-arch" }
-oxibit-arch-ecp5 = { path = "../oxibit-arch-ecp5" }
+oxibit-arch = { path = "../oxibit-arch", optional = true }
+oxibit-arch-ecp5 = { path = "../oxibit-arch-ecp5", optional = true }
 oxibit-report.workspace = true
 oxibit-place.workspace = true
+
+[features]
+default = []
+# Compile the ECP5 chip data in (Source::Builtin); large, so opt-in.
+builtin-data = ["dep:oxibit-arch", "dep:oxibit-arch-ecp5"]
 
 [lints]
 workspace = true

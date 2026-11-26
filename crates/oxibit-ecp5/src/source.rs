@@ -1,5 +1,9 @@
 //! Where the ECP5 chip database comes from.
 //!
+//! The `builtin-data` cargo feature (off by default) compiles the built-in
+//! data in; without it only [`Source::Text`] exists and nothing of
+//! `oxibit-arch-ecp5` is built.
+//!
 //! [`Source::Text`] reads a Project Trellis checkout (`devices.json`,
 //! `ECP5/tiledata`, per-device `tilegrid.json`, `globals.json`, `iodb.json`),
 //! and is the default. [`Source::Builtin`] uses the data compiled into
@@ -10,8 +14,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "builtin-data")]
 use oxibit_arch::lit::DeviceLit;
-use serde_json::{Map, Value, json};
+use serde_json::Value;
+#[cfg(feature = "builtin-data")]
+use serde_json::{Map, json};
 
 use crate::{Result, err};
 
@@ -20,7 +27,8 @@ use crate::{Result, err};
 pub enum Source {
     /// A Project Trellis database directory.
     Text(PathBuf),
-    /// The data checked in as `oxibit-arch-ecp5`.
+    /// The data checked in as `oxibit-arch-ecp5` (feature `builtin-data`).
+    #[cfg(feature = "builtin-data")]
     Builtin,
 }
 
@@ -34,6 +42,7 @@ impl Source {
     pub fn describe(&self) -> String {
         match self {
             Source::Text(p) => p.display().to_string(),
+            #[cfg(feature = "builtin-data")]
             Source::Builtin => "built-in".to_owned(),
         }
     }
@@ -42,6 +51,7 @@ impl Source {
     pub fn iodb(&self, device: &str) -> Result<Value> {
         match self {
             Source::Text(root) => read_json(&root.join("ECP5").join(device).join("iodb.json")),
+            #[cfg(feature = "builtin-data")]
             Source::Builtin => Ok(iodb_value(builtin(device)?)),
         }
     }
@@ -50,12 +60,14 @@ impl Source {
     pub fn globals(&self, device: &str) -> Result<Value> {
         match self {
             Source::Text(root) => read_json(&root.join("ECP5").join(device).join("globals.json")),
+            #[cfg(feature = "builtin-data")]
             Source::Builtin => Ok(globals_value(builtin(device)?)),
         }
     }
 }
 
 /// A built-in device by name.
+#[cfg(feature = "builtin-data")]
 pub(crate) fn builtin(device: &str) -> Result<&'static DeviceLit> {
     oxibit_arch_ecp5::device(device).ok_or_else(|| {
         let known: Vec<&str> = oxibit_arch_ecp5::devices::ALL.iter().map(|d| d.name).collect();
@@ -69,6 +81,7 @@ fn read_json(path: &Path) -> Result<Value> {
 }
 
 /// The `iodb.json` of a device.
+#[cfg(feature = "builtin-data")]
 pub fn iodb_value(d: &DeviceLit) -> Value {
     let mut packages = Map::new();
     for p in d.packages {
@@ -100,6 +113,7 @@ pub fn iodb_value(d: &DeviceLit) -> Value {
 }
 
 /// The `globals.json` of a device.
+#[cfg(feature = "builtin-data")]
 pub fn globals_value(d: &DeviceLit) -> Value {
     let mut quadrants = Map::new();
     for q in d.quadrants {
