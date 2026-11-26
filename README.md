@@ -1,147 +1,142 @@
 # oxibit
 
-An open-source FPGA EDA toolkit in Rust: synthesis output to placed and
-routed design, design to bitstream, bitstream to the programmable logic on
-the device.
+An FPGA toolchain in Rust: Verilog in, bitstream out, loaded over JTAG, for Lattice ECP5, Lattice CrossLink-NX and Xilinx 7-series (Zynq-7020).
 
-Xilinx 7-series is the first target, checked on xc7z020 silicon:
+No yosys, no nextpnr. Synthesis, placement, routing, timing and bitstream generation are all in this workspace. The only external inputs are the open chip databases (Project Trellis, Project Oxide, Project X-Ray) and OpenOCD for JTAG.
 
-- **Bitstreams:** read, check, identify and convert them, including the PL
-  partition of a Zynq-7000 `BOOT.BIN`; assemble FASM into a bitstream
-  against a prjxray database.
-- **Place and route:** route a placed design on oxibit's routing graph, and
-  retarget DSP48E1 tiles of a routed design from a new netlist.
-- **Zynq-7000 target:** load the PL from Linux userspace, and access it,
-  without ever letting the CPU touch an unconfigured fabric (a read there
-  hangs the core). See [docs/zynq7.md](docs/zynq7.md).
+oxibit is the back end for [EHDL](https://github.com/HeroesLament/ehdl), an Elixir hardware description DSL, but it takes plain Verilog and works on its own.
 
-## Crates
+## Supported targets
 
-| Crate | What |
-|---|---|
-| `oxibit-bitstream` | Containers (`.bit`, raw `.bin`, byte-swapped `.bin`), configuration packets, CRC, IDCODE to die, Zynq-7000 boot images. No I/O, no hardware. |
-| `oxibit-fasm` | FASM to 7-series configuration frames against a prjxray database, and the routing graph built from it. |
-| `oxibit-pnr` | Place and route on the `oxibit-fasm` routing graph: router, re-route of a placed design, DSP48E1 retargeting (`dsp-patch`). |
-| `oxibit-report` | Progress and result events: one schema for terminals, JSON Lines, ports and systemd. |
-| `oxibit-guard` | The safety model, chip-independent: one owner (lock), bitstream and IDCODE checked before hardware, access only while hardware says ready, loaded-bitstream marker. `Backend` and `Aperture` traits. |
-| `oxibit-zynq7` | Zynq-7000 backend: DevC/PCAP load from a reserved uncached buffer, PS-PL boundary, M_AXI_GP aperture, FCLK decode. Linux only. |
-| `oxibit` | The CLI and the Erlang port. |
+| Family | Part | Board | `build` | `prog` | Constraints |
+|---|---|---|---|---|---|
+| ECP5 | LFE5U-85F | Radiona ULX3S (`--board ulx3s`) | yes | yes | `.lpf`, pins built in |
+| CrossLink-NX | LIFCL-40 | Lattice CrossLink-NX EVN (`--board clnx`) | yes | yes | `.pdc`, LED pins built in |
+| 7-series | xc7z020clg400-1 | LibreSDR (`--board libresdr`) | yes | see [docs/zynq7.md](docs/zynq7.md) | `.xdc`, AD9363 pins built in |
 
-## CLI
+Only primitive shapes that have been proven on silicon are accepted. An unproven shape is an error, not a guess.
+
+## Install
 
 ```sh
+git clone https://github.com/HeroesLament/oxibit
+cd oxibit
 cargo build --release
-oxibit inspect FILE...            # container, header, die, frames, commands, CRC, hash
-oxibit inspect --packets FILE     # plus every packet (NOP runs collapsed)
-oxibit verify --part xc7z020 FILE...   # exit 1 if anything is wrong or it targets another die
-oxibit convert IN OUT [--to swapped-bin|raw-bin|bit] [--part P] [--design D]
-oxibit fasm2bit --db-root DB --part P IN.fasm OUT.bit   # FASM -> .bit, prjxray's fasm2frames + xc7frames2bit
-oxibit pnr route --db-root DB --part P IN.fasm OUT.fasm # route a placed design again with oxibit's router
-oxibit pnr dsp-patch --template T.fasm --template-netlist T.json --packed NEW.json \
-    --db-root DB --part P -o OUT.fasm   # new DSP48E1 settings on the template's placement and routing
 ```
 
-Global: `--progress auto|human|plain|json|none`, `-q`, `--events FILE`
-(JSON Lines). Long commands answer SIGUSR1/SIGINFO with a status line and
-stop cleanly on SIGINT; under systemd they report through `NOTIFY_SOCKET`.
-Schema and exit codes: [docs/events.md](docs/events.md).
+The binary is `target/release/oxibit`. A zsh completion script comes from `oxibit completions zsh`.
 
-On a Zynq-7000 target (build with `scripts/build-armv7.sh`, run as root):
+### Requirements
+
+- A recent stable Rust toolchain.
+- The chip database for the family you target (see below).
+- OpenOCD, for `prog` and `--load`.
+
+| Variable | Used for | Default |
+|---|---|---|
+| `OXIBIT_TRELLIS_DB` | ECP5 database | `~/oss-cad-suite/share/trellis/database` |
+| `OXIBIT_PRJOXIDE_DB` | CrossLink-NX database | `~/src/prjoxide/database` |
+| `OXIBIT_XRAY_DB` | 7-series prjxray family directory | none, or pass `--db-root` |
+| `OXIBIT_XC7_META` | 7-series metadata | none |
+| `OPENOCD` | OpenOCD binary | the copy under `~/oss-cad-suite` |
+
+## Usage
+
+Build a design for a board, then load it:
 
 ```sh
-oxibit status [--json]                     # configured?, boundary, FCLKs, what is loaded, lock holder
-oxibit load FILE [--expect 0x0=0x45484431] # any container or BOOT.BIN; --expect checks a word after load
-oxibit clear                               # erase the PL, close the boundary
-oxibit peek OFFSET [COUNT] [--repeat]      # refused unless ready
-oxibit poke OFFSET VALUE...                # refused unless ready
-oxibit port                                # Erlang port ({:packet, 4}) on stdin/stdout
+oxibit build blinky.v --board ulx3s --load
+oxibit build blinky.v --board clnx --load
+oxibit build radio.v  --board libresdr --constraints libresdr.xdc
 ```
 
-`--base`/`--len` select the aperture (default M_AXI_GP0, `0x40000000`
-+ `0x20000`). `status` takes no lock and never touches the PL; everything
-else takes the lock, so a running `port` makes the other commands fail with
-the owner's pid.
+The output is `<input stem>.bit` in the current directory unless `-o` is given. The part decides the flow: `LFE5...` is ECP5, `LIFCL...` is CrossLink-NX, `xc7...` is 7-series. `--top` picks the top module (default: the last one in the file).
 
-All commands take `.bit`, raw `.bin`, swapped `.bin`, any of those gzipped,
-and Zynq-7000 boot images (`BOOT.BIN`), whose PL partitions are read directly.
-`--json` gives one JSON object per result.
+List the top-level port names a board's constraints locate, which is what a design may call its ports:
 
-### Port protocol
+```sh
+oxibit pins --board ulx3s
+oxibit pins --board clnx
+oxibit pins --board libresdr
+```
 
-Ops 0x01 to 0x06 are byte-compatible with nervezynq's `fabric_port` (READ32,
-WRITE32, READ_BLOCK, WRITE_BLOCK, INFO, READ_REPEAT). Added: 0x10 LOAD (UTF-8
-path, JSON reply), 0x11 STATUS, 0x12 CLEAR. Access ops are refused with an
-error reply unless the PL is ready, checked in the port itself on every
-request; LOAD and CLEAR run in the same process under the same lock.
-Details in `crates/oxibit/src/port.rs`.
+`pins` reads LPF, PDC and XDC, so it works for any backend. Pass `--constraints` to read your own file instead of the built-in one.
 
-`convert` defaults to `swapped-bin`, the form the Zynq-7000 PCAP and Linux
-`fpga_manager` accept. For a `.bit` input it is byte-for-byte what ehdl's
-`Hw.Xilinx.Bit2Bin` produces (checked by `scripts/crosscheck_bit2bin.exs`).
+Program a built bitstream into SRAM:
 
-### What `verify` checks
+```sh
+oxibit prog blinky.bit
+oxibit prog blinky.bit --board clnx
+```
 
-- the data is word-aligned and has a sync word, and every packet header is
-  well formed and in bounds;
-- the stream writes an IDCODE, the IDCODE is a known die, and it matches the
-  `.bit` header's part and `--part` if given;
-- every CRC check the stream carries matches a recomputed CRC;
-- there is frame data, and the stream ends with DESYNC.
+### Other commands
 
-It warns (without failing) on a missing START, frame data that is not a whole
-number of 101-word frames, and unknown dies or opcodes.
+| Command | Purpose |
+|---|---|
+| `inspect`, `verify`, `convert` | Describe, check and re-container Xilinx bitstreams |
+| `fasm2bit` | FASM to a 7-series `.bit` against a prjxray database |
+| `pnr` | Place and route on oxibit's routing graph |
+| `timing` | Silicon timing characterization from phase sweeps |
+| `route`, `route-port`, `build-port` | Test harnesses and Erlang ports (`{:packet, 4}`) |
+| `status`, `load`, `clear`, `peek`, `poke`, `port` | Zynq PL control, Linux on the target only |
 
-### The config hash
+`oxibit <command> --help` is the reference for flags.
 
-`config sha256` covers the words from the first sync word through the last
-packet. Padding is excluded, so one design has one hash whether it is in a
-`.bit`, a raw or swapped `.bin`, or a bootgen partition. That is the hash to
-record and to check before loading.
+### Progress and events
 
-## Validation
+Progress goes to stderr: a live status line on a terminal, plain lines otherwise. `--progress json` switches stderr to JSON Lines, `--events FILE` writes the same stream to a file, and `-q` silences it. The event format is in [docs/events.md](docs/events.md).
 
-| Check | Data | Result |
-|---|---|---|
-| `convert` vs `Hw.Xilinx.Bit2Bin` | 27 openXC7 `.bit` files in ehdl `designs/` | 27 byte-identical; 6 ECP5 `.bit` files rejected by both |
-| `verify --part xc7z020` | 164 files in `libresdr_radio/taps/serve` | 160 ok; the 4 failures are DDR ring images, not bitstreams |
-| CRC model | the vendor tool 2022.2 compressed `system_top.bit` (stock LibreSDR) | 2 of 2 checks match |
-| Boot image | stock LibreSDR `BOOT.bin` | header and 3 partition checksums ok; PL partition hashes equal to `system_top.bit` |
-| Target load | LibreSDR dr-c, radio bitstream as `.bin` and as `.bit` | 175 to 187 ms; magic word, scratch write/read and heartbeat verified |
-| Target refusals | truncated file, non-bitstream, access after `clear`, CLI load while `port` runs | all refused before touching hardware |
-| Port protocol | all nine ops from IEx | as specified; errors for out-of-range and misaligned access |
+## How it works
 
-openXC7's `xc7frames2bit` writes RCRC but no CRC checks, so its output does
-not exercise the CRC path. The the vendor tool bitstream does.
+Per family, `build` runs the same stages in one process:
 
-## Sources
+1. Synthesis from Verilog to the family's primitives (`oxibit-hdl`, `oxibit-synth`).
+2. Placement and packing (`oxibit-place`).
+3. Routing on the family's routing graph (`oxibit-pnr`).
+4. Static timing (`oxibit-sta`, `oxibit-timing`).
+5. Bitstream generation (`oxibit-ecp5`, `oxibit-nexus`, `oxibit-fasm`, `oxibit-bitstream`).
 
-- CRC algorithm: prjxray `lib/include/prjxray/xilinx/xc7series/crc.h`
-  (`icap_crc`), transcribed.
-- IDCODEs: prjxray-db revision 517d66a (openXC7 fork), `part.yaml`;
-  extraction in `data/prjxray-idcodes.txt`.
-- Packet format, registers and commands: UG470.
-- Boot image layout: bootgen's format, confirmed field by field against the
-  stock LibreSDR `BOOT.bin` (`docs/formats.md`).
-- Zynq-7000 load sequence: mainline `drivers/fpga/zynq-fpga.c`, via
-  nervezynq's `devcfg.rs`; DevC STATUS bit names: FreeBSD `zy7_devcfg.c`;
-  everything else measured, see `docs/zynq7.md`.
+CrossLink-NX SRAM load plays the Certus JTAG sequence as SVF through OpenOCD. The whole `.bit`, including its 8-byte header, is sent.
 
-## Roadmap
+## Workspace
 
-The long-term goal is the whole flow in oxibit: synthesis, placement,
-routing, timing and bitstream, for every family there is silicon to test on.
-Nearer steps:
+| Crate | Role |
+|---|---|
+| `oxibit` | The CLI |
+| `oxibit-hdl` | Verilog front end |
+| `oxibit-synth` | Synthesis |
+| `oxibit-place` | Placement and packing |
+| `oxibit-pnr` | Routing |
+| `oxibit-policy` | Synthesis, placement and routing policy |
+| `oxibit-sta`, `oxibit-timing` | Static timing and silicon timing data |
+| `oxibit-ecp5` | ECP5 device model and bitstream |
+| `oxibit-nexus` | CrossLink-NX device model, PDC and bitstream |
+| `oxibit-zynq7` | 7-series support and the LibreSDR board file |
+| `oxibit-fasm` | FASM handling |
+| `oxibit-bitstream` | Xilinx bitstream container parsing and writing |
+| `oxibit-cec` | Equivalence checking |
+| `oxibit-guard`, `oxibit-report` | Checks and progress reporting |
+| `oxibit-prof`, `oxibit-prof-macros` | Profiling |
 
-1. **nervezynq on oxibit:** `Nervezynq.Fabric` opens `oxibit port` instead of
-   `fabric_port`, `Nervezynq.PL` becomes LOAD/STATUS/CLEAR, and
-   `devcfg_load`, `fabric_port` and `pl_load.exs` are retired.
-2. **Manifests:** name, config hash, container hash, design ID and build
-   parameters per published bitstream; `load` checks against it.
-3. **Readback:** compare configuration frames read back through the PCAP
-   against the bitstream (masking dynamic bits).
-4. **Boot-time load:** a bitstream shipped in the firmware, loaded by the
-   application at start through the same guard.
+`oxibit-sta` is excluded from the cargo workspace and builds on its own.
 
-Other families come in behind the same traits when there is hardware to test
-on: ZynqMP and Versal through the kernel's `fpga_manager`, standalone 7-series
-over JTAG.
+## Documentation
+
+Design notes live in [docs/](docs/): [events](docs/events.md), [formats](docs/formats.md), [fmax](docs/fmax.md), [sypher](docs/sypher.md), [zynq7](docs/zynq7.md), plus placement, routing and synthesis notes.
+
+## Development
+
+```sh
+cargo build
+cargo test
+```
+
+Helper scripts are in [scripts/](scripts/).
+
+## Status
+
+Working end to end on ECP5 (ULX3S) and CrossLink-NX (EVN), and building for 7-series. The same EHDL source, wrapped per board, runs on all three families.
+
+## License
+
+Dual licensed under MIT or Apache-2.0 at your option. See `LICENSE-MIT` and `LICENSE-APACHE`.
