@@ -1,8 +1,8 @@
 //! The binary format: a magic, then length-prefixed little-endian sections.
 
-use crate::model::{Chip, Groups, Strings, TileType};
+use crate::model::{Chip, Device, Groups, Strings, Tile, TileType};
 
-const MAGIC: &[u8; 8] = b"OXARCH01";
+const MAGIC: &[u8; 8] = b"OXARCH02";
 
 fn len32(n: usize) -> Result<u32, String> {
     u32::try_from(n).map_err(|_| "section too large".to_owned())
@@ -51,6 +51,27 @@ pub fn encode(chip: &Chip) -> Result<Vec<u8>, String> {
         put_u32(&mut o, t.name);
         put_groups(&mut o, &t.muxes)?;
         put_groups(&mut o, &t.enums)?;
+    }
+    put_u32(&mut o, len32(chip.devices.len())?);
+    for d in &chip.devices {
+        let head = [
+            d.name,
+            d.family,
+            d.idcode,
+            d.frames,
+            d.bits_per_frame,
+            d.pad_bits_after_frame,
+            d.pad_bits_before_frame,
+            d.max_row,
+            d.max_col,
+        ];
+        put_u32s(&mut o, &head)?;
+        put_u32(&mut o, len32(d.tiles.len())?);
+        for t in &d.tiles {
+            for v in [t.name, t.ty, t.start_frame, t.start_bit, t.frames, t.bits] {
+                put_u32(&mut o, v);
+            }
+        }
     }
     Ok(o)
 }
@@ -119,10 +140,44 @@ pub fn decode(b: &[u8]) -> Result<Chip, String> {
         let enums = r.groups()?;
         tile_types.push(TileType { name, muxes, enums });
     }
+    let nd = r.u32()? as usize;
+    let mut devices = Vec::new();
+    for _ in 0..nd {
+        let h = r.u32s()?;
+        let [name, family, idcode, frames, bits_per_frame, pad_bits_after_frame, pad_bits_before_frame, max_row, max_col] =
+            h[..]
+        else {
+            return Err("bad device header".to_owned());
+        };
+        let nt = r.u32()? as usize;
+        let mut tiles = Vec::new();
+        for _ in 0..nt {
+            tiles.push(Tile {
+                name: r.u32()?,
+                ty: r.u32()?,
+                start_frame: r.u32()?,
+                start_bit: r.u32()?,
+                frames: r.u32()?,
+                bits: r.u32()?,
+            });
+        }
+        devices.push(Device {
+            name,
+            family,
+            idcode,
+            frames,
+            bits_per_frame,
+            pad_bits_after_frame,
+            pad_bits_before_frame,
+            max_row,
+            max_col,
+            tiles,
+        });
+    }
     if r.p != b.len() {
         return Err("trailing bytes".to_owned());
     }
-    let chip = Chip { strings, tile_types };
+    let chip = Chip { strings, tile_types, devices };
     chip.validate()?;
     Ok(chip)
 }

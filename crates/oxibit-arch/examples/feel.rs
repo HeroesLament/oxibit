@@ -5,10 +5,10 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use oxibit_arch::import::{enum_lists, from_tile_bits, mux_lists, read_tiledata};
-use oxibit_arch::model::{Chip, Fuse, Groups};
 use oxibit_arch::codec;
-use oxibit_ecp5::db::BitGroup;
+use oxibit_arch::import::{add_device, enum_lists, from_tile_bits, mux_lists, read_tiledata};
+use oxibit_arch::model::{Chip, Fuse, Groups};
+use oxibit_ecp5::db::{BitGroup, DeviceDb};
 
 fn mismatches(chip: &Chip, g: &Groups, want: &[(&String, Vec<(&String, &BitGroup)>)]) -> usize {
     let mut bad = 0;
@@ -42,7 +42,14 @@ fn main() -> Result<(), String> {
     let t_text = t.elapsed();
 
     let t = Instant::now();
-    let chip = from_tile_bits(&tiles)?;
+    let mut chip = from_tile_bits(&tiles)?;
+    let devs: Vec<DeviceDb> = ["LFE5U-25F", "LFE5U-85F"]
+        .iter()
+        .map(|d| DeviceDb::load(&root, d).map_err(|e| e.to_string()))
+        .collect::<Result<_, _>>()?;
+    for db in &devs {
+        add_device(&mut chip, db)?;
+    }
     let t_build = t.elapsed();
 
     let blob = codec::encode(&chip)?;
@@ -59,6 +66,26 @@ fn main() -> Result<(), String> {
         bad += mismatches(&back, &back.tile_types[i].enums, &enum_lists(tb));
     }
 
+    for db in &devs {
+        let Some(d) = back.device(&db.info.name).map(|i| &back.devices[i]) else {
+            bad += 1;
+            continue;
+        };
+        let i = &db.info;
+        let geom = [i.idcode, i.frames as u32, i.bits_per_frame as u32, i.max_row as u32, i.max_col as u32];
+        if geom != [d.idcode, d.frames, d.bits_per_frame, d.max_row, d.max_col] || d.tiles.len() != db.tiles.len() {
+            bad += 1;
+        }
+        for (name, ti) in &db.tiles {
+            let ok = d.tile(&back.strings, name).is_some_and(|t| {
+                back.strings.get(back.tile_types[t.ty as usize].name) == ti.ty
+                    && [t.start_frame, t.start_bit, t.frames, t.bits]
+                        == [ti.start_frame as u32, ti.start_bit as u32, ti.frames as u32, ti.bits as u32]
+            });
+            bad += usize::from(!ok);
+        }
+        println!("device {:<10} {} tiles, idcode {:08x}, {} frames x {} bits", db.info.name, d.tiles.len(), d.idcode, d.frames, d.bits_per_frame);
+    }
     let arcs: usize = back.tile_types.iter().map(|t| t.muxes.item_name.len()).sum();
     let fuses: usize = back.tile_types.iter().map(|t| t.muxes.fuses.len() + t.enums.fuses.len()).sum();
     println!("tile types      {}", back.tile_types.len());

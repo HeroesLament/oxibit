@@ -178,11 +178,47 @@ pub struct TileType {
     pub enums: Groups,
 }
 
-/// A device family's tile types and the string table they share.
+/// One tile of a device: its type and its window of configuration memory.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Tile {
+    pub name: u32,
+    /// Index into [`Chip::tile_types`].
+    pub ty: u32,
+    pub start_frame: u32,
+    pub start_bit: u32,
+    pub frames: u32,
+    pub bits: u32,
+}
+
+/// One device: frame geometry and its tiles, sorted by name.
+#[derive(Default, Clone, PartialEq, Eq, Debug)]
+pub struct Device {
+    pub name: u32,
+    pub family: u32,
+    pub idcode: u32,
+    pub frames: u32,
+    pub bits_per_frame: u32,
+    pub pad_bits_after_frame: u32,
+    pub pad_bits_before_frame: u32,
+    pub max_row: u32,
+    pub max_col: u32,
+    pub tiles: Vec<Tile>,
+}
+
+impl Device {
+    /// The tile named `name`; tiles are sorted by name.
+    #[must_use]
+    pub fn tile(&self, strings: &Strings, name: &str) -> Option<&Tile> {
+        self.tiles.binary_search_by(|t| strings.get(t.name).cmp(name)).ok().map(|i| &self.tiles[i])
+    }
+}
+
+/// A device family's tile types, its devices, and the string table they share.
 #[derive(Default, Clone, PartialEq, Eq, Debug)]
 pub struct Chip {
     pub strings: Strings,
     pub tile_types: Vec<TileType>,
+    pub devices: Vec<Device>,
 }
 
 impl Chip {
@@ -200,7 +236,26 @@ impl Chip {
             t.muxes.validate(n)?;
             t.enums.validate(n)?;
         }
+        for d in &self.devices {
+            if d.name as usize >= n || d.family as usize >= n {
+                return Err("device name out of range".to_owned());
+            }
+            for t in &d.tiles {
+                if t.name as usize >= n || t.ty as usize >= self.tile_types.len() {
+                    return Err("tile reference out of range".to_owned());
+                }
+            }
+            if d.tiles.windows(2).any(|w| self.strings.get(w[0].name) >= self.strings.get(w[1].name)) {
+                return Err("tiles not sorted by name".to_owned());
+            }
+        }
         Ok(())
+    }
+
+    /// Index of the device named `name`.
+    #[must_use]
+    pub fn device(&self, name: &str) -> Option<usize> {
+        self.devices.iter().position(|d| self.strings.get(d.name) == name)
     }
 
     /// Index of the tile type named `name`; tile types are sorted by name.

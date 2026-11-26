@@ -3,9 +3,9 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
-use oxibit_ecp5::db::{parse_bits_db, BitGroup, TileBits};
+use oxibit_ecp5::db::{parse_bits_db, BitGroup, DeviceDb, TileBits};
 
-use crate::model::{Chip, Fuse, Groups, Strings, TileType};
+use crate::model::{Chip, Device, Fuse, Groups, Strings, Tile, TileType};
 
 struct Interner {
     ids: HashMap<String, u32>,
@@ -75,7 +75,56 @@ pub fn from_tile_bits(tiles: &BTreeMap<String, TileBits>) -> Result<Chip, String
         let enums = flatten(&mut i, &enum_lists(tb))?;
         tile_types.push(TileType { name, muxes, enums });
     }
-    Ok(Chip { strings: i.strings, tile_types })
+    Ok(Chip { strings: i.strings, tile_types, devices: Vec::new() })
+}
+
+fn u32_of(v: usize, what: &str) -> Result<u32, String> {
+    u32::try_from(v).map_err(|_| format!("{what} does not fit u32"))
+}
+
+/// Adds a device's geometry and tile grid. Its tile types must already be in
+/// the chip.
+///
+/// # Errors
+///
+/// When a tile names a type the chip does not hold, or a value overflows.
+pub fn add_device(chip: &mut Chip, db: &DeviceDb) -> Result<(), String> {
+    let mut i = Interner { ids: HashMap::new(), strings: std::mem::take(&mut chip.strings) };
+    for id in 0..i.strings.len() {
+        let s = i.strings.get(u32_of(id, "string id")?).to_owned();
+        i.ids.insert(s, u32_of(id, "string id")?);
+    }
+    let mut tiles = Vec::new();
+    for (name, t) in &db.tiles {
+        let ty = chip
+            .tile_types
+            .binary_search_by(|x| i.strings.get(x.name).cmp(t.ty.as_str()))
+            .map_err(|_| format!("tile {name}: no tile type {}", t.ty))?;
+        tiles.push(Tile {
+            name: i.id(name)?,
+            ty: u32_of(ty, "tile type index")?,
+            start_frame: u32_of(t.start_frame, "start_frame")?,
+            start_bit: u32_of(t.start_bit, "start_bit")?,
+            frames: u32_of(t.frames, "frames")?,
+            bits: u32_of(t.bits, "bits")?,
+        });
+    }
+    let n = &db.info;
+    let device = Device {
+        name: i.id(&n.name)?,
+        family: i.id(&n.family)?,
+        idcode: n.idcode,
+        frames: u32_of(n.frames, "frames")?,
+        bits_per_frame: u32_of(n.bits_per_frame, "bits_per_frame")?,
+        pad_bits_after_frame: u32_of(n.pad_bits_after_frame, "pad_bits_after_frame")?,
+        pad_bits_before_frame: u32_of(n.pad_bits_before_frame, "pad_bits_before_frame")?,
+        max_row: u32_of(n.max_row, "max_row")?,
+        max_col: u32_of(n.max_col, "max_col")?,
+        tiles,
+    };
+    chip.strings = i.strings;
+    chip.devices.push(device);
+    Ok(())
 }
 
 /// Reads every `<root>/<family>/tiledata/<type>/bits.db`; returns the parsed
