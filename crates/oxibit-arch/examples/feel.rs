@@ -7,8 +7,8 @@ use std::time::Instant;
 
 use oxibit_arch::codec;
 use oxibit_arch::import::{add_device, enum_lists, from_tile_bits, mux_lists, read_tiledata};
-use oxibit_arch::model::{Chip, Fuse, Groups};
-use oxibit_ecp5::db::{BitGroup, DeviceDb};
+use oxibit_arch::model::{Chip, Fuse, Groups, TileType, NO_DEFAULT};
+use oxibit_ecp5::db::{BitGroup, DeviceDb, TileBits};
 
 fn mismatches(chip: &Chip, g: &Groups, want: &[(&String, Vec<(&String, &BitGroup)>)]) -> usize {
     let mut bad = 0;
@@ -30,6 +30,36 @@ fn mismatches(chip: &Chip, g: &Groups, want: &[(&String, Vec<(&String, &BitGroup
         }
     }
     bad
+}
+
+fn extra(chip: &Chip, tt: &TileType, tb: &TileBits) -> usize {
+    let s = &chip.strings;
+    let mut bad = 0;
+    for (k, e) in tb.enums.values().enumerate() {
+        let got = tt.enum_def.get(k).copied().filter(|d| *d != NO_DEFAULT).map(|d| s.get(d));
+        bad += usize::from(e.defval.as_deref() != got);
+    }
+    for (k, (name, w)) in tb.words.iter().enumerate() {
+        let Some(key) = tt.words.find(s, name) else {
+            bad += 1;
+            continue;
+        };
+        let items: Vec<_> = tt.words.items(key).collect();
+        if key != k || items.len() != w.bits.len() {
+            bad += 1;
+            continue;
+        }
+        for (n, (bits, (gn, gf))) in w.bits.iter().zip(items).enumerate() {
+            let f: Vec<u32> = bits.0.iter().filter_map(|b| Fuse::new(b.frame, b.bit, b.inv)).map(Fuse::raw).collect();
+            bad += usize::from(s.get(gn) != n.to_string() || f != gf);
+        }
+        let d = &tt.word_def[tt.word_def_start[k] as usize..tt.word_def_start[k + 1] as usize];
+        let want: Vec<u8> = w.defval.iter().map(|b| u8::from(*b)).collect();
+        bad += usize::from(d != want.as_slice());
+    }
+    let got: Vec<(&str, &str)> = tt.fixed.chunks_exact(2).map(|p| (s.get(p[0]), s.get(p[1]))).collect();
+    let want: Vec<(&str, &str)> = tb.fixed_conns.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+    bad + usize::from(got != want)
 }
 
 fn main() -> Result<(), String> {
@@ -64,7 +94,11 @@ fn main() -> Result<(), String> {
     for (i, tb) in tiles.values().enumerate() {
         bad += mismatches(&back, &back.tile_types[i].muxes, &mux_lists(tb));
         bad += mismatches(&back, &back.tile_types[i].enums, &enum_lists(tb));
+        bad += extra(&back, &back.tile_types[i], tb);
     }
+    let words: usize = back.tile_types.iter().map(|t| t.words.keys.len()).sum();
+    let fixed: usize = back.tile_types.iter().map(|t| t.fixed.len() / 2).sum();
+    println!("words {words}, enums {}, fixed connections {fixed}", back.tile_types.iter().map(|t| t.enums.keys.len()).sum::<usize>());
 
     for db in &devs {
         let Some(d) = back.device(&db.info.name).map(|i| &back.devices[i]) else {

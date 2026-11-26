@@ -175,8 +175,21 @@ impl Groups {
 pub struct TileType {
     pub name: u32,
     pub muxes: Groups,
+    /// Keys are enum names, items are options.
     pub enums: Groups,
+    /// Default option (a string id) per enum key, or [`NO_DEFAULT`].
+    pub enum_def: Vec<u32>,
+    /// Keys are word names, items are bit 0, 1, ... (named by their index).
+    pub words: Groups,
+    /// Default value bits of word key `k`: `word_def[word_def_start[k]..word_def_start[k + 1]]`.
+    pub word_def_start: Vec<u32>,
+    pub word_def: Vec<u8>,
+    /// Joins with no configuration bit: `(sink, source)` string ids, flat.
+    pub fixed: Vec<u32>,
 }
+
+/// `enum_def` entry for an enum with no default.
+pub const NO_DEFAULT: u32 = u32::MAX;
 
 /// One tile of a device: its type and its window of configuration memory.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -235,6 +248,16 @@ impl Chip {
             }
             t.muxes.validate(n)?;
             t.enums.validate(n)?;
+            t.words.validate(n)?;
+            if t.enum_def.len() != t.enums.keys.len() || t.enum_def.iter().any(|&d| d != NO_DEFAULT && d as usize >= n) {
+                return Err("bad enum defaults".to_owned());
+            }
+            if t.word_def_start.len() != t.words.keys.len() + 1 || !monotone_to(&t.word_def_start, t.word_def.len()) {
+                return Err("bad word defaults".to_owned());
+            }
+            if t.fixed.len() % 2 != 0 || t.fixed.iter().any(|&s| s as usize >= n) {
+                return Err("bad fixed connections".to_owned());
+            }
         }
         for d in &self.devices {
             if d.name as usize >= n || d.family as usize >= n {

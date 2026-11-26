@@ -2,7 +2,7 @@
 
 use crate::model::{Chip, Device, Groups, Strings, Tile, TileType};
 
-const MAGIC: &[u8; 8] = b"OXARCH02";
+const MAGIC: &[u8; 8] = b"OXARCH03";
 
 fn len32(n: usize) -> Result<u32, String> {
     u32::try_from(n).map_err(|_| "section too large".to_owned())
@@ -51,6 +51,11 @@ pub fn encode(chip: &Chip) -> Result<Vec<u8>, String> {
         put_u32(&mut o, t.name);
         put_groups(&mut o, &t.muxes)?;
         put_groups(&mut o, &t.enums)?;
+        put_u32s(&mut o, &t.enum_def)?;
+        put_groups(&mut o, &t.words)?;
+        put_u32s(&mut o, &t.word_def_start)?;
+        put_bytes(&mut o, &t.word_def)?;
+        put_u32s(&mut o, &t.fixed)?;
     }
     put_u32(&mut o, len32(chip.devices.len())?);
     for d in &chip.devices {
@@ -138,7 +143,12 @@ pub fn decode(b: &[u8]) -> Result<Chip, String> {
         let name = r.u32()?;
         let muxes = r.groups()?;
         let enums = r.groups()?;
-        tile_types.push(TileType { name, muxes, enums });
+        let enum_def = r.u32s()?;
+        let words = r.groups()?;
+        let word_def_start = r.u32s()?;
+        let word_def = r.bytes()?.to_vec();
+        let fixed = r.u32s()?;
+        tile_types.push(TileType { name, muxes, enums, enum_def, words, word_def_start, word_def, fixed });
     }
     let nd = r.u32()? as usize;
     let mut devices = Vec::new();

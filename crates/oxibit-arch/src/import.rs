@@ -5,7 +5,7 @@ use std::path::Path;
 
 use oxibit_ecp5::db::{parse_bits_db, BitGroup, DeviceDb, TileBits};
 
-use crate::model::{Chip, Device, Fuse, Groups, Strings, Tile, TileType};
+use crate::model::{Chip, Device, Fuse, Groups, Strings, Tile, TileType, NO_DEFAULT};
 
 struct Interner {
     ids: HashMap<String, u32>,
@@ -35,19 +35,63 @@ fn run(group: &BitGroup) -> Result<Vec<u32>, String> {
         .collect()
 }
 
+fn empty_groups() -> Groups {
+    Groups { key_start: vec![0], item_start: vec![0], ..Groups::default() }
+}
+
+fn push_item(g: &mut Groups, i: &mut Interner, name: &str, bits: &BitGroup) -> Result<(), String> {
+    g.item_name.push(i.id(name)?);
+    g.fuses.extend(run(bits)?);
+    g.item_start.push(u32::try_from(g.fuses.len()).map_err(|_| "too many fuses".to_owned())?);
+    Ok(())
+}
+
+fn close_key(g: &mut Groups) -> Result<(), String> {
+    g.key_start.push(u32::try_from(g.item_name.len()).map_err(|_| "too many items".to_owned())?);
+    Ok(())
+}
+
 /// `want` is `(key, [(item, bits)])` in sorted key order.
 fn flatten(i: &mut Interner, want: &[(&String, Vec<(&String, &BitGroup)>)]) -> Result<Groups, String> {
-    let mut g = Groups { key_start: vec![0], item_start: vec![0], ..Groups::default() };
+    let mut g = empty_groups();
     for (key, items) in want {
         g.keys.push(i.id(key)?);
         for (name, bits) in items {
-            g.item_name.push(i.id(name)?);
-            g.fuses.extend(run(bits)?);
-            g.item_start.push(u32::try_from(g.fuses.len()).map_err(|_| "too many fuses".to_owned())?);
+            push_item(&mut g, i, name, bits)?;
         }
-        g.key_start.push(u32::try_from(g.item_name.len()).map_err(|_| "too many items".to_owned())?);
+        close_key(&mut g)?;
     }
     Ok(g)
+}
+
+fn tile_type(i: &mut Interner, name: u32, tb: &TileBits) -> Result<TileType, String> {
+    let muxes = flatten(i, &mux_lists(tb))?;
+    let enums = flatten(i, &enum_lists(tb))?;
+    let mut enum_def = Vec::new();
+    for e in tb.enums.values() {
+        enum_def.push(match &e.defval {
+            Some(s) => i.id(s)?,
+            None => NO_DEFAULT,
+        });
+    }
+    let mut words = empty_groups();
+    let mut word_def_start = vec![0];
+    let mut word_def = Vec::new();
+    for (key, w) in &tb.words {
+        words.keys.push(i.id(key)?);
+        for (n, bits) in w.bits.iter().enumerate() {
+            push_item(&mut words, i, &n.to_string(), bits)?;
+        }
+        close_key(&mut words)?;
+        word_def.extend(w.defval.iter().map(|b| u8::from(*b)));
+        word_def_start.push(u32::try_from(word_def.len()).map_err(|_| "too many default bits".to_owned())?);
+    }
+    let mut fixed = Vec::new();
+    for (sink, source) in &tb.fixed_conns {
+        fixed.push(i.id(sink)?);
+        fixed.push(i.id(source)?);
+    }
+    Ok(TileType { name, muxes, enums, enum_def, words, word_def_start, word_def, fixed })
 }
 
 /// The same lists `flatten` takes, from a parsed tile type.
@@ -71,9 +115,7 @@ pub fn from_tile_bits(tiles: &BTreeMap<String, TileBits>) -> Result<Chip, String
     let mut tile_types = Vec::new();
     for (name, tb) in tiles {
         let name = i.id(name)?;
-        let muxes = flatten(&mut i, &mux_lists(tb))?;
-        let enums = flatten(&mut i, &enum_lists(tb))?;
-        tile_types.push(TileType { name, muxes, enums });
+        tile_types.push(tile_type(&mut i, name, tb)?);
     }
     Ok(Chip { strings: i.strings, tile_types, devices: Vec::new() })
 }
