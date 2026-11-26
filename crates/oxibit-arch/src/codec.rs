@@ -1,8 +1,8 @@
 //! The binary format: a magic, then length-prefixed little-endian sections.
 
-use crate::model::{Chip, Device, Groups, Strings, Tile, TileType};
+use crate::model::{Chip, Device, Groups, Package, Pin, PioMeta, Quadrant, Spine, Strings, Tap, Tile, TileType};
 
-const MAGIC: &[u8; 8] = b"OXARCH03";
+const MAGIC: &[u8; 8] = b"OXARCH04";
 
 fn len32(n: usize) -> Result<u32, String> {
     u32::try_from(n).map_err(|_| "section too large".to_owned())
@@ -77,8 +77,30 @@ pub fn encode(chip: &Chip) -> Result<Vec<u8>, String> {
                 put_u32(&mut o, v);
             }
         }
+        let q: Vec<u32> = d.quadrants.iter().flat_map(|q| [q.name, q.x0, q.y0, q.x1, q.y1]).collect();
+        put_u32s(&mut o, &q)?;
+        let t: Vec<u32> = d.taps.iter().flat_map(|t| [t.name, t.lx0, t.lx1, t.rx0, t.rx1]).collect();
+        put_u32s(&mut o, &t)?;
+        let s: Vec<u32> = d.spines.iter().flat_map(|s| [s.name, s.x, s.y]).collect();
+        put_u32s(&mut o, &s)?;
+        put_u32(&mut o, len32(d.packages.len())?);
+        for p in &d.packages {
+            put_u32(&mut o, p.name);
+            let pins: Vec<u32> = p.pins.iter().flat_map(|x| [x.name, x.col, x.row, x.pio]).collect();
+            put_u32s(&mut o, &pins)?;
+        }
+        let m: Vec<u32> = d.pio_meta.iter().flat_map(|m| [m.bank, m.col, m.row, m.pio, m.dqs, m.function]).collect();
+        put_u32s(&mut o, &m)?;
     }
     Ok(o)
+}
+
+fn strided(v: &[u32], n: usize) -> Result<std::slice::ChunksExact<'_, u32>, String> {
+    if v.len() % n == 0 {
+        Ok(v.chunks_exact(n))
+    } else {
+        Err("device section has a partial record".to_owned())
+    }
 }
 
 struct Rd<'a> {
@@ -171,7 +193,25 @@ pub fn decode(b: &[u8]) -> Result<Chip, String> {
                 bits: r.u32()?,
             });
         }
+        let quadrants = strided(&r.u32s()?, 5)?.map(|c| Quadrant { name: c[0], x0: c[1], y0: c[2], x1: c[3], y1: c[4] }).collect();
+        let taps = strided(&r.u32s()?, 5)?.map(|c| Tap { name: c[0], lx0: c[1], lx1: c[2], rx0: c[3], rx1: c[4] }).collect();
+        let spines = strided(&r.u32s()?, 3)?.map(|c| Spine { name: c[0], x: c[1], y: c[2] }).collect();
+        let np = r.u32()? as usize;
+        let mut packages = Vec::new();
+        for _ in 0..np {
+            let name = r.u32()?;
+            let pins = strided(&r.u32s()?, 4)?.map(|c| Pin { name: c[0], col: c[1], row: c[2], pio: c[3] }).collect();
+            packages.push(Package { name, pins });
+        }
+        let pio_meta = strided(&r.u32s()?, 6)?
+            .map(|c| PioMeta { bank: c[0], col: c[1], row: c[2], pio: c[3], dqs: c[4], function: c[5] })
+            .collect();
         devices.push(Device {
+            quadrants,
+            taps,
+            spines,
+            packages,
+            pio_meta,
             name,
             family,
             idcode,

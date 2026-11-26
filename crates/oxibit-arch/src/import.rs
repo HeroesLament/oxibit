@@ -5,7 +5,11 @@ use std::path::Path;
 
 use oxibit_ecp5::db::{parse_bits_db, BitGroup, DeviceDb, TileBits};
 
-use crate::model::{Chip, Device, Fuse, Groups, Strings, Tile, TileType, NO_DEFAULT};
+use serde_json::Value;
+
+use crate::model::{
+    Chip, Device, Fuse, Groups, Package, Pin, PioMeta, Quadrant, Spine, Strings, Tap, Tile, TileType, NONE, NO_DEFAULT,
+};
 
 struct Interner {
     ids: HashMap<String, u32>,
@@ -124,6 +128,106 @@ fn u32_of(v: usize, what: &str) -> Result<u32, String> {
     u32::try_from(v).map_err(|_| format!("{what} does not fit u32"))
 }
 
+fn read_json(path: &Path) -> Result<Value, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Only the keys in `allowed`; anything else would be dropped silently.
+fn only_keys(v: &Value, allowed: &[&str], what: &str) -> Result<(), String> {
+    let obj = v.as_object().ok_or_else(|| format!("{what}: not an object"))?;
+    match obj.keys().find(|k| !allowed.contains(&k.as_str())) {
+        Some(k) => Err(format!("{what}: unexpected key {k}")),
+        None => Ok(()),
+    }
+}
+
+fn num(v: &Value, key: &str, what: &str) -> Result<u32, String> {
+    v.get(key)
+        .and_then(Value::as_u64)
+        .and_then(|n| u32::try_from(n).ok())
+        .ok_or_else(|| format!("{what}: missing or bad {key}"))
+}
+
+fn text(i: &mut Interner, v: &Value, key: &str, what: &str) -> Result<u32, String> {
+    let s = v.get(key).and_then(Value::as_str).ok_or_else(|| format!("{what}: missing or bad {key}"))?;
+    i.id(s)
+}
+
+fn opt_text(i: &mut Interner, v: &Value, key: &str, what: &str) -> Result<u32, String> {
+    match v.get(key) {
+        None => Ok(NONE),
+        Some(Value::String(s)) => i.id(s),
+        Some(_) => Err(format!("{what}: bad {key}")),
+    }
+}
+
+fn section<'a>(v: &'a Value, key: &str) -> Result<&'a serde_json::Map<String, Value>, String> {
+    v.get(key).and_then(Value::as_object).ok_or_else(|| format!("missing {key}"))
+}
+
+type Landmarks = (Vec<Quadrant>, Vec<Tap>, Vec<Spine>);
+
+fn read_globals(i: &mut Interner, path: &Path) -> Result<Landmarks, String> {
+    let g = read_json(path)?;
+    only_keys(&g, &["quadrants", "taps", "spines"], "globals.json")?;
+    let mut quadrants = Vec::new();
+    for (name, r) in section(&g, "quadrants")? {
+        only_keys(r, &["x0", "y0", "x1", "y1"], name)?;
+        quadrants.push(Quadrant {
+            name: i.id(name)?,
+            x0: num(r, "x0", name)?,
+            y0: num(r, "y0", name)?,
+            x1: num(r, "x1", name)?,
+            y1: num(r, "y1", name)?,
+        });
+    }
+    let mut taps = Vec::new();
+    for (name, t) in section(&g, "taps")? {
+        only_keys(t, &["lx0", "lx1", "rx0", "rx1"], name)?;
+        taps.push(Tap {
+            name: i.id(name)?,
+            lx0: num(t, "lx0", name)?,
+            lx1: num(t, "lx1", name)?,
+            rx0: num(t, "rx0", name)?,
+            rx1: num(t, "rx1", name)?,
+        });
+    }
+    let mut spines = Vec::new();
+    for (name, s) in section(&g, "spines")? {
+        only_keys(s, &["x", "y"], name)?;
+        spines.push(Spine { name: i.id(name)?, x: num(s, "x", name)?, y: num(s, "y", name)? });
+    }
+    Ok((quadrants, taps, spines))
+}
+
+fn read_iodb(i: &mut Interner, path: &Path) -> Result<(Vec<Package>, Vec<PioMeta>), String> {
+    let d = read_json(path)?;
+    only_keys(&d, &["packages", "pio_metadata"], "iodb.json")?;
+    let mut packages = Vec::new();
+    for (pkg, pins) in section(&d, "packages")? {
+        let mut out = Vec::new();
+        for (pin, v) in pins.as_object().ok_or_else(|| format!("{pkg}: not an object"))? {
+            only_keys(v, &["col", "row", "pio"], pin)?;
+            out.push(Pin { name: i.id(pin)?, col: num(v, "col", pin)?, row: num(v, "row", pin)?, pio: text(i, v, "pio", pin)? });
+        }
+        packages.push(Package { name: i.id(pkg)?, pins: out });
+    }
+    let mut pio_meta = Vec::new();
+    for m in d.get("pio_metadata").and_then(Value::as_array).ok_or("missing pio_metadata")? {
+        only_keys(m, &["bank", "col", "row", "pio", "dqs", "function"], "pio_metadata")?;
+        pio_meta.push(PioMeta {
+            bank: num(m, "bank", "pio_metadata")?,
+            col: num(m, "col", "pio_metadata")?,
+            row: num(m, "row", "pio_metadata")?,
+            pio: text(i, m, "pio", "pio_metadata")?,
+            dqs: opt_text(i, m, "dqs", "pio_metadata")?,
+            function: opt_text(i, m, "function", "pio_metadata")?,
+        });
+    }
+    Ok((packages, pio_meta))
+}
+
 /// Adds a device's geometry and tile grid. Its tile types must already be in
 /// the chip.
 ///
@@ -152,7 +256,15 @@ pub fn add_device(chip: &mut Chip, db: &DeviceDb) -> Result<(), String> {
         });
     }
     let n = &db.info;
+    let dir = db.root.join(&n.family).join(&n.name);
+    let (quadrants, taps, spines) = read_globals(&mut i, &dir.join("globals.json"))?;
+    let (packages, pio_meta) = read_iodb(&mut i, &dir.join("iodb.json"))?;
     let device = Device {
+        quadrants,
+        taps,
+        spines,
+        packages,
+        pio_meta,
         name: i.id(&n.name)?,
         family: i.id(&n.family)?,
         idcode: n.idcode,

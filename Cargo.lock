@@ -388,6 +388,7 @@ name = "oxibit-arch"
 version = "0.2.0"
 dependencies = [
  "oxibit-ecp5",
+ "serde_json",
 ]
 
 [[package]]

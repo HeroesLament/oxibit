@@ -2,12 +2,14 @@
 //!
 //! `cargo run --release -p oxibit-arch --example feel -- <trellis database> [out.oxarch]`
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
+
+use serde_json::Value;
 
 use oxibit_arch::codec;
 use oxibit_arch::import::{add_device, enum_lists, from_tile_bits, mux_lists, read_tiledata};
-use oxibit_arch::model::{Chip, Fuse, Groups, TileType, NO_DEFAULT};
+use oxibit_arch::model::{Chip, Device, Fuse, Groups, TileType, NONE, NO_DEFAULT};
 use oxibit_ecp5::db::{BitGroup, DeviceDb, TileBits};
 
 fn mismatches(chip: &Chip, g: &Groups, want: &[(&String, Vec<(&String, &BitGroup)>)]) -> usize {
@@ -28,6 +30,60 @@ fn mismatches(chip: &Chip, g: &Groups, want: &[(&String, Vec<(&String, &BitGroup
                 bad += 1;
             }
         }
+    }
+    bad
+}
+
+fn json(p: &Path) -> Value {
+    serde_json::from_str(&std::fs::read_to_string(p).unwrap_or_default()).unwrap_or(Value::Null)
+}
+
+fn n(v: &Value, k: &str) -> u64 {
+    v[k].as_u64().unwrap_or(u64::MAX)
+}
+
+fn count(v: &Value) -> usize {
+    v.as_object().map_or(usize::MAX, serde_json::Map::len)
+}
+
+/// Re-reads globals.json and iodb.json and compares them to the device.
+fn device_data(chip: &Chip, d: &Device, dir: &Path) -> usize {
+    let s = &chip.strings;
+    let (g, io) = (json(&dir.join("globals.json")), json(&dir.join("iodb.json")));
+    let mut bad = usize::from(count(&g["quadrants"]) != d.quadrants.len())
+        + usize::from(count(&g["taps"]) != d.taps.len())
+        + usize::from(count(&g["spines"]) != d.spines.len())
+        + usize::from(count(&io["packages"]) != d.packages.len());
+    for q in &d.quadrants {
+        let v = &g["quadrants"][s.get(q.name)];
+        bad += usize::from([q.x0, q.y0, q.x1, q.y1].map(u64::from) != [n(v, "x0"), n(v, "y0"), n(v, "x1"), n(v, "y1")]);
+    }
+    for t in &d.taps {
+        let v = &g["taps"][s.get(t.name)];
+        bad += usize::from([t.lx0, t.lx1, t.rx0, t.rx1].map(u64::from) != [n(v, "lx0"), n(v, "lx1"), n(v, "rx0"), n(v, "rx1")]);
+    }
+    for p in &d.spines {
+        let v = &g["spines"][s.get(p.name)];
+        bad += usize::from([p.x, p.y].map(u64::from) != [n(v, "x"), n(v, "y")]);
+    }
+    for p in &d.packages {
+        let m = &io["packages"][s.get(p.name)];
+        bad += usize::from(count(m) != p.pins.len());
+        for pin in &p.pins {
+            let v = &m[s.get(pin.name)];
+            let same = [pin.col, pin.row].map(u64::from) == [n(v, "col"), n(v, "row")] && v["pio"].as_str() == Some(s.get(pin.pio));
+            bad += usize::from(!same);
+        }
+    }
+    let arr = io["pio_metadata"].as_array().map_or(&[][..], Vec::as_slice);
+    bad += usize::from(arr.len() != d.pio_meta.len());
+    for (m, v) in d.pio_meta.iter().zip(arr) {
+        let opt = |id: u32| (id != NONE).then(|| s.get(id));
+        let same = [m.bank, m.col, m.row].map(u64::from) == [n(v, "bank"), n(v, "col"), n(v, "row")]
+            && v["pio"].as_str() == Some(s.get(m.pio))
+            && v["dqs"].as_str() == opt(m.dqs)
+            && v["function"].as_str() == opt(m.function);
+        bad += usize::from(!same);
     }
     bad
 }
@@ -118,6 +174,7 @@ fn main() -> Result<(), String> {
             });
             bad += usize::from(!ok);
         }
+        bad += device_data(&back, d, &db.root.join(&i.family).join(&i.name));
         println!("device {:<10} {} tiles, idcode {:08x}, {} frames x {} bits", db.info.name, d.tiles.len(), d.idcode, d.frames, d.bits_per_frame);
     }
     let arcs: usize = back.tile_types.iter().map(|t| t.muxes.item_name.len()).sum();

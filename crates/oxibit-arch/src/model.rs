@@ -203,9 +203,73 @@ pub struct Tile {
     pub bits: u32,
 }
 
-/// One device: frame geometry and its tiles, sorted by name.
+/// Absent optional string (`dqs`, `function`), like [`NO_DEFAULT`].
+pub const NONE: u32 = u32::MAX;
+
+/// A clock quadrant: its tile rectangle.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Quadrant {
+    pub name: u32,
+    pub x0: u32,
+    pub y0: u32,
+    pub x1: u32,
+    pub y1: u32,
+}
+
+/// A clock tap: the columns it feeds on each side.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Tap {
+    pub name: u32,
+    pub lx0: u32,
+    pub lx1: u32,
+    pub rx0: u32,
+    pub rx1: u32,
+}
+
+/// A clock spine's tile.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Spine {
+    pub name: u32,
+    pub x: u32,
+    pub y: u32,
+}
+
+/// A package pin and the pad it reaches: tile column and row, and which PIO
+/// (`A`, `B`, ...) of that tile.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Pin {
+    pub name: u32,
+    pub col: u32,
+    pub row: u32,
+    pub pio: u32,
+}
+
+#[derive(Default, Clone, PartialEq, Eq, Debug)]
+pub struct Package {
+    pub name: u32,
+    pub pins: Vec<Pin>,
+}
+
+/// Bank, DQS group and special function of a PIO.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PioMeta {
+    pub bank: u32,
+    pub col: u32,
+    pub row: u32,
+    pub pio: u32,
+    pub dqs: u32,
+    pub function: u32,
+}
+
+/// One device: frame geometry, its tiles (sorted by name), clock tree
+/// landmarks and pad data.
 #[derive(Default, Clone, PartialEq, Eq, Debug)]
 pub struct Device {
+    pub quadrants: Vec<Quadrant>,
+    pub taps: Vec<Tap>,
+    pub spines: Vec<Spine>,
+    pub packages: Vec<Package>,
+    pub pio_meta: Vec<PioMeta>,
     pub name: u32,
     pub family: u32,
     pub idcode: u32,
@@ -267,6 +331,16 @@ impl Chip {
                 if t.name as usize >= n || t.ty as usize >= self.tile_types.len() {
                     return Err("tile reference out of range".to_owned());
                 }
+            }
+            let ok = |s: u32| (s as usize) < n;
+            let opt = |s: u32| s == NONE || ok(s);
+            let landmarks = d.quadrants.iter().all(|q| ok(q.name))
+                && d.taps.iter().all(|t| ok(t.name))
+                && d.spines.iter().all(|s| ok(s.name))
+                && d.packages.iter().all(|p| ok(p.name) && p.pins.iter().all(|x| ok(x.name) && ok(x.pio)))
+                && d.pio_meta.iter().all(|m| ok(m.pio) && opt(m.dqs) && opt(m.function));
+            if !landmarks {
+                return Err("string id out of range in device data".to_owned());
             }
             if d.tiles.windows(2).any(|w| self.strings.get(w[0].name) >= self.strings.get(w[1].name)) {
                 return Err("tiles not sorted by name".to_owned());
