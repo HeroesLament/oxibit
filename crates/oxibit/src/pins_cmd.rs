@@ -32,19 +32,44 @@ struct Row {
 
 /// Where the constraints come from.
 pub enum Source<'a> {
-    /// A board's built-in preferences (LPF text) and the board's name.
-    BuiltIn { board: &'a str, lpf: &'a str },
-    /// A `.lpf` or `.xdc` file.
+    /// A board's built-in constraints (text and format) and the board's name.
+    BuiltIn { board: &'a str, text: &'a str, format: Format },
+    /// A `.lpf`, `.pdc` or `.xdc` file.
     File(&'a Path),
+}
+
+/// A constraint file format: ECP5 LPF, Nexus PDC, or 7-series XDC.
+#[derive(Clone, Copy)]
+pub enum Format {
+    Lpf,
+    Pdc,
+    Xdc,
+}
+
+impl Format {
+    fn of_path(path: &Path) -> Format {
+        match path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
+            Some("xdc") => Format::Xdc,
+            Some("pdc") => Format::Pdc,
+            _ => Format::Lpf,
+        }
+    }
+
+    fn parse(self, text: &str) -> Result<BTreeMap<String, Pin>> {
+        match self {
+            Format::Lpf => from_lpf(text),
+            Format::Pdc => from_pdc(text),
+            Format::Xdc => Ok(from_xdc(text)),
+        }
+    }
 }
 
 pub fn pins(source: &Source<'_>, filter: Option<&str>, json: bool) -> Result<ExitCode> {
     let (pins, origin) = match source {
-        Source::BuiltIn { board, lpf } => (from_lpf(lpf)?, format!("{board}, built in")),
+        Source::BuiltIn { board, text, format } => (format.parse(text)?, format!("{board}, built in")),
         Source::File(path) => {
             let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-            let is_xdc = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("xdc"));
-            let pins = if is_xdc { from_xdc(&text) } else { from_lpf(&text)? };
+            let pins = Format::of_path(path).parse(&text)?;
             (pins, path.display().to_string())
         }
     };
@@ -92,6 +117,13 @@ fn from_lpf(text: &str) -> Result<BTreeMap<String, Pin>> {
         pins.insert(name.clone(), pin);
     }
     Ok(pins)
+}
+
+/// A Nexus PDC locates ports only; it carries no IO type, pull or drive.
+fn from_pdc(text: &str) -> Result<BTreeMap<String, Pin>> {
+    let sites = oxibit_nexus::flow::parse_pdc(text).map_err(|e| e.to_string())?;
+    let dash = || "-".to_owned();
+    Ok(sites.into_iter().map(|(port, site)| (port, Pin { site, io: dash(), pull: dash(), drive: dash() })).collect())
 }
 
 fn from_xdc(text: &str) -> BTreeMap<String, Pin> {
