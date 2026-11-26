@@ -511,7 +511,7 @@ fn main() -> ExitCode {
             let source = match (&constraints, board.unwrap_or(Board::Ulx3s)) {
                 (Some(path), _) => Ok(pins_cmd::Source::File(path)),
                 (None, Board::Ulx3s) => Ok(pins_cmd::Source::BuiltIn { board: "ulx3s", text: ecp5_cmd::ULX3S_LPF, format: pins_cmd::Format::Lpf }),
-                (None, Board::Libresdr) => Err("libresdr has no built-in constraints; give --constraints FILE.xdc".to_owned()),
+                (None, Board::Libresdr) => Ok(pins_cmd::Source::BuiltIn { board: "libresdr", text: xc7_cmd::LIBRESDR_XDC, format: pins_cmd::Format::Xdc }),
                 (None, Board::Clnx) => Ok(pins_cmd::Source::BuiltIn { board: "clnx", text: nexus_cmd::EVN_PDC, format: pins_cmd::Format::Pdc }),
             };
             source.and_then(|s| pins_cmd::pins(&s, filter.as_deref(), json))

@@ -290,3 +290,6 @@ fn run(a: &BuildArgs, r: &Reporter, text: bool) -> Result<(Value, Vec<String>)> 
     }
     Ok((stats, outputs))
 }
+
+/// The LibreSDR board's pin constraints (AD9363 control, RX and TX buses).
+pub const LIBRESDR_XDC: &str = include_str!("../../oxibit-zynq7/boards/libresdr.xdc");
