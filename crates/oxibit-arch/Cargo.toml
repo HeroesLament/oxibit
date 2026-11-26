@@ -1,0 +1,13 @@
+[package]
+name = "oxibit-arch"
+description = "Chip architecture data as flat, index-addressed tables with a versioned binary format"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+oxibit-ecp5 = { path = "../oxibit-ecp5" }
+
+[lints]
+workspace = true
