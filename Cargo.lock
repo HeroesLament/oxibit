@@ -361,7 +361,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "oxibit"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "clap_complete",
@@ -385,7 +385,7 @@ dependencies = [
 
 [[package]]
 name = "oxibit-bitstream"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "sha2",
@@ -393,7 +393,7 @@ dependencies = [
 
 [[package]]
 name = "oxibit-cec"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "batsat",
  "oxibit-prof",
@@ -404,7 +404,7 @@ dependencies = [
 
 [[package]]
 name = "oxibit-ecp5"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "oxibit-hdl",
  "oxibit-place",
@@ -415,7 +415,7 @@ dependencies = [
 
 [[package]]
 name = "oxibit-fasm"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "oxibit-bitstream",
  "oxibit-prof",
@@ -425,7 +425,7 @@ dependencies = [
 
 [[package]]
 name = "oxibit-guard"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libc",
  "oxibit-bitstream",
@@ -435,7 +435,7 @@ dependencies = [
 
 [[package]]
 name = "oxibit-hdl"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "oxibit-prof",
  "serde_json",
@@ -444,7 +444,7 @@ dependencies = [
 
 [[package]]
 name = "oxibit-nexus"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "oxibit-hdl",
  "oxibit-report",
@@ -456,7 +456,7 @@ dependencies = [
 
 [[package]]
 name = "oxibit-place"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libm",
  "oxibit-pnr",
@@ -465,7 +465,7 @@ dependencies = [
 
 [[package]]
 name = "oxibit-pnr"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "oxibit-fasm",
  "oxibit-prof",
@@ -476,14 +476,14 @@ dependencies = [
 
 [[package]]
 name = "oxibit-policy"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "oxibit-prof"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "inferno",
  "oxibit-prof-macros",
@@ -495,7 +495,7 @@ dependencies = [
 
 [[package]]
 name = "oxibit-prof-macros"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -504,7 +504,7 @@ dependencies = [
 
 [[package]]
 name = "oxibit-report"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -512,7 +512,7 @@ dependencies = [
 
 [[package]]
 name = "oxibit-synth"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "batsat",
  "oxibit-hdl",
@@ -525,7 +525,7 @@ dependencies = [
 
 [[package]]
 name = "oxibit-timing"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -533,7 +533,7 @@ dependencies = [
 
 [[package]]
 name = "oxibit-zynq7"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libc",
  "oxibit-guard",
