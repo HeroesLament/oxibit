@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
+use crate::source::Source;
 use crate::{Result, err};
 
 /// One configuration bit of a tile, relative to the tile's CRAM window.
@@ -123,7 +124,85 @@ pub struct DeviceDb {
     pub bits: BTreeMap<String, TileBits>,
 }
 
+fn lit_group(bits: &[oxibit_arch::lit::Bit]) -> BitGroup {
+    BitGroup(
+        bits.iter()
+            .map(|b| ConfigBit { frame: usize::from(b.frame), bit: usize::from(b.bit), inv: b.inverted })
+            .collect(),
+    )
+}
+
+fn lit_tile_bits(t: &oxibit_arch::lit::TileTypeLit) -> TileBits {
+    let mut tb = TileBits::default();
+    for m in t.muxes {
+        let arcs = m.arcs.iter().map(|a| (a.source.to_owned(), lit_group(a.bits))).collect();
+        tb.muxes.insert(m.sink.to_owned(), Mux { arcs });
+    }
+    for e in t.enums {
+        let options = e.options.iter().map(|(n, b)| ((*n).to_owned(), lit_group(b))).collect();
+        tb.enums.insert(e.name.to_owned(), Enum { options, defval: e.default.map(str::to_owned) });
+    }
+    for w in t.words {
+        let bits = w.bits.iter().map(|b| lit_group(b)).collect();
+        tb.words.insert(w.name.to_owned(), Word { bits, defval: w.default.to_vec() });
+    }
+    tb.fixed_conns = t.fixed.iter().map(|(a, b)| ((*a).to_owned(), (*b).to_owned())).collect();
+    tb
+}
+
 impl DeviceDb {
+    /// The database of `device` from `source`.
+    ///
+    /// # Errors
+    ///
+    /// When the device or one of its files is missing or malformed, or the
+    /// device is not built in (for [`Source::Builtin`]).
+    pub fn load_from(source: &Source, device: &str) -> Result<DeviceDb> {
+        match source {
+            Source::Text(root) => DeviceDb::load(root, device),
+            Source::Builtin => DeviceDb::builtin(device),
+        }
+    }
+
+    /// The database of `device` from the data compiled into `oxibit-arch-ecp5`.
+    ///
+    /// # Errors
+    ///
+    /// When the device is not built in.
+    pub fn builtin(device: &str) -> Result<DeviceDb> {
+        let d = crate::source::builtin(device)?;
+        let info = DeviceInfo {
+            family: d.family.to_owned(),
+            name: d.name.to_owned(),
+            idcode: d.idcode,
+            frames: d.frames as usize,
+            bits_per_frame: d.bits_per_frame as usize,
+            pad_bits_after_frame: d.pad_bits_after_frame as usize,
+            pad_bits_before_frame: d.pad_bits_before_frame as usize,
+            max_row: d.max_row as usize,
+            max_col: d.max_col as usize,
+        };
+        let mut tiles = BTreeMap::new();
+        let mut bits: BTreeMap<String, TileBits> = BTreeMap::new();
+        for t in d.tiles {
+            tiles.insert(
+                t.name.to_owned(),
+                TileInfo {
+                    name: t.name.to_owned(),
+                    ty: t.ty.name.to_owned(),
+                    start_frame: t.start_frame as usize,
+                    start_bit: t.start_bit as usize,
+                    frames: t.frames as usize,
+                    bits: t.bits as usize,
+                },
+            );
+            if !bits.contains_key(t.ty.name) {
+                bits.insert(t.ty.name.to_owned(), lit_tile_bits(t.ty));
+            }
+        }
+        Ok(DeviceDb { root: PathBuf::new(), info, tiles, bits })
+    }
+
     pub fn load(root: &Path, device: &str) -> Result<DeviceDb> {
         let info = device_info(root, device)?;
         let dev_dir = root.join(&info.family).join(&info.name);
@@ -199,6 +278,22 @@ fn device_info(root: &Path, device: &str) -> Result<DeviceInfo> {
         });
     }
     Err(err!("device {device} not in {}", path.display()))
+}
+
+/// The device with this IDCODE, by name, in `source`.
+///
+/// # Errors
+///
+/// When no device of the source has this IDCODE.
+pub fn device_for_idcode_in(source: &Source, idcode: u32) -> Result<String> {
+    match source {
+        Source::Text(root) => device_for_idcode(root, idcode),
+        Source::Builtin => oxibit_arch_ecp5::devices::ALL
+            .iter()
+            .find(|d| d.idcode == idcode)
+            .map(|d| d.name.to_owned())
+            .ok_or_else(|| err!("no built-in device with IDCODE 0x{idcode:08x}")),
+    }
 }
 
 /// The device with this IDCODE, by name.

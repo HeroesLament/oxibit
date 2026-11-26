@@ -42,6 +42,7 @@ pub mod pack;
 pub mod pads;
 pub mod route;
 pub mod sim;
+pub mod source;
 pub mod synth;
 pub mod unpack;
 
@@ -51,7 +52,8 @@ pub use chip::{BitMatrix, Chip, Level};
 pub use config::{ChipConfig, TileConfig};
 pub use db::{DeviceDb, DeviceInfo, TileBits, TileInfo};
 pub use graph::Graph;
-pub use unpack::{BitFile, deserialise, unpack};
+pub use source::Source;
+pub use unpack::{BitFile, deserialise, unpack, unpack_from};
 
 use std::fmt;
 

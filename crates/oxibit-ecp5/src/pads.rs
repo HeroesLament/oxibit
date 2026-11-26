@@ -20,7 +20,7 @@
 //! referenced input `DIFF_REF` and `VREF`, in every `BANKREF<n>` tile.
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
+use crate::source::Source;
 
 use crate::config::TileConfig;
 use crate::db::DeviceDb;
@@ -75,10 +75,8 @@ pub fn referenced(io: &str) -> bool {
 }
 
 /// Each PIO's bank (`iodb.json` `pio_metadata`).
-fn load_banks(root: &Path, device: &str) -> Result<HashMap<(i16, i16, char), u32>> {
-    let path = root.join("ECP5").join(device).join("iodb.json");
-    let text = std::fs::read_to_string(&path).map_err(|e| err!("{}: {e}", path.display()))?;
-    let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| err!("{}: {e}", path.display()))?;
+fn load_banks(root: &Source, device: &str) -> Result<HashMap<(i16, i16, char), u32>> {
+    let v = root.iodb(device)?;
     let mut out = HashMap::new();
     for p in v["pio_metadata"].as_array().ok_or(err!("iodb.json: pio_metadata"))? {
         let (Some(bank), Some(col), Some(row), Some(pio)) =
@@ -115,7 +113,7 @@ struct Bank {
 pub fn configure(
     g: &Graph,
     db: &DeviceDb,
-    root: &Path,
+    root: &Source,
     device: &str,
     pads: &[PadUse<'_>],
     tiles: &mut BTreeMap<String, TileConfig>,
@@ -287,10 +285,8 @@ pub fn configure(
 }
 
 /// Each bank's VREF1_<bank> pad (iodb.json `function`).
-fn load_vref(root: &Path, device: &str) -> Result<HashMap<u32, PioSite>> {
-    let path = root.join("ECP5").join(device).join("iodb.json");
-    let text = std::fs::read_to_string(&path).map_err(|e| err!("{}: {e}", path.display()))?;
-    let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| err!("{}: {e}", path.display()))?;
+fn load_vref(root: &Source, device: &str) -> Result<HashMap<u32, PioSite>> {
+    let v = root.iodb(device)?;
     let mut out = HashMap::new();
     for p in v["pio_metadata"].as_array().ok_or(err!("iodb.json: pio_metadata"))? {
         let Some(bank) = p["function"].as_str().and_then(|f| f.strip_prefix("VREF1_")).and_then(|b| b.parse::<u32>().ok())

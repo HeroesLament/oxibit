@@ -26,7 +26,7 @@
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
-use std::path::Path;
+use crate::source::Source;
 
 use crate::db::DeviceDb;
 use crate::graph::{Arc, Graph, NameId, Wire};
@@ -117,12 +117,8 @@ fn num(v: &serde_json::Value, k: &str) -> Result<i16> {
 
 impl ClockNetwork {
     /// From `<root>/ECP5/<device>/globals.json`.
-    pub fn load(root: &Path, device: &str) -> Result<ClockNetwork> {
-        let path = root.join("ECP5").join(device).join("globals.json");
-        let text =
-            std::fs::read_to_string(&path).map_err(|e| err!("{}: {e}", path.display()))?;
-        let v: serde_json::Value =
-            serde_json::from_str(&text).map_err(|e| err!("{}: {e}", path.display()))?;
+    pub fn load(root: &Source, device: &str) -> Result<ClockNetwork> {
+        let v = root.globals(device)?;
         let mut quadrants = BTreeMap::new();
         for (name, q) in v["quadrants"].as_object().ok_or(err!("globals.json: quadrants"))? {
             quadrants.insert(
@@ -157,7 +153,7 @@ impl ClockNetwork {
                 tap_col: col.parse().map_err(|_| err!("globals.json: spine {name}"))?,
             });
         }
-        let banks = load_banks(&root.join("ECP5").join(device).join("iodb.json"))?;
+        let banks = load_banks(&root.iodb(device)?)?;
         Ok(ClockNetwork {
             quadrants,
             taps,
@@ -520,10 +516,7 @@ fn fabric_wire(g: &Graph, w: Wire) -> bool {
 }
 
 /// The left / right I/O banks: column and PIC rows, from `iodb.json`.
-fn load_banks(path: &Path) -> Result<BTreeMap<u32, (i16, Vec<i16>)>> {
-    let text = std::fs::read_to_string(path).map_err(|e| err!("{}: {e}", path.display()))?;
-    let v: serde_json::Value =
-        serde_json::from_str(&text).map_err(|e| err!("{}: {e}", path.display()))?;
+fn load_banks(v: &serde_json::Value) -> Result<BTreeMap<u32, (i16, Vec<i16>)>> {
     let mut banks: BTreeMap<u32, (i16, Vec<i16>)> = BTreeMap::new();
     for p in v["pio_metadata"].as_array().ok_or(err!("iodb.json: pio_metadata"))? {
         let (Some(bank), Some(col), Some(row)) = (p["bank"].as_u64(), p["col"].as_i64(), p["row"].as_i64()) else {

@@ -34,11 +34,21 @@ The binary is `target/release/oxibit`. A zsh completion script comes from `oxibi
 
 | Variable | Used for | Default |
 |---|---|---|
-| `OXIBIT_TRELLIS_DB` | ECP5 database | `~/oss-cad-suite/share/trellis/database` |
+| `OXIBIT_CHIP_DATA` | ECP5 data source, `text` or `builtin` (same as `--chip-data`) | `text` |
+| `OXIBIT_TRELLIS_DB` | ECP5 Trellis text database | `~/oss-cad-suite/share/trellis/database` |
 | `OXIBIT_PRJOXIDE_DB` | CrossLink-NX database | `~/src/prjoxide/database` |
 | `OXIBIT_XRAY_DB` | 7-series prjxray family directory | none, or pass `--db-root` |
 | `OXIBIT_XC7_META` | 7-series metadata | none |
 | `OPENOCD` | OpenOCD binary | the copy under `~/oss-cad-suite` |
+
+### ECP5 chip data
+
+ECP5 can take its chip data from two places, chosen with `--chip-data text|builtin` or `OXIBIT_CHIP_DATA`:
+
+- `text` (default): the Project Trellis text database, read at run time from `OXIBIT_TRELLIS_DB`.
+- `builtin`: the same data compiled into oxibit as Rust (`oxibit-arch-ecp5`), so no database checkout is needed. Currently LFE5U-25F and LFE5U-85F only.
+
+Both produce byte-identical bitstreams; `crates/oxibit-ecp5/tests/builtin_source.rs` compares them field for field. The built-in data is generated from Trellis by `cargo run --release -p oxibit-arch-gen --example gen_ecp5 -- <trellis database> crates/oxibit-arch-ecp5` (add `--check` to verify it is current). CrossLink-NX and 7-series still read their databases at run time.
 
 ## Usage
 

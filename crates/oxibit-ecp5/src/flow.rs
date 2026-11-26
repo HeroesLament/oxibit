@@ -18,7 +18,7 @@
 //!    the clock trees' DCCs.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::path::Path;
+use crate::source::Source;
 
 use oxibit_place::placer::{GpOpts, Inst, InstKind, PNet, Pin, Problem, Site, place};
 
@@ -91,11 +91,8 @@ struct Pad {
 }
 
 /// `(row, col, pio)` of a package ball (`iodb.json`).
-pub fn ball_site(root: &Path, device: &str, package: &str, ball: &str) -> Result<PioSite> {
-    let path = root.join("ECP5").join(device).join("iodb.json");
-    let text = std::fs::read_to_string(&path).map_err(|e| err!("{}: {e}", path.display()))?;
-    let v: serde_json::Value =
-        serde_json::from_str(&text).map_err(|e| err!("{}: {e}", path.display()))?;
+pub fn ball_site(root: &Source, device: &str, package: &str, ball: &str) -> Result<PioSite> {
+    let v = root.iodb(device)?;
     let s = &v["packages"][package][ball];
     let num = |k: &str| {
         s[k].as_i64()
@@ -141,7 +138,7 @@ fn pin_wire(bels: &Bels, bel: BelId, pin: &str) -> Result<Wire> {
 
 /// Run the flow on Verilog `src` with preferences `lpf`.
 pub fn run(
-    root: &Path,
+    root: &Source,
     src: &str,
     lpf_text: &str,
     opts: &FlowOptions,
@@ -152,7 +149,7 @@ pub fn run(
 /// `run`, reporting its phases (synth, pack, device, place, route, config)
 /// and the router's passes to `progress`.
 pub fn run_with(
-    root: &Path,
+    root: &Source,
     src: &str,
     lpf_text: &str,
     opts: &FlowOptions,
@@ -214,7 +211,7 @@ pub fn run_with(
     lap("pack", &mut report, &mut t);
 
     // Device.
-    let db = DeviceDb::load(root, &opts.device)?;
+    let db = DeviceDb::load_from(root, &opts.device)?;
     let mut g = Graph::build(&db)?;
     let bels = Bels::build(&mut g, &db, SliceMode::Whole)?;
     let g = g;
@@ -932,7 +929,7 @@ fn init_word(init: u16) -> Vec<bool> {
 fn configure(
     g: &Graph,
     db: &DeviceDb,
-    root: &Path,
+    root: &Source,
     bels: &Bels,
     nl: &Netlist,
     packed: &Packed,

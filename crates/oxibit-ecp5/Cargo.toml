@@ -10,6 +10,8 @@ publish.workspace = true
 serde_json.workspace = true
 oxibit-hdl = { path = "../oxibit-hdl" }
 oxibit-synth = { path = "../oxibit-synth" }
+oxibit-arch = { path = "../oxibit-arch" }
+oxibit-arch-ecp5 = { path = "../oxibit-arch-ecp5" }
 oxibit-report.workspace = true
 oxibit-place.workspace = true
 

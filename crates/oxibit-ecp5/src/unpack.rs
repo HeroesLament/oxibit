@@ -614,10 +614,15 @@ impl ChipConfig {
 
 /// Read a `.bit` file into a configuration, finding the device by IDCODE.
 pub fn unpack(root: &Path, bytes: &[u8]) -> Result<ChipConfig> {
+    unpack_from(&crate::source::Source::text(root), bytes)
+}
+
+/// [`unpack`] against any chip database source.
+pub fn unpack_from(source: &crate::source::Source, bytes: &[u8]) -> Result<ChipConfig> {
     let file = BitFile::parse(bytes)?;
     let id = file.idcode()?;
-    let device = crate::db::device_for_idcode(root, id)?;
-    let db = DeviceDb::load(root, &device)?;
+    let device = crate::db::device_for_idcode_in(source, id)?;
+    let db = DeviceDb::load_from(source, &device)?;
     let chip = deserialise(&db, &file)?;
     ChipConfig::from_chip(&db, &chip)
 }

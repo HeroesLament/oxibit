@@ -426,6 +426,8 @@ dependencies = [
 name = "oxibit-ecp5"
 version = "0.2.0"
 dependencies = [
+ "oxibit-arch",
+ "oxibit-arch-ecp5",
  "oxibit-hdl",
  "oxibit-place",
  "oxibit-report",

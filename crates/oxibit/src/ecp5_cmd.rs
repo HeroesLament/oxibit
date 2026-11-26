@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use oxibit_ecp5::flow::{FlowOptions, run_with};
-use oxibit_ecp5::{Chip, DeviceDb, Options, serialise};
+use oxibit_ecp5::{Chip, DeviceDb, Options, Source, serialise};
 use oxibit_report::{Event, Progress, Reporter};
 
 use crate::input::Result;
@@ -49,6 +49,16 @@ jtag newtap ecp5 tap -irlen 8 -expected-id 0x41113043
 pld create ecp5.pld lattice -chain-position ecp5.tap
 ";
 
+/// Where the ECP5 chip data comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum ChipData {
+    /// Project Trellis text files (`$OXIBIT_TRELLIS_DB`, else the oss-cad-suite
+    /// copy). The default.
+    Text,
+    /// The data compiled into oxibit (`oxibit-arch-ecp5`); no external files.
+    Builtin,
+}
+
 fn trellis_db() -> PathBuf {
     if let Some(p) = std::env::var_os("OXIBIT_TRELLIS_DB") {
         return PathBuf::from(p);
@@ -57,7 +67,25 @@ fn trellis_db() -> PathBuf {
     home.join("oss-cad-suite/share/trellis/database")
 }
 
+/// The chip data source: `choice` (`--chip-data`), else `$OXIBIT_CHIP_DATA`
+/// (`text` or `builtin`), else the Trellis text files.
+fn chip_source(choice: Option<ChipData>) -> std::result::Result<Source, String> {
+    let choice = match choice {
+        Some(c) => c,
+        None => match std::env::var("OXIBIT_CHIP_DATA").ok().as_deref() {
+            None | Some("" | "text") => ChipData::Text,
+            Some("builtin") => ChipData::Builtin,
+            Some(other) => return Err(format!("OXIBIT_CHIP_DATA={other}: expected text or builtin")),
+        },
+    };
+    Ok(match choice {
+        ChipData::Text => Source::text(trellis_db()),
+        ChipData::Builtin => Source::Builtin,
+    })
+}
+
 pub struct BuildArgs {
+    pub chip_data: Option<ChipData>,
     pub input: PathBuf,
     pub lpf: Option<PathBuf>,
     pub device: Option<String>,
@@ -88,7 +116,7 @@ pub fn build(a: BuildArgs, rep: &ReportArgs) -> Result<ExitCode> {
     }
     opts.top = a.top;
 
-    let db = trellis_db();
+    let db = chip_source(a.chip_data)?;
     let t = std::time::Instant::now();
     // Deep designs recurse in elaboration and lowering; give them room.
     let work = {
@@ -100,7 +128,7 @@ pub fn build(a: BuildArgs, rep: &ReportArgs) -> Result<ExitCode> {
                 r.emit(Event::Warn { code: "synth".into(), msg: w.clone() });
             }
             r.begin("write");
-            let ddb = DeviceDb::load(&db, &opts.device).map_err(|e| e.to_string())?;
+            let ddb = DeviceDb::load_from(&db, &opts.device).map_err(|e| e.to_string())?;
             let chip = Chip::from_config(&ddb, &cc).map_err(|e| e.to_string())?;
             let over = Options { compress: true, ..Options::default() };
             let bits = serialise(&chip, &Options::from_sysconfig(&cc.sysconfig, &over)).map_err(|e| e.to_string())?;

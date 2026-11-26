@@ -40,6 +40,10 @@ struct Cli {
     command: Command,
     #[command(flatten)]
     report: report::ReportArgs,
+    /// ECP5 chip data: Project Trellis text files (default), or the data
+    /// built into oxibit. Also $OXIBIT_CHIP_DATA.
+    #[arg(long, global = true, value_enum, value_name = "SOURCE")]
+    chip_data: Option<ecp5_cmd::ChipData>,
 }
 
 #[derive(Subcommand)]
@@ -504,7 +508,7 @@ fn main() -> ExitCode {
                     xc7_cmd::build(xc7_cmd::BuildArgs { input, part, constraints, top, out, keep, db_root, meta, libs: lib, bins, timing }, &cli.report)
                 }
             } else {
-                ecp5_cmd::build(ecp5_cmd::BuildArgs { input, lpf: constraints, device: Some(part), package, top, out, load }, &cli.report)
+                ecp5_cmd::build(ecp5_cmd::BuildArgs { chip_data: cli.chip_data, input, lpf: constraints, device: Some(part), package, top, out, load }, &cli.report)
             }
         }
         Command::Pins { filter, board, constraints, json } => {

@@ -17,7 +17,7 @@
 //! reaches the DQSBUFMs over the `G_<corner>DDRDEL` globals.
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
+use crate::source::Source;
 
 use crate::bels::{BelId, Bels};
 use crate::config::TileConfig;
@@ -65,10 +65,8 @@ pub const TIE_ZERO: &[&str] = &[
 
 /// Each PIO's DQS group (`iodb.json` `dqs`: `RDQ17`, `RDQS17`, `RDQSN17`
 /// are all group `R17`) and whether it is the group's DQS pad.
-pub fn load_groups(root: &Path, device: &str) -> Result<HashMap<(i16, i16, char), (String, bool)>> {
-    let path = root.join("ECP5").join(device).join("iodb.json");
-    let text = std::fs::read_to_string(&path).map_err(|e| err!("{}: {e}", path.display()))?;
-    let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| err!("{}: {e}", path.display()))?;
+pub fn load_groups(root: &Source, device: &str) -> Result<HashMap<(i16, i16, char), (String, bool)>> {
+    let v = root.iodb(device)?;
     let mut out = HashMap::new();
     for p in v["pio_metadata"].as_array().ok_or(err!("iodb.json: pio_metadata"))? {
         let (Some(dqs), Some(col), Some(row), Some(pio)) = (
